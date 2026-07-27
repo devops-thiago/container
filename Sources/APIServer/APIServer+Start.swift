@@ -27,6 +27,7 @@ import DNSServer
 import Foundation
 import Logging
 import SystemPackage
+import ContainerVersion
 
 extension APIServer {
     struct Start: AsyncParsableCommand {
@@ -144,7 +145,7 @@ extension APIServer {
                 }
 
                 let server = XPCServer(
-                    identifier: "com.apple.container.apiserver",
+                    identifier: ServiceIdentity.apiServerService,
                     routes: routes.reduce(
                         into: [String: XPCServer.RouteHandler](),
                         {

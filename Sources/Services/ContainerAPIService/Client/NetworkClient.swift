@@ -20,6 +20,7 @@ import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOS
 import Foundation
+import ContainerVersion
 
 /// A client for managing virtual networks through the container API server.
 ///
@@ -38,7 +39,7 @@ public struct NetworkClient: Sendable {
     ///
     /// Pass a different value to ``init(serviceIdentifier:)`` to connect to an
     /// alternative service endpoint, for example during testing.
-    public static let defaultServiceIdentifier = "com.apple.container.apiserver"
+    public static let defaultServiceIdentifier = ServiceIdentity.apiServerService
 
     /// The name of the default network created automatically on first use.
     public static let defaultNetworkName = "default"

@@ -19,10 +19,11 @@ import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
 import Foundation
+import ContainerVersion
 
 /// A client for interacting with a single network.
 public struct NetworkClient: Sendable {
-    static let label = "com.apple.container.network"
+    static let label = ServiceIdentity.machPrefix + "network"
 
     public static func machServiceLabel(id: String, plugin: String) -> String {
         "\(Self.label).\(plugin).\(id)"

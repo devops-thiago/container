@@ -21,6 +21,7 @@ import ContainerXPC
 import ContainerizationError
 import Foundation
 import Logging
+import ContainerVersion
 
 private enum ShutdownContainerListState: Sendable {
     case pending
@@ -54,8 +55,8 @@ private actor ShutdownCompletionCounter {
 }
 
 public actor SystemShutdownService {
-    private static let apiServerLabel = "com.apple.container.apiserver"
-    private static let launchdLabelPrefix = "com.apple.container."
+    private static let apiServerLabel = ServiceIdentity.apiServerService
+    private static let launchdLabelPrefix = ServiceIdentity.machPrefix
     private static let stopTimeoutSeconds: Int32 = 5
     private static let shutdownTimeoutSeconds = 20
     private static let launchctlCommandTimeout: TimeInterval = 2

@@ -23,6 +23,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import TerminalProgress
+import ContainerVersion
 
 /// A protocol that defines the methods and data members available to a process
 /// started inside of a container.
@@ -43,7 +44,7 @@ public protocol ClientProcess: Sendable {
 }
 
 struct ClientProcessImpl: ClientProcess, Sendable {
-    static let serviceIdentifier = "com.apple.container.apiserver"
+    static let serviceIdentifier = ServiceIdentity.apiServerService
 
     /// ID of the process.
     public var id: String {
