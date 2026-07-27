@@ -185,6 +185,14 @@ extension APIServer {
                         }
                     }
 
+                    group.addTask {
+                        await ensureDefaultNetwork(
+                            service: networkService,
+                            containerSystemConfig: containerSystemConfig,
+                            log: log)
+                        return .success(())
+                    }
+
                     // start up host table DNS
                     group.addTask {
                         let hostsResolver = ContainerDNSHandler(networkService: networkService)
@@ -407,14 +415,8 @@ extension APIServer {
             log.info("initializing networks service")
 
             let resourceRoot = appRoot.appending(FilePath.Component("networks"))
-            let defaultNetworkConfig = try NetworkConfiguration(
-                name: NetworkClient.defaultNetworkName,
-                mode: .nat,
-                ipv4Subnet: containerSystemConfig.network.subnet,
-                ipv6Subnet: containerSystemConfig.network.subnetv6,
-                labels: try .init([ResourceLabelKeys.role: ResourceRoleValues.builtin]),
-                plugin: "container-network-vmnet"
-            )
+            let defaultNetworkConfig = try Self.defaultNetworkConfiguration(
+                containerSystemConfig: containerSystemConfig)
             let service = try await NetworksService(
                 pluginLoader: pluginLoader,
                 resourceRoot: resourceRoot,
@@ -424,13 +426,10 @@ extension APIServer {
                 debugHelpers: debug
             )
 
-            let defaultNetwork = try await service.list()
-                .filter { $0.isBuiltin }
-                .first
-            if defaultNetwork == nil {
-                // FIXME: default network should be configurable elsewhere
-                _ = try await service.create(configuration: defaultNetworkConfig)
-            }
+            // The default network is created after the XPC listener is up (see
+            // ensureDefaultNetwork). Creating it here would deadlock: creating
+            // a network spawns a helper that must announce its endpoint back to
+            // this process, which cannot answer until it is listening.
 
             let harness = NetworksHarness(service: service, log: log)
 
@@ -441,6 +440,41 @@ extension APIServer {
             routes[XPCRoute.networkDelete] = XPCServer.route(harness.delete)
 
             return service
+        }
+
+        /// The built-in network every container joins unless told otherwise.
+        static func defaultNetworkConfiguration(
+            containerSystemConfig: ContainerSystemConfig
+        ) throws -> NetworkConfiguration {
+            // FIXME: default network should be configurable elsewhere
+            try NetworkConfiguration(
+                name: NetworkClient.defaultNetworkName,
+                mode: .nat,
+                ipv4Subnet: containerSystemConfig.network.subnet,
+                ipv6Subnet: containerSystemConfig.network.subnetv6,
+                labels: try .init([ResourceLabelKeys.role: ResourceRoleValues.builtin]),
+                plugin: "container-network-vmnet"
+            )
+        }
+
+        /// Create the built-in network if it is missing. Must run only after the
+        /// XPC listener is accepting connections: the network helper announces
+        /// its endpoint back to this process as it starts.
+        private func ensureDefaultNetwork(
+            service: NetworksService,
+            containerSystemConfig: ContainerSystemConfig,
+            log: Logger
+        ) async {
+            do {
+                let existing = try await service.list().first { $0.isBuiltin }
+                guard existing == nil else { return }
+                log.info("creating default network")
+                _ = try await service.create(
+                    configuration: try Self.defaultNetworkConfiguration(
+                        containerSystemConfig: containerSystemConfig))
+            } catch {
+                log.error("failed to create default network: \(error)")
+            }
         }
 
         private func initializeVolumeService(
