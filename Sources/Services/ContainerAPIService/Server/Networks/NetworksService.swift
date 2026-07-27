@@ -39,6 +39,7 @@ public actor NetworksService {
     private let containersService: ContainersService
     private let log: Logger
     private let debugHelpers: Bool
+    private let defaultNetworkConfiguration: NetworkConfiguration
 
     private let store: FilesystemEntityStore<NetworkConfiguration>
     private let networkPlugins: [Plugin]
@@ -77,7 +78,18 @@ public actor NetworksService {
         }
         self.networkPlugins = networkPlugins
 
-        let configurations = try await store.list()
+        self.defaultNetworkConfiguration = defaultNetworkConfiguration
+    }
+
+    /// Start every network already in the store, and create the built-in one if
+    /// it is missing.
+    ///
+    /// Deliberately not part of `init`: starting a network spawns a helper that
+    /// announces its endpoint back to the apiserver, so this cannot run until
+    /// the apiserver's XPC listener is accepting connections. Called from
+    /// APIServer.Start once the listener is up.
+    public func startPersistedNetworks() async {
+        let configurations = (try? await store.list()) ?? []
         for configuration in configurations {
             var effectiveConfiguration = configuration
 
@@ -86,7 +98,7 @@ public actor NetworksService {
             // have the correct default values configured.
             if effectiveConfiguration.id == NetworkClient.defaultNetworkName {
                 effectiveConfiguration = defaultNetworkConfiguration
-                try await store.update(effectiveConfiguration)
+                try? await store.update(effectiveConfiguration)
             }
 
             // Start up the network.
@@ -103,6 +115,7 @@ public actor NetworksService {
                     status: networkStatus,
                     client: client
                 )
+                log.info("started network", metadata: ["id": "\(effectiveConfiguration.id)"])
             } catch {
                 log.error(
                     "failed to start network",
@@ -111,6 +124,14 @@ public actor NetworksService {
                         "error": "\(error)",
                     ])
             }
+        }
+
+        guard serviceStates[defaultNetworkConfiguration.id] == nil else { return }
+        do {
+            log.info("creating default network")
+            _ = try await create(configuration: defaultNetworkConfiguration)
+        } catch {
+            log.error("failed to create default network: \(error)")
         }
     }
 
@@ -182,9 +203,15 @@ public actor NetworksService {
             let entry = NetworkEntry(configuration: finalConfiguration, status: networkStatus, client: client)
             await self.setServiceState(key: finalConfiguration.id, value: entry)
 
-            // Persist the configuration data.
+            // Persist the configuration data. An entity left in the store by a
+            // previous run is adopted rather than treated as a conflict: live
+            // state is what `serviceStates` says, and it was checked above.
             do {
-                try await self.store.create(finalConfiguration)
+                do {
+                    try await self.store.create(finalConfiguration)
+                } catch {
+                    try await self.store.update(finalConfiguration)
+                }
                 return NetworkResource(configuration: finalConfiguration, status: networkStatus)
             } catch {
                 await self.removeServiceState(key: finalConfiguration.id)

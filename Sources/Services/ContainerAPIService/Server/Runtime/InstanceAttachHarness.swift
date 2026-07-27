@@ -47,4 +47,19 @@ public struct InstanceAttachHarness: Sendable {
         InstanceEndpoints.attach(label: id, endpoint: endpoint)
         return message.reply()
     }
+
+    /// Hand a recorded endpoint back to a helper that needs to dial another
+    /// instance (see InstanceAttach.resolve).
+    public func resolve(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: "id") else {
+            throw ContainerizationError(.invalidArgument, message: "instance resolve: missing id")
+        }
+        let reply = message.reply()
+        guard let endpoint = InstanceEndpoints.endpoint(label: id) else {
+            log.error("instance resolve: no endpoint recorded", metadata: ["id": "\(id)"])
+            return reply
+        }
+        reply.set(key: "endpoint", value: endpoint)
+        return reply
+    }
 }
