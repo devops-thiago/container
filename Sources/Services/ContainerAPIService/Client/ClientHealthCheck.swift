@@ -32,6 +32,20 @@ extension ClientHealthCheck {
         let client = Self.newClient()
         let request = XPCMessage(route: .ping)
         let reply = try await client.send(request, responseTimeout: timeout)
+        return try decode(reply)
+    }
+
+    /// Ping over an existing persistent session without creating another connection.
+    public static func ping(
+        session: XPCClientSession,
+        timeout: Duration? = XPCClient.xpcRegistrationTimeout
+    ) async throws -> SystemHealth {
+        let request = XPCMessage(route: .ping)
+        let reply = try await session.send(request, responseTimeout: timeout)
+        return try decode(reply)
+    }
+
+    private static func decode(_ reply: XPCMessage) throws -> SystemHealth {
         guard let appRootValue = reply.string(key: .appRoot), let appRoot = URL(string: appRootValue) else {
             throw ContainerizationError(.internalError, message: "failed to decode appRoot in health check")
         }
@@ -58,7 +72,10 @@ extension ClientHealthCheck {
             apiServerVersion: apiServerVersion,
             apiServerCommit: apiServerCommit,
             apiServerBuild: apiServerBuild,
-            apiServerAppName: apiServerAppName
+            apiServerAppName: apiServerAppName,
+            lifecycleProtocolVersion: reply.uint64IfPresent(key: .lifecycleProtocolVersion),
+            lifecycleGeneration: reply.string(key: .lifecycleGeneration),
+            processNonce: reply.string(key: .processNonce)
         )
     }
 }
