@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerXPC
 import ContainerizationOS
 import Darwin
 import Foundation
@@ -363,6 +364,15 @@ extension PluginLoader {
             env["CONTAINER_ATTACH_SERVICE"] = ServiceIdentity.apiServerService
             let argv = [plugin.binaryURL.path] + processedArgs + serviceConfig.defaultArguments
             try Self.spawnInstance(label: id, instanceId: instanceId, argv: argv, env: env, log: log)
+            // Clients dial the instance as soon as this returns, so the child
+            // must have announced its endpoint by then.
+            if let machService = plugin.getMachServices(instanceId: instanceId).first {
+                if !InstanceEndpoints.waitForAttach(label: machService, timeout: 30) {
+                    log?.error(
+                        "runtime instance did not announce its endpoint",
+                        metadata: ["service": "\(machService)"])
+                }
+            }
             return
         }
 
