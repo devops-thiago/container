@@ -50,6 +50,13 @@ public enum ServiceIdentity {
     public static let appGroup: String? =
         resolve(infoKey: "ContainerAppGroup", envKey: "CONTAINER_APP_GROUP")
 
+    /// Whether this build is running inside an embedder rather than as a
+    /// standalone `container` install. True when either identity key was
+    /// supplied, which only an embedder does.
+    public static var isEmbedded: Bool {
+        appGroup != nil || machPrefix != "com.apple.container."
+    }
+
     /// The apiserver's launchd label and mach service name.
     public static var apiServerService: String { machPrefix + "apiserver" }
 
