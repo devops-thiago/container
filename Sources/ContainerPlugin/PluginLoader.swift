@@ -363,14 +363,31 @@ extension PluginLoader {
             }
             env["CONTAINER_ATTACH_SERVICE"] = ServiceIdentity.apiServerService
             let argv = [plugin.binaryURL.path] + processedArgs + serviceConfig.defaultArguments
+            // Evict any endpoint a previous instance (possibly an orphan of a
+            // crashed apiserver) left under this label: the wait below must be
+            // satisfied only by the child spawned here, or clients get handed
+            // a dead endpoint and fail with 'Connection invalid'.
+            let machServices = plugin.getMachServices(instanceId: instanceId)
+            for service in machServices {
+                InstanceEndpoints.remove(label: service)
+            }
             try Self.spawnInstance(label: id, instanceId: instanceId, argv: argv, env: env, log: log)
             // Clients dial the instance as soon as this returns, so the child
             // must have announced its endpoint by then.
-            if let machService = plugin.getMachServices(instanceId: instanceId).first {
-                if !InstanceEndpoints.waitForAttach(label: machService, timeout: 30) {
+            let waitStart = ContinuousClock.now
+            for service in machServices {
+                let attached = InstanceEndpoints.waitForAttach(label: service, timeout: 30)
+                log?.info(
+                    "instance announce wait",
+                    metadata: [
+                        "service": "\(service)",
+                        "attached": "\(attached)",
+                        "elapsed": "\(waitStart.duration(to: ContinuousClock.now))",
+                    ])
+                if !attached {
                     log?.error(
                         "runtime instance did not announce its endpoint",
-                        metadata: ["service": "\(machService)"])
+                        metadata: ["service": "\(service)"])
                 }
             }
             return
