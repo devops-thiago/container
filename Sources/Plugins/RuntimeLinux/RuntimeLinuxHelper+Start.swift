@@ -24,11 +24,12 @@ import ContainerXPC
 import Foundation
 import Logging
 import NIO
+import ContainerVersion
 import SystemPackage
 
 extension RuntimeLinuxHelper {
     struct Start: AsyncParsableCommand {
-        static let label = "com.apple.container.runtime.container-runtime-linux"
+        static let label = ServiceIdentity.machPrefix + "runtime.container-runtime-linux"
 
         static let configuration = CommandConfiguration(
             commandName: "start",
