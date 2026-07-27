@@ -99,7 +99,8 @@ extension NetworkVmnetHelper {
                 try await network.start()
                 let service = try await DefaultNetworkService(network: network, log: log)
                 let harness = NetworkHarness(service: service)
-                let xpc = XPCServer(
+                log.info("starting XPC server")
+                try await InstanceAttach.serve(
                     identifier: serviceIdentifier,
                     routes: [
                         NetworkRoutes.status.rawValue: XPCServer.route(harness.status),
@@ -108,9 +109,6 @@ extension NetworkVmnetHelper {
                     ],
                     log: log
                 )
-
-                log.info("starting XPC server")
-                try await xpc.listen()
             } catch {
                 log.error(
                     "helper failed",

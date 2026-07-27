@@ -83,32 +83,19 @@ extension RuntimeLinuxHelper {
                     log: log
                 )
 
-                // Sandboxed embedding: the instance was posix_spawned (no
-                // launchd mach name). Post the anonymous listener's endpoint
-                // back to the apiserver's registry instead of vending a
-                // createEndpoint mach service. The dial succeeds because this
-                // process inherits its spawner's sandbox.
-                let attachService = ProcessInfo.processInfo.environment["CONTAINER_ATTACH_SERVICE"]
-                var endpointServer: XPCServer?
-                if let attachService {
-                    log.info("attaching to broker", metadata: ["service": "\(attachService)"])
-                    let broker = XPCClient(service: attachService)
-                    // Literal route string: XPCRoute lives in ContainerAPIClient,
-                    // which this helper deliberately does not link.
-                    let attach = XPCMessage(route: "runtimeAttach")
-                    attach.set(key: "id", value: uuid)
-                    attach.set(key: "endpoint", value: xpc_endpoint_create(anonymousConnection))
-                    attach.set(key: "pid", value: Int64(getpid()))
-                    _ = try await broker.send(attach, responseTimeout: .seconds(30))
-                } else {
-                    endpointServer = XPCServer(
+                // Unsandboxed: clients dial `machServiceLabel` and ask for an
+                // endpoint. Sandboxed: this process was posix_spawned and can
+                // own no launchd name, so the endpoint goes to the broker
+                // instead (InstanceAttach handles both).
+                let endpointServer: XPCServer? =
+                    InstanceAttach.brokerService == nil
+                    ? XPCServer(
                         identifier: machServiceLabel,
                         routes: [
                             RuntimeRoutes.createEndpoint.rawValue: XPCServer.route(server.createEndpoint)
                         ],
-                        log: log
-                    )
-                }
+                        log: log)
+                    : nil
 
                 let mainServer = XPCServer(
                     connection: anonymousConnection,
@@ -132,6 +119,10 @@ extension RuntimeLinuxHelper {
                 )
 
                 log.info("starting XPC server")
+                // Sandboxed: hand the main connection's endpoint to the broker,
+                // since clients cannot reach a createEndpoint mach service here.
+                try await InstanceAttach.announce(
+                    identifier: machServiceLabel, connection: anonymousConnection, log: log)
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     if let endpointServer {
                         group.addTask {

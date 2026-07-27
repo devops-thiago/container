@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import Foundation
 import SystemPackage
 
@@ -28,9 +29,26 @@ public struct LogRoot {
     /// When non-nil, the path is always lexically normalized.
     /// If the environment variable is set to an absolute path, that path is used directly.
     /// If it is set to a relative path, the path is resolved against the working directory.
-    public static let path = FilePath(FileManager.default.currentDirectoryPath).resolve(
-        ProcessInfo.processInfo.environment[environmentName]
-    )
+    ///
+    /// Under sandboxed embedding, file logs default into the group container:
+    /// launchd agents have no stdio, and the app needs somewhere it can read
+    /// engine diagnostics from.
+    public static let path: FilePath? = {
+        if let resolved = FilePath(FileManager.default.currentDirectoryPath).resolve(
+            ProcessInfo.processInfo.environment[environmentName])
+        {
+            return resolved
+        }
+        if let group = ServiceIdentity.appGroup,
+            let url = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: group)
+        {
+            return FilePath(url.path(percentEncoded: false))
+                .appending(FilePath.Component("Library"))
+                .appending(FilePath.Component("Logs"))
+        }
+        return nil
+    }()
 
     /// The pathname to the root directory
     public static let pathname = path?.string
