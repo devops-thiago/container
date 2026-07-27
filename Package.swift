@@ -505,6 +505,7 @@ let package = Package(
         .target(
             name: "ContainerPlugin",
             dependencies: [
+                "ContainerXPC",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "SystemPackage", package: "swift-system"),
