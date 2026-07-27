@@ -187,6 +187,12 @@ public actor RuntimeService {
             do {
                 for (index, info) in networkBootstrapInfos.enumerated() {
                     let attachmentConfig = config.networks[index]
+                    // Spawned instances own no mach name; ask the broker for the
+                    // network helper's endpoint before dialing it.
+                    await InstanceAttach.resolve(
+                        identifier: ContainerNetworkClient.NetworkClient.machServiceLabel(
+                            id: attachmentConfig.network, plugin: info.plugin),
+                        log: self.log)
                     let client = ContainerNetworkClient.NetworkClient(id: attachmentConfig.network, plugin: info.plugin)
                     let session = client.connect()
                     sessions.append(session)
