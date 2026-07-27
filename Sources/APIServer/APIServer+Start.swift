@@ -84,7 +84,7 @@ extension APIServer {
                 let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
                 sigterm.setEventHandler {
                     PluginLoader.terminateAllInstances()
-                    exit(0)
+                    Darwin.exit(0)
                 }
                 sigterm.activate()
 
@@ -95,20 +95,17 @@ extension APIServer {
 
                 let pluginsService = try await initializePlugins(pluginLoader: pluginLoader, log: log, routes: &routes, debug: debug)
 
-                // Sandboxed embedding: broker endpoints for spawned runtime
-                // instances (they dial us back on runtimeAttach).
-                var runtimeRegistry: RuntimeInstanceRegistry?
+                // Sandboxed embedding: spawned plugin instances announce their
+                // anonymous endpoints here (InstanceAttach), since they can own
+                // no launchd mach name.
                 if ServiceIdentity.appGroup != nil {
-                    let registry = RuntimeInstanceRegistry()
-                    let attachHarness = RuntimeAttachHarness(registry: registry, log: log)
+                    let attachHarness = InstanceAttachHarness(log: log)
                     routes[XPCRoute.runtimeAttach] = XPCServer.route(attachHarness.attach)
-                    runtimeRegistry = registry
                 }
 
                 let containersService = try initializeContainersService(
                     pluginLoader: pluginLoader,
                     containerSystemConfig: containerSystemConfig,
-                    runtimeRegistry: runtimeRegistry,
                     log: log,
                     routes: &routes
                 )
@@ -363,7 +360,6 @@ extension APIServer {
         private func initializeContainersService(
             pluginLoader: PluginLoader,
             containerSystemConfig: ContainerSystemConfig,
-            runtimeRegistry: RuntimeInstanceRegistry?,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
         ) throws -> ContainersService {
@@ -376,8 +372,7 @@ extension APIServer {
                 pluginLoader: pluginLoader,
                 containerSystemConfig: containerSystemConfig,
                 log: log,
-                debugHelpers: debug,
-                runtimeRegistry: runtimeRegistry
+                debugHelpers: debug
             )
             let harness = ContainersHarness(service: service, log: log)
 

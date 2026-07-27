@@ -97,7 +97,12 @@ extension NetworkClient {
     }
 
     private func createClient() -> XPCClient {
-        XPCClient(service: machServiceLabel)
+        // Sandboxed embedding: spawned instances own no mach name; the
+        // apiserver brokers their endpoints under that same name.
+        if let endpoint = InstanceEndpoints.endpoint(label: machServiceLabel) {
+            return XPCClient(endpoint: endpoint, label: machServiceLabel)
+        }
+        return XPCClient(service: machServiceLabel)
     }
 }
 
