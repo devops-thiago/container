@@ -22,10 +22,11 @@ import ContainerizationError
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
+import ContainerVersion
 
 /// A client for interacting with the container machine API server.
 public struct MachineClient: Sendable {
-    public static let serviceIdentifier = "com.apple.container.core.machine-apiserver"
+    public static let serviceIdentifier = ServiceIdentity.machPrefix + "core.machine-apiserver"
 
     public static func machineConfigFromFlags(
         id: String,
