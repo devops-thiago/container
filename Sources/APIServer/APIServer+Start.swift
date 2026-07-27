@@ -81,9 +81,21 @@ extension APIServer {
                 let pluginLoader = try initializePluginLoader(log: log)
 
                 let pluginsService = try await initializePlugins(pluginLoader: pluginLoader, log: log, routes: &routes, debug: debug)
+
+                // Sandboxed embedding: broker endpoints for spawned runtime
+                // instances (they dial us back on runtimeAttach).
+                var runtimeRegistry: RuntimeInstanceRegistry?
+                if ServiceIdentity.appGroup != nil {
+                    let registry = RuntimeInstanceRegistry()
+                    let attachHarness = RuntimeAttachHarness(registry: registry, log: log)
+                    routes[XPCRoute.runtimeAttach] = XPCServer.route(attachHarness.attach)
+                    runtimeRegistry = registry
+                }
+
                 let containersService = try initializeContainersService(
                     pluginLoader: pluginLoader,
                     containerSystemConfig: containerSystemConfig,
+                    runtimeRegistry: runtimeRegistry,
                     log: log,
                     routes: &routes
                 )
@@ -338,6 +350,7 @@ extension APIServer {
         private func initializeContainersService(
             pluginLoader: PluginLoader,
             containerSystemConfig: ContainerSystemConfig,
+            runtimeRegistry: RuntimeInstanceRegistry?,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
         ) throws -> ContainersService {
@@ -350,7 +363,8 @@ extension APIServer {
                 pluginLoader: pluginLoader,
                 containerSystemConfig: containerSystemConfig,
                 log: log,
-                debugHelpers: debug
+                debugHelpers: debug,
+                runtimeRegistry: runtimeRegistry
             )
             let harness = ContainersHarness(service: service, log: log)
 
