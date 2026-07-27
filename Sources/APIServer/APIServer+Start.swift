@@ -88,6 +88,12 @@ extension APIServer {
                 }
                 sigterm.activate()
 
+                // A previous apiserver may have died without reaping its
+                // helpers; they would otherwise hold vmnet networks and VMs
+                // forever.
+                PluginLoader.reapOrphanedInstances(
+                    installRoot: URL(fileURLWithPath: installRoot.string), log: log)
+
                 log.info("configuring XPC server")
                 var routes = [XPCRoute: XPCServer.RouteHandler]()
                 let processNonce = UUID().uuidString
