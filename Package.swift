@@ -334,6 +334,7 @@ let package = Package(
         .target(
             name: "ContainerImagesServiceClient",
             dependencies: [
+                "ContainerVersion",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerXPC",
@@ -632,6 +633,7 @@ let package = Package(
         .target(
             name: "MachineAPIClient",
             dependencies: [
+                "ContainerVersion",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
