@@ -59,6 +59,10 @@ public actor ContainersService {
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
 
+    /// Endpoint broker for spawned runtime instances; non-nil under sandboxed
+    /// embedding (ServiceIdentity.appGroup set).
+    private let runtimeRegistry: RuntimeInstanceRegistry?
+
     // FIXME: Find a better mechanism for services running on the APIServer to work with each other
     private weak var networksService: NetworksService?
 
@@ -67,7 +71,8 @@ public actor ContainersService {
         pluginLoader: PluginLoader,
         containerSystemConfig: ContainerSystemConfig,
         log: Logger,
-        debugHelpers: Bool = false
+        debugHelpers: Bool = false,
+        runtimeRegistry: RuntimeInstanceRegistry? = nil
     ) throws {
         let containerRoot = appRoot.appendingPathComponent("containers")
         try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)
@@ -78,6 +83,7 @@ public actor ContainersService {
         self.containerSystemConfig = containerSystemConfig
         self.log = log
         self.debugHelpers = debugHelpers
+        self.runtimeRegistry = runtimeRegistry
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
     }
@@ -435,10 +441,19 @@ public actor ContainersService {
                 )
 
                 let runtime = state.snapshot.configuration.runtimeHandler
-                let runtimeClient = try await RuntimeClient.create(
-                    id: id,
-                    runtime: runtime
-                )
+                let runtimeClient: RuntimeClient
+                if let registry = self.runtimeRegistry {
+                    // Sandboxed embedding: the instance was spawned by
+                    // registerService above and posts its endpoint to the
+                    // broker; wait for it instead of dialing a mach name.
+                    let endpoint = try await registry.endpoint(id: id, timeout: .seconds(60))
+                    runtimeClient = RuntimeClient.create(id: id, runtime: runtime, endpoint: endpoint.raw)
+                } else {
+                    runtimeClient = try await RuntimeClient.create(
+                        id: id,
+                        runtime: runtime
+                    )
+                }
                 try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
 
                 try await self.exitMonitor.registerProcess(
