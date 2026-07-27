@@ -101,6 +101,7 @@ extension APIServer {
                 if ServiceIdentity.appGroup != nil {
                     let attachHarness = InstanceAttachHarness(log: log)
                     routes[XPCRoute.runtimeAttach] = XPCServer.route(attachHarness.attach)
+                    routes[XPCRoute.runtimeResolve] = XPCServer.route(attachHarness.resolve)
                 }
 
                 let containersService = try initializeContainersService(
@@ -186,10 +187,9 @@ extension APIServer {
                     }
 
                     group.addTask {
-                        await ensureDefaultNetwork(
-                            service: networkService,
-                            containerSystemConfig: containerSystemConfig,
-                            log: log)
+                        // Networks spawn helpers that announce back to us, so
+                        // they can only start once the listener above is up.
+                        await networkService.startPersistedNetworks()
                         return .success(())
                     }
 
@@ -455,26 +455,6 @@ extension APIServer {
                 labels: try .init([ResourceLabelKeys.role: ResourceRoleValues.builtin]),
                 plugin: "container-network-vmnet"
             )
-        }
-
-        /// Create the built-in network if it is missing. Must run only after the
-        /// XPC listener is accepting connections: the network helper announces
-        /// its endpoint back to this process as it starts.
-        private func ensureDefaultNetwork(
-            service: NetworksService,
-            containerSystemConfig: ContainerSystemConfig,
-            log: Logger
-        ) async {
-            do {
-                let existing = try await service.list().first { $0.isBuiltin }
-                guard existing == nil else { return }
-                log.info("creating default network")
-                _ = try await service.create(
-                    configuration: try Self.defaultNetworkConfiguration(
-                        containerSystemConfig: containerSystemConfig))
-            } catch {
-                log.error("failed to create default network: \(error)")
-            }
         }
 
         private func initializeVolumeService(

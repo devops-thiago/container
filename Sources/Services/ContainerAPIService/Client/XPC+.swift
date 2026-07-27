@@ -199,6 +199,8 @@ public enum XPCRoute: String {
     /// Spawned runtime instances post their anonymous listener endpoint here
     /// (sandboxed embedding; see RuntimeInstanceRegistry).
     case runtimeAttach
+    /// Hands a recorded instance endpoint back to a helper that must dial it.
+    case runtimeResolve
 
     case installKernel
     case getDefaultKernel
