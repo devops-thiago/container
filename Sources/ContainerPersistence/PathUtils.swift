@@ -27,6 +27,13 @@ public enum PathUtils {
         public func basePath(env: [String: String] = ProcessInfo.processInfo.environment) -> FilePath {
             switch self {
             case .home:
+                // When an app group is configured (sandboxed embedding), the
+                // group container is the only place every engine process —
+                // app, agents, spawned runtimes, and the Terminal-run CLI —
+                // can all read and write, so config lives there too.
+                if let group = Self.groupContainer() {
+                    return group.appending("Library/Application Support/config")
+                }
                 let configHome: String
                 if let xdg = env["XDG_CONFIG_HOME"], !xdg.isEmpty {
                     configHome = xdg
@@ -37,6 +44,9 @@ public enum PathUtils {
             case .appRoot:
                 if let envPath = env["CONTAINER_APP_ROOT"], !envPath.isEmpty {
                     return FilePath(envPath)
+                }
+                if let group = Self.groupContainer() {
+                    return group.appending("Library/Application Support/engine")
                 }
                 let appSupportURL = FileManager.default.urls(
                     for: .applicationSupportDirectory,
@@ -56,6 +66,21 @@ public enum PathUtils {
                     .removingLastComponent()
                 return installRootPath
             }
+        }
+
+        /// The group container root when the engine is configured with an app
+        /// group (see ``ServiceIdentity/appGroup``), else `nil`.
+        ///
+        /// `containerURL(forSecurityApplicationGroupIdentifier:)` is
+        /// deterministic (`~/Library/Group Containers/<group>`) and creates
+        /// the directory on first use for entitled processes.
+        static func groupContainer() -> FilePath? {
+            guard let group = ServiceIdentity.appGroup else { return nil }
+            guard
+                let url = FileManager.default.containerURL(
+                    forSecurityApplicationGroupIdentifier: group)
+            else { return nil }
+            return FilePath(url.path(percentEncoded: false))
         }
     }
 }

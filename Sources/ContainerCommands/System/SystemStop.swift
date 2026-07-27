@@ -25,13 +25,14 @@ import ContainerizationOS
 import Darwin
 import Foundation
 import Logging
+import ContainerVersion
 
 extension Application {
     public struct SystemStop: AsyncLoggableCommand {
         private static let stopTimeoutSeconds: Int32 = 5
         private static let shutdownTimeoutSeconds: Int32 = 20
         private static let launchctlCommandTimeout: TimeInterval = 2
-        private static let apiServerService = "com.apple.container.apiserver"
+        private static let apiServerService = ServiceIdentity.apiServerService
         private static let ownershipTokenEnvironmentName = "CONTAINER_SILICONSHIP_OWNERSHIP_TOKEN"
 
         public static let configuration = CommandConfiguration(
@@ -40,7 +41,7 @@ extension Application {
         )
 
         @Option(name: .shortAndLong, help: "Launchd prefix for services")
-        var prefix: String = "com.apple.container."
+        var prefix: String = ServiceIdentity.machPrefix
 
         @Option(name: .long, help: "Expected API-server PID")
         var expectedPID: Int32?
@@ -98,7 +99,7 @@ extension Application {
 
         public func run() async throws {
             let log = Logger(
-                label: "com.apple.container.cli",
+                label: ServiceIdentity.machPrefix + "cli",
                 factory: { label in
                     StreamLogHandler.standardOutput(label: label)
                 }

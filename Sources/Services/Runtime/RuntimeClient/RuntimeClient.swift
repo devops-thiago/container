@@ -22,10 +22,11 @@ import ContainerizationError
 import ContainerizationOS
 import Foundation
 import TerminalProgress
+import ContainerVersion
 
 /// A client for interacting with a container runtime service instance.
 public struct RuntimeClient: Sendable {
-    static let label = "com.apple.container.runtime"
+    static let label = ServiceIdentity.machPrefix + "runtime"
 
     public static func machServiceLabel(runtime: String, id: String) -> String {
         "\(Self.label).\(runtime).\(id)"

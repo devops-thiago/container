@@ -17,10 +17,11 @@
 import ContainerXPC
 import ContainerizationError
 import Foundation
+import ContainerVersion
 
 /// Client API for disk usage operations
 public struct ClientDiskUsage {
-    static let serviceIdentifier = "com.apple.container.apiserver"
+    static let serviceIdentifier = ServiceIdentity.apiServerService
 
     /// Get disk usage statistics for all resource types
     public static func get() async throws -> DiskUsageStats {
