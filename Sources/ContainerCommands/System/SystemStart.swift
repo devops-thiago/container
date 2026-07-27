@@ -24,6 +24,7 @@ import Foundation
 import MachineAPIClient
 import SystemPackage
 import TerminalProgress
+import ContainerVersion
 
 extension Application {
     public struct SystemStart: AsyncLoggableCommand {
@@ -135,7 +136,7 @@ extension Application {
                 env.removeValue(forKey: PluginLoader.lifecycleGenerationEnvironmentName)
             }
             let apiServerLabel = PluginLoader.generationQualifiedLabel(
-                "com.apple.container.apiserver",
+                ServiceIdentity.apiServerService,
                 lifecycleGeneration: lifecycleGeneration
             )
             let plist = LaunchPlist(
@@ -144,7 +145,7 @@ extension Application {
                 environment: env,
                 limitLoadToSessionType: [.Aqua, .Background, .System],
                 runAtLoad: true,
-                machServices: ["com.apple.container.apiserver"]
+                machServices: [ServiceIdentity.apiServerService]
             )
 
             let plistFilename = lifecycleGeneration.map { "apiserver.\($0).plist" } ?? "apiserver.plist"

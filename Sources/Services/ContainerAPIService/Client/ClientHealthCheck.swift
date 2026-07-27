@@ -18,9 +18,10 @@ import ContainerXPC
 import ContainerizationError
 import Foundation
 import SystemPackage
+import ContainerVersion
 
 public enum ClientHealthCheck {
-    static let serviceIdentifier = "com.apple.container.apiserver"
+    static let serviceIdentifier = ServiceIdentity.apiServerService
 }
 
 extension ClientHealthCheck {

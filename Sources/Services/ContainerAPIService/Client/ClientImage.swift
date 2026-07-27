@@ -24,6 +24,7 @@ import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
+import ContainerVersion
 
 // MARK: ClientImage structure
 
@@ -94,7 +95,7 @@ public struct ClientImage: Sendable {
 // MARK: ClientImage constants
 
 extension ClientImage {
-    private static let serviceIdentifier = "com.apple.container.core.container-core-images"
+    private static let serviceIdentifier = ServiceIdentity.machPrefix + "core.container-core-images"
 
     private static func newXPCClient() -> XPCClient {
         XPCClient(service: Self.serviceIdentifier)

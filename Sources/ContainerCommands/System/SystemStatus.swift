@@ -20,6 +20,7 @@ import ContainerPlugin
 import ContainerizationError
 import Foundation
 import Logging
+import ContainerVersion
 
 extension Application {
     public struct SystemStatus: AsyncLoggableCommand {
@@ -29,7 +30,7 @@ extension Application {
         )
 
         @Option(name: .shortAndLong, help: "Launchd prefix for services")
-        var prefix: String = "com.apple.container."
+        var prefix: String = ServiceIdentity.machPrefix
 
         @Option(name: .long, help: "Format of the output")
         var format: ListFormat = .table

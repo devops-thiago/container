@@ -19,11 +19,12 @@ import Darwin
 import Foundation
 import Logging
 import SystemPackage
+import ContainerVersion
 
 public struct PluginLoader: Sendable {
     public static let lifecycleGenerationEnvironmentName = "CONTAINER_LIFECYCLE_GENERATION"
 
-    private static let launchdLabelPrefix = "com.apple.container."
+    private static let launchdLabelPrefix = ServiceIdentity.machPrefix
 
     private let appRoot: URL
 
