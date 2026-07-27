@@ -50,6 +50,11 @@ public struct RuntimeClient: Sendable {
     /// without additional steps.
     public static func create(id: String, runtime: String, timeout: Duration = XPCClient.xpcRegistrationTimeout) async throws -> RuntimeClient {
         let label = Self.machServiceLabel(runtime: runtime, id: id)
+        // Sandboxed embedding: the spawned instance announced its endpoint to
+        // the apiserver's broker rather than owning `label` as a mach service.
+        if let brokered = await InstanceEndpoints.endpoint(label: label, timeout: .seconds(60)) {
+            return RuntimeClient(id: id, runtime: runtime, client: XPCClient(endpoint: brokered, label: label))
+        }
         let client = XPCClient(service: label)
         let request = XPCMessage(route: RuntimeRoutes.createEndpoint.rawValue)
 
