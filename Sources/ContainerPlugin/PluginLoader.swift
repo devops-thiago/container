@@ -500,6 +500,40 @@ extension PluginLoader {
         process.terminate()
     }
 
+    /// Kill helper processes left behind by a previous apiserver.
+    ///
+    /// Spawned instances are ordinary children, so they outlive an apiserver
+    /// that crashed or was killed rather than asked to stop. Their endpoints are
+    /// already evicted on respawn, but the processes themselves would linger —
+    /// holding vmnet networks and VMs — until the machine reboots. Only
+    /// processes running out of `installRoot` are touched, so a separately
+    /// installed container engine is never disturbed.
+    public static func reapOrphanedInstances(installRoot: URL, log: Logger? = nil) {
+        let root = installRoot.resolvingSymlinksInPath().path(percentEncoded: false)
+        let selfPid = getpid()
+
+        var pids = [pid_t](repeating: 0, count: 4096)
+        let byteCount = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard byteCount > 0 else { return }
+        let count = Int(byteCount) / MemoryLayout<pid_t>.size
+
+        for index in 0..<count {
+            let pid = pids[index]
+            guard pid > 0, pid != selfPid else { continue }
+            var buffer = [CChar](repeating: 0, count: 4096)
+            guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { continue }
+            let path = String(cString: buffer)
+            // Helpers only: never the app itself or the CLI the user may be running.
+            guard path.hasPrefix(root), path.contains("/libexec/container/plugins/") else {
+                continue
+            }
+            log?.info(
+                "reaping orphaned instance",
+                metadata: ["pid": "\(pid)", "path": "\(path)"])
+            kill(pid, SIGTERM)
+        }
+    }
+
     /// Labels of currently live spawned instances.
     public static func spawnedInstanceLabels() -> [String] {
         Self.instances.withLock { Array($0.keys) }
