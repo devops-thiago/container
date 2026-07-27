@@ -67,10 +67,24 @@ extension Application {
         )
         var timeout: Duration = XPCClient.xpcRegistrationTimeout
 
+        @Option(
+            name: .long,
+            help: "Lifecycle generation for generation-aware shutdown"
+        )
+        var lifecycleGeneration: String?
+
         @OptionGroup
         public var logOptions: Flags.Logging
 
         public init() {}
+
+        public func validate() throws {
+            if let lifecycleGeneration,
+                !PluginLoader.isValidLifecycleGeneration(lifecycleGeneration)
+            {
+                throw ValidationError("Lifecycle generation must be nonempty and contain only ASCII letters, digits, and hyphens")
+            }
+        }
 
         public func run() async throws {
             try ConfigurationLoader.copyConfigurationToReadOnly(to: appRoot)
@@ -101,6 +115,9 @@ extension Application {
             if logOptions.debug {
                 args.append("--debug")
             }
+            if let lifecycleGeneration {
+                args.append(contentsOf: ["--lifecycle-generation", lifecycleGeneration])
+            }
 
             let apiServerDataPath = appRoot.appending(FilePath.Component("apiserver"))
             let apiServerDataURL = URL(fileURLWithPath: apiServerDataPath.string)
@@ -112,8 +129,17 @@ extension Application {
             if let logRoot {
                 env[LogRoot.environmentName] = logRoot.string
             }
+            if let lifecycleGeneration {
+                env[PluginLoader.lifecycleGenerationEnvironmentName] = lifecycleGeneration
+            } else {
+                env.removeValue(forKey: PluginLoader.lifecycleGenerationEnvironmentName)
+            }
+            let apiServerLabel = PluginLoader.generationQualifiedLabel(
+                "com.apple.container.apiserver",
+                lifecycleGeneration: lifecycleGeneration
+            )
             let plist = LaunchPlist(
-                label: "com.apple.container.apiserver",
+                label: apiServerLabel,
                 arguments: args,
                 environment: env,
                 limitLoadToSessionType: [.Aqua, .Background, .System],
@@ -121,7 +147,8 @@ extension Application {
                 machServices: ["com.apple.container.apiserver"]
             )
 
-            let plistPath = apiServerDataPath.appending(FilePath.Component("apiserver.plist"))
+            let plistFilename = lifecycleGeneration.map { "apiserver.\($0).plist" } ?? "apiserver.plist"
+            let plistPath = apiServerDataPath.appending(FilePath.Component(plistFilename)!)
             let plistURL = URL(fileURLWithPath: plistPath.string)
             let data = try plist.encode()
             try data.write(to: plistURL)
@@ -132,7 +159,18 @@ extension Application {
             // Now ping our friendly daemon. Fail if we don't get a response.
             do {
                 log.info("Testing access to container-apiserver...")
-                _ = try await ClientHealthCheck.ping(timeout: timeout)
+                let health = try await ClientHealthCheck.ping(timeout: timeout)
+                if let lifecycleGeneration {
+                    guard health.lifecycleProtocolVersion == SystemHealth.currentLifecycleProtocolVersion,
+                        health.lifecycleGeneration == lifecycleGeneration,
+                        health.processNonce != nil
+                    else {
+                        throw ContainerizationError(
+                            .invalidState,
+                            message: "responding API server does not match lifecycle generation \(lifecycleGeneration)"
+                        )
+                    }
+                }
             } catch {
                 throw ContainerizationError(
                     .internalError,

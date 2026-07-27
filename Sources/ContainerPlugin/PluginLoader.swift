@@ -21,6 +21,10 @@ import Logging
 import SystemPackage
 
 public struct PluginLoader: Sendable {
+    public static let lifecycleGenerationEnvironmentName = "CONTAINER_LIFECYCLE_GENERATION"
+
+    private static let launchdLabelPrefix = "com.apple.container."
+
     private let appRoot: URL
 
     private let installRoot: URL
@@ -32,6 +36,8 @@ public struct PluginLoader: Sendable {
     private let pluginFactories: [PluginFactory]
 
     private let log: Logger?
+
+    public let lifecycleGeneration: String?
 
     public typealias PluginQualifier = ((Plugin) -> Bool)
 
@@ -46,6 +52,7 @@ public struct PluginLoader: Sendable {
         logRoot: FilePath?,
         pluginDirectories: [URL],
         pluginFactories: [PluginFactory],
+        lifecycleGeneration: String? = nil,
         log: Logger? = nil
     ) throws {
         let pluginResourceRoot = appRoot.appendingPathComponent("plugin-state")
@@ -56,7 +63,67 @@ public struct PluginLoader: Sendable {
         self.logRoot = logRoot
         self.pluginDirectories = pluginDirectories
         self.pluginFactories = pluginFactories
+        self.lifecycleGeneration = lifecycleGeneration
         self.log = log
+    }
+
+    public static func isValidLifecycleGeneration(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.allSatisfy {
+            (97...122).contains($0)
+                || (65...90).contains($0)
+                || (48...57).contains($0)
+                || $0 == 45
+        }
+    }
+
+    public static func generationQualifiedLabel(_ label: String, lifecycleGeneration: String?) -> String {
+        guard let lifecycleGeneration else {
+            return label
+        }
+        return "\(label).\(lifecycleGeneration)"
+    }
+
+    private static func launchctlDeadline(
+        timeout: TimeInterval?
+    ) -> ContinuousClock.Instant? {
+        timeout.map {
+            ContinuousClock().now.advanced(by: .seconds(max(0, $0)))
+        }
+    }
+
+    private static func remainingLaunchctlTimeout(
+        until deadline: ContinuousClock.Instant?
+    ) -> TimeInterval? {
+        guard let deadline else { return nil }
+        let remaining = ContinuousClock().now.duration(to: deadline)
+        guard remaining > .zero else { return 0 }
+        let components = remaining.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
+    }
+
+    public func launchdLabel(pluginName: String, instanceId: String? = nil) -> String {
+        var label = "\(Self.launchdLabelPrefix)\(pluginName)"
+        if let instanceId {
+            label += ".\(instanceId)"
+        }
+        return Self.generationQualifiedLabel(label, lifecycleGeneration: lifecycleGeneration)
+    }
+
+    public func launchdLabel(plugin: Plugin, instanceId: String? = nil) -> String {
+        Self.generationQualifiedLabel(
+            plugin.getLaunchdLabel(instanceId: instanceId),
+            lifecycleGeneration: lifecycleGeneration
+        )
+    }
+
+    public func fullLaunchdLabel(pluginName: String, instanceId: String? = nil) throws -> String {
+        let domain = try ServiceManager.getDomainString()
+        return "\(domain)/\(launchdLabel(pluginName: pluginName, instanceId: instanceId))"
+    }
+
+    public func fullLaunchdLabel(plugin: Plugin, instanceId: String? = nil) throws -> String {
+        let domain = try ServiceManager.getDomainString()
+        return "\(domain)/\(launchdLabel(plugin: plugin, instanceId: instanceId))"
     }
 
     static public func userPluginsDir(installRoot: URL) -> URL {
@@ -255,7 +322,7 @@ extension PluginLoader {
             return
         }
 
-        let id = plugin.getLaunchdLabel(instanceId: instanceId)
+        let id = launchdLabel(plugin: plugin, instanceId: instanceId)
         log?.info("Registering plugin", metadata: ["id": "\(id)"])
         let rootURL = pluginStateRoot ?? self.pluginResourceRoot.appending(path: plugin.name)
         let resourceURL = plugin.resourceURL
@@ -265,6 +332,9 @@ extension PluginLoader {
         var env = Self.filterEnvironment()
         env[ApplicationRoot.environmentName] = appRoot.path(percentEncoded: false)
         env[InstallRoot.environmentName] = installRoot.path(percentEncoded: false)
+        if let lifecycleGeneration {
+            env[Self.lifecycleGenerationEnvironmentName] = lifecycleGeneration
+        }
         if let logRoot {
             env[LogRoot.environmentName] =
                 logRoot.isAbsolute
@@ -288,16 +358,26 @@ extension PluginLoader {
         try ServiceManager.register(plistPath: plistUrl.path)
     }
 
-    public func deregisterWithLaunchd(plugin: Plugin, instanceId: String? = nil) throws {
+    public func deregisterWithLaunchd(
+        plugin: Plugin,
+        instanceId: String? = nil,
+        timeout: TimeInterval? = nil
+    ) throws {
         // We only care about loading plugins that have a service
         // to expose; otherwise, they may just be CLI commands.
         guard plugin.config.servicesConfig != nil else {
             return
         }
-        let domain = try ServiceManager.getDomainString()
-        let label = "\(domain)/\(plugin.getLaunchdLabel(instanceId: instanceId))"
-        log?.info("Deregistering plugin", metadata: ["id": "\(plugin.getLaunchdLabel())"])
-        try ServiceManager.deregister(fullServiceLabel: label)
+        let deadline = Self.launchctlDeadline(timeout: timeout)
+        let domain = try ServiceManager.getDomainString(
+            timeout: Self.remainingLaunchctlTimeout(until: deadline)
+        )
+        let label = "\(domain)/\(launchdLabel(plugin: plugin, instanceId: instanceId))"
+        log?.info("Deregistering plugin", metadata: ["id": "\(launchdLabel(plugin: plugin, instanceId: instanceId))"])
+        try ServiceManager.deregister(
+            fullServiceLabel: label,
+            timeout: Self.remainingLaunchctlTimeout(until: deadline)
+        )
     }
 
     public static func filterEnvironment(
