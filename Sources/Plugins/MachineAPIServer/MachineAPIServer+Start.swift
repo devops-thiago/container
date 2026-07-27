@@ -37,8 +37,21 @@ extension MachineAPIServer {
         @Flag(name: .long, help: "Enable debug logging")
         var debug = false
 
+        /// Optional: a helper launched as a static SMAppService agent gets a
+        /// plist baked at build time, which cannot name an absolute path
+        /// because the app may be installed anywhere. The layout beside the
+        /// binary is fixed, so derive it — `<binary>/../resources`.
         @Option(help: "Path to the resources directory")
-        var resources: String
+        var resources: String?
+
+        private var resourcesPath: String {
+            if let resources, !resources.isEmpty { return resources }
+            return CommandLine.executablePath
+                .removingLastComponent()
+                .removingLastComponent()
+                .appending("resources")
+                .string
+        }
 
         var logRoot = LogRoot.path
 
@@ -59,7 +72,7 @@ extension MachineAPIServer {
             do {
                 log.info("configuring XPC server")
 
-                let resourceRoot = FilePath(resources)
+                let resourceRoot = FilePath(resourcesPath)
                 let service = try MachinesService(appRoot: pluginStateRoot, resourceRoot: resourceRoot, log: log)
                 let harness = MachinesHarness(service: service)
 
