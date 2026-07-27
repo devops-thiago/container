@@ -42,11 +42,26 @@ extension APIServer {
         @Flag(name: .long, help: "Enable debug logging")
         var debug = false
 
+        @Option(name: .customLong("lifecycle-generation"), help: "Lifecycle generation for generation-aware shutdown")
+        var lifecycleGenerationOption: String?
+
+        private var lifecycleGeneration: String? {
+            lifecycleGenerationOption ?? ProcessInfo.processInfo.environment[PluginLoader.lifecycleGenerationEnvironmentName]
+        }
+
         var appRoot = ApplicationRoot.path
 
         var installRoot = InstallRoot.path
 
         var logRoot = LogRoot.path
+
+        func validate() throws {
+            if let lifecycleGeneration,
+                !PluginLoader.isValidLifecycleGeneration(lifecycleGeneration)
+            {
+                throw ValidationError("Lifecycle generation must contain only ASCII letters, digits, and hyphens")
+            }
+        }
 
         func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
@@ -61,9 +76,10 @@ extension APIServer {
             do {
                 log.info("configuring XPC server")
                 var routes = [XPCRoute: XPCServer.RouteHandler]()
+                let processNonce = UUID().uuidString
                 let pluginLoader = try initializePluginLoader(log: log)
 
-                try await initializePlugins(pluginLoader: pluginLoader, log: log, routes: &routes, debug: debug)
+                let pluginsService = try await initializePlugins(pluginLoader: pluginLoader, log: log, routes: &routes, debug: debug)
                 let containersService = try initializeContainersService(
                     pluginLoader: pluginLoader,
                     containerSystemConfig: containerSystemConfig,
@@ -78,7 +94,7 @@ extension APIServer {
                     routes: &routes
                 )
                 await containersService.setNetworksService(networkService)
-                initializeHealthCheckService(log: log, routes: &routes)
+                initializeHealthCheckService(processNonce: processNonce, log: log, routes: &routes)
                 try initializeKernelService(log: log, routes: &routes)
                 let volumesService = try await initializeVolumeService(containersService: containersService, log: log, routes: &routes)
                 try initializeDiskUsageService(
@@ -87,6 +103,45 @@ extension APIServer {
                     log: log,
                     routes: &routes
                 )
+
+                if let lifecycleGeneration {
+                    let shutdownGate = SystemShutdownGate()
+                    let mutatingRoutes: Set<XPCRoute> = [
+                        .containerCreate,
+                        .containerDelete,
+                        .containerBootstrap,
+                        .containerCreateProcess,
+                        .containerStartProcess,
+                        .containerKill,
+                        .containerStop,
+                        .containerResize,
+                        .containerCopyIn,
+                        .pluginLoad,
+                        .pluginRestart,
+                        .pluginUnload,
+                        .networkCreate,
+                        .networkDelete,
+                        .volumeCreate,
+                        .volumeDelete,
+                        .installKernel,
+                    ]
+                    for route in mutatingRoutes {
+                        if let handler = routes[route] {
+                            routes[route] = shutdownGate.wrap(handler)
+                        }
+                    }
+
+                    let shutdownService = SystemShutdownService(
+                        lifecycleGeneration: lifecycleGeneration,
+                        processNonce: processNonce,
+                        ownershipToken: ProcessInfo.processInfo.environment["CONTAINER_SILICONSHIP_OWNERSHIP_TOKEN"],
+                        containersService: containersService,
+                        pluginsService: pluginsService,
+                        shutdownGate: shutdownGate,
+                        log: log
+                    )
+                    routes[XPCRoute.systemShutdown] = shutdownService.shutdown
+                }
 
                 let server = XPCServer(
                     identifier: "com.apple.container.apiserver",
@@ -218,6 +273,7 @@ extension APIServer {
                 logRoot: logRoot,
                 pluginDirectories: pluginDirectories,
                 pluginFactories: pluginFactories,
+                lifecycleGeneration: lifecycleGeneration,
                 log: log
             )
         }
@@ -229,7 +285,7 @@ extension APIServer {
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler],
             debug: Bool = false
-        ) async throws {
+        ) async throws -> PluginsService {
             log.info("initializing plugins")
 
             let bootPlugins = pluginLoader.findPlugins().filter { $0.shouldBoot }
@@ -243,9 +299,14 @@ extension APIServer {
             routes[XPCRoute.pluginLoad] = XPCServer.route(harness.load)
             routes[XPCRoute.pluginUnload] = XPCServer.route(harness.unload)
             routes[XPCRoute.pluginRestart] = XPCServer.route(harness.restart)
+            return service
         }
 
-        private func initializeHealthCheckService(log: Logger, routes: inout [XPCRoute: XPCServer.RouteHandler]) {
+        private func initializeHealthCheckService(
+            processNonce: String,
+            log: Logger,
+            routes: inout [XPCRoute: XPCServer.RouteHandler]
+        ) {
             log.info("initializing health check service")
 
             // TODO: Remove when we convert HealthCheckHarness to FilePath
@@ -255,6 +316,8 @@ extension APIServer {
                 appRoot: appRootURL,
                 installRoot: installRootURL,
                 logRoot: logRoot,
+                lifecycleGeneration: lifecycleGeneration,
+                processNonce: lifecycleGeneration == nil ? nil : processNonce,
                 log: log
             )
             routes[XPCRoute.ping] = XPCServer.route(svc.ping)

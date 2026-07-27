@@ -196,6 +196,17 @@ extension XPCMessage {
         }
     }
 
+    public func uint64IfPresent(key: String) -> UInt64? {
+        lock.withLock {
+            guard let value = xpc_dictionary_get_value(self.object, key),
+                xpc_get_type(value) == XPC_TYPE_UINT64
+            else {
+                return nil
+            }
+            return xpc_uint64_get_value(value)
+        }
+    }
+
     public func set(key: String, value: UInt64) {
         lock.withLock {
             xpc_dictionary_set_uint64(self.object, key, value)

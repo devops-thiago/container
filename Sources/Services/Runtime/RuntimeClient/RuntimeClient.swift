@@ -178,14 +178,14 @@ extension RuntimeClient {
         }
     }
 
-    public func stop(options: ContainerStopOptions) async throws {
+    public func stop(options: ContainerStopOptions, responseTimeout: Duration? = nil) async throws {
         let request = XPCMessage(route: RuntimeRoutes.stop.rawValue)
 
         let data = try JSONEncoder().encode(options)
         request.set(key: RuntimeKeys.stopOptions.rawValue, value: data)
 
         do {
-            try await self.client.send(request)
+            try await self.client.send(request, responseTimeout: responseTimeout)
         } catch {
             throw ContainerizationError(
                 .internalError,
@@ -270,11 +270,11 @@ extension RuntimeClient {
         return fh
     }
 
-    public func shutdown() async throws {
+    public func shutdown(responseTimeout: Duration? = nil) async throws {
         let request = XPCMessage(route: RuntimeRoutes.shutdown.rawValue)
 
         do {
-            _ = try await self.client.send(request)
+            _ = try await self.client.send(request, responseTimeout: responseTimeout)
         } catch {
             throw ContainerizationError(
                 .internalError,
