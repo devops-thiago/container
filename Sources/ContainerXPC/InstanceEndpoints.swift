@@ -54,6 +54,21 @@ public enum InstanceEndpoints {
         storage.withLock { $0[label]?.endpoint }
     }
 
+    /// Blocking wait for `label` to attach. The spawner is synchronous and must
+    /// not hand back a client before the child has announced itself, or the
+    /// client falls back to a mach name no spawned instance owns. Attach
+    /// messages are delivered on the XPC listener's own queue, so blocking the
+    /// caller here does not block the delivery we are waiting for.
+    @discardableResult
+    public static func waitForAttach(label: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if endpoint(label: label) != nil { return true }
+            usleep(20_000)
+        }
+        return endpoint(label: label) != nil
+    }
+
     /// Wait for `label` to attach, up to `timeout`. Returns nil on timeout: the
     /// spawn and the attach race, since the caller spawns the instance and then
     /// immediately dials it.
