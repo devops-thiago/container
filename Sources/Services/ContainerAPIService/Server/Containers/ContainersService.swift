@@ -48,9 +48,6 @@ public actor ContainersService {
         }
     }
 
-    private static let machServicePrefix = "com.apple.container"
-    private static let launchdDomainString = try! ServiceManager.getDomainString()
-
     private let log: Logger
     private let debugHelpers: Bool
     private let containerRoot: URL
@@ -110,8 +107,8 @@ public actor ContainersService {
                             "id": "\(config.id)"
                         ])
 
-                    let label = Self.fullLaunchdServiceLabel(
-                        runtimeName: config.runtimeHandler,
+                    let label = try loader.fullLaunchdLabel(
+                        pluginName: config.runtimeHandler,
                         instanceId: config.id)
 
                     var status: Int32 = -1
@@ -452,13 +449,15 @@ public actor ContainersService {
                 state.client = runtimeClient
                 await self.setContainerState(id, state, context: context)
             } catch {
-                let label = Self.fullLaunchdServiceLabel(
-                    runtimeName: config.runtimeHandler,
+                let label = try? self.pluginLoader.fullLaunchdLabel(
+                    pluginName: config.runtimeHandler,
                     instanceId: id
                 )
 
                 await self.exitMonitor.stopTracking(id: id)
-                try? ServiceManager.deregister(fullServiceLabel: label)
+                if let label {
+                    try? ServiceManager.deregister(fullServiceLabel: label)
+                }
                 throw error
             }
         }
@@ -602,7 +601,11 @@ public actor ContainersService {
 
     /// Stop all containers inside the sandbox, aborting any processes currently
     /// executing inside the container, before stopping the underlying sandbox.
-    public func stop(id: String, options: ContainerStopOptions) async throws {
+    public func stop(
+        id: String,
+        options: ContainerStopOptions,
+        responseTimeout: Duration? = nil
+    ) async throws {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -620,6 +623,8 @@ public actor ContainersService {
             )
         }
 
+        let clock = ContinuousClock()
+        let responseDeadline = responseTimeout.map { clock.now.advanced(by: $0) }
         let state = try self._getContainerState(id: id)
 
         // Stop should be idempotent.
@@ -636,13 +641,20 @@ public actor ContainersService {
         }
 
         do {
-            try await client.stop(options: resolvedOptions)
+            try await client.stop(options: resolvedOptions, responseTimeout: responseTimeout)
         } catch let err as ContainerizationError {
             if err.code != .interrupted {
                 throw err
             }
         }
-        try await handleContainerExit(id: id)
+        let remainingResponseTimeout = responseDeadline.map {
+            max(Duration.zero, clock.now.duration(to: $0))
+        }
+        try await handleContainerExit(
+            id: id,
+            code: nil,
+            responseTimeout: remainingResponseTimeout
+        )
     }
 
     public func dial(id: String, port: UInt32) async throws -> FileHandle {
@@ -920,12 +932,30 @@ public actor ContainersService {
     }
 
     private func handleContainerExit(id: String, code: ExitStatus? = nil) async throws {
+        try await handleContainerExit(id: id, code: code, responseTimeout: nil)
+    }
+
+    private func handleContainerExit(
+        id: String,
+        code: ExitStatus?,
+        responseTimeout: Duration?
+    ) async throws {
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { [self] context in
-            try await handleContainerExit(id: id, code: code, context: context)
+            try await handleContainerExit(
+                id: id,
+                code: code,
+                responseTimeout: responseTimeout,
+                context: context
+            )
         }
     }
 
-    private func handleContainerExit(id: String, code: ExitStatus?, context: AsyncLock.Context) async throws {
+    private func handleContainerExit(
+        id: String,
+        code: ExitStatus?,
+        responseTimeout: Duration?,
+        context: AsyncLock.Context
+    ) async throws {
         if let code {
             self.log.info(
                 "handling container exit",
@@ -954,8 +984,8 @@ public actor ContainersService {
         let path = self.containerRoot.appendingPathComponent(id)
         let bundle = ContainerResource.Bundle(path: path)
         let config = try bundle.configuration
-        let label = Self.fullLaunchdServiceLabel(
-            runtimeName: config.runtimeHandler,
+        let label = try self.pluginLoader.fullLaunchdLabel(
+            pluginName: config.runtimeHandler,
             instanceId: id
         )
 
@@ -964,7 +994,7 @@ public actor ContainersService {
         // with state cleanup.
         if let client = state.client {
             do {
-                try await client.shutdown()
+                try await client.shutdown(responseTimeout: responseTimeout)
             } catch {
                 self.log.error(
                     "failed to shutdown runtime service",
@@ -999,10 +1029,6 @@ public actor ContainersService {
         if options.autoRemove {
             try await self.cleanUp(id: id, context: context)
         }
-    }
-
-    private static func fullLaunchdServiceLabel(runtimeName: String, instanceId: String) -> String {
-        "\(Self.launchdDomainString)/\(Self.machServicePrefix).\(runtimeName).\(instanceId)"
     }
 
     private func _cleanUp(id: String) async throws {
@@ -1052,11 +1078,12 @@ public actor ContainersService {
         // Only try to deregister service if we have a valid config
         // TODO: Change this so we don't have to reread the config
         // possibly store the container ID to service label mapping
-        if let config = config {
-            let label = Self.fullLaunchdServiceLabel(
-                runtimeName: config.runtimeHandler,
+        if let config = config,
+            let label = try? self.pluginLoader.fullLaunchdLabel(
+                pluginName: config.runtimeHandler,
                 instanceId: id
             )
+        {
             try? ServiceManager.deregister(fullServiceLabel: label)
         }
 

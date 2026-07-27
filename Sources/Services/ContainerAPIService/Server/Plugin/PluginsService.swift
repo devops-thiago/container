@@ -52,6 +52,46 @@ public actor PluginsService {
         }
     }
 
+    /// Stop all loaded plugins, continuing when an individual launchd job cannot be removed.
+    public func stopAllBestEffort(until deadline: ContinuousClock.Instant? = nil) {
+        let plugins = Array(loaded.values)
+        for plugin in plugins {
+            let timeout: TimeInterval?
+            if let deadline {
+                guard let remaining = Self.launchctlTimeout(until: deadline) else {
+                    log.warning("plugin cleanup deadline expired")
+                    return
+                }
+                timeout = remaining
+            } else {
+                timeout = nil
+            }
+
+            do {
+                try pluginLoader.deregisterWithLaunchd(plugin: plugin, timeout: timeout)
+            } catch {
+                log.warning(
+                    "failed to stop plugin",
+                    metadata: [
+                        "plugin": "\(plugin.name)",
+                        "error": "\(error)",
+                    ]
+                )
+            }
+            loaded.removeValue(forKey: plugin.name)
+        }
+    }
+
+    private nonisolated static func launchctlTimeout(
+        until deadline: ContinuousClock.Instant
+    ) -> TimeInterval? {
+        let remaining = ContinuousClock().now.duration(to: deadline)
+        guard remaining > .zero else { return nil }
+        let components = remaining.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
+        return min(2, max(0.001, seconds))
+    }
+
     // MARK: XPC API surface.
 
     /// Load a single plugin, doing nothing if the plugin is already loaded.
@@ -79,7 +119,7 @@ public actor PluginsService {
         guard let plugin = self.loaded[name] else {
             throw Error.pluginNotLoaded(name)
         }
-        try ServiceManager.kickstart(fullServiceLabel: plugin.getLaunchdLabel())
+        try ServiceManager.kickstart(fullServiceLabel: pluginLoader.fullLaunchdLabel(plugin: plugin))
     }
 
     /// Unload a loaded plugin.

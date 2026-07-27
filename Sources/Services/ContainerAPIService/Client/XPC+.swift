@@ -70,6 +70,16 @@ public enum XPCKeys: String {
     case apiServerCommit
     case apiServerBuild
     case apiServerAppName
+    case lifecycleProtocolVersion
+    case lifecycleGeneration
+    case processNonce
+
+    /// Generation-aware system shutdown.
+    case expectedLifecycleGeneration
+    case expectedProcessNonce
+    case ownershipToken
+    case confirmedTakeover
+    case acknowledged
 
     /// Process request keys.
     case signal
@@ -185,6 +195,7 @@ public enum XPCRoute: String {
     case systemDiskUsage
 
     case ping
+    case systemShutdown
 
     case installKernel
     case getDefaultKernel
@@ -225,6 +236,10 @@ extension XPCMessage {
 
     public func uint64(key: XPCKeys) -> UInt64 {
         uint64(key: key.rawValue)
+    }
+
+    public func uint64IfPresent(key: XPCKeys) -> UInt64? {
+        uint64IfPresent(key: key.rawValue)
     }
 
     public func set(key: XPCKeys, value: UInt64) {

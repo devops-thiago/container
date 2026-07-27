@@ -27,12 +27,23 @@ public actor HealthCheckHarness {
     private let appRoot: URL
     private let installRoot: URL
     private let logRoot: FilePath?
+    private let lifecycleGeneration: String?
+    private let processNonce: String?
     private let log: Logger
 
-    public init(appRoot: URL, installRoot: URL, logRoot: FilePath?, log: Logger) {
+    public init(
+        appRoot: URL,
+        installRoot: URL,
+        logRoot: FilePath?,
+        lifecycleGeneration: String? = nil,
+        processNonce: String? = nil,
+        log: Logger
+    ) {
         self.appRoot = appRoot
         self.installRoot = installRoot
         self.logRoot = logRoot
+        self.lifecycleGeneration = lifecycleGeneration
+        self.processNonce = processNonce
         self.log = log
     }
 
@@ -49,6 +60,11 @@ public actor HealthCheckHarness {
         // Extra optional fields for richer client display
         reply.set(key: .apiServerBuild, value: ReleaseVersion.buildType())
         reply.set(key: .apiServerAppName, value: "container-apiserver")
+        if let lifecycleGeneration, let processNonce {
+            reply.set(key: .lifecycleProtocolVersion, value: SystemHealth.currentLifecycleProtocolVersion)
+            reply.set(key: .lifecycleGeneration, value: lifecycleGeneration)
+            reply.set(key: .processNonce, value: processNonce)
+        }
         return reply
     }
 }
