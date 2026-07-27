@@ -75,6 +75,19 @@ extension APIServer {
             }
 
             do {
+                // launchd delivers SIGTERM when the host app unregisters the
+                // agents (quit). Spawned runtime instances are our children and
+                // would be orphaned; reap them before exiting. Graceful
+                // container stops have already happened through the API by the
+                // time a well-behaved host quits — this is the backstop.
+                signal(SIGTERM, SIG_IGN)
+                let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+                sigterm.setEventHandler {
+                    PluginLoader.terminateAllInstances()
+                    exit(0)
+                }
+                sigterm.activate()
+
                 log.info("configuring XPC server")
                 var routes = [XPCRoute: XPCServer.RouteHandler]()
                 let processNonce = UUID().uuidString
