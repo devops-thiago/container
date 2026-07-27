@@ -46,6 +46,16 @@ public final class XPCClient: Sendable {
         xpc_connection_activate(connection)
     }
 
+    /// Connect to an anonymous listener published as an endpoint — the path
+    /// per-container runtime instances use, since a sandboxed embedding cannot
+    /// give each instance its own launchd mach service name.
+    public convenience init(endpoint: xpc_endpoint_t, label: String, queue: DispatchQueue? = nil) {
+        self.init(
+            connection: xpc_connection_create_from_endpoint(endpoint),
+            label: label,
+            queue: queue)
+    }
+
     public init(connection: xpc_connection_t, label: String, queue: DispatchQueue? = nil) {
         self.connection = connection
         self.q = queue

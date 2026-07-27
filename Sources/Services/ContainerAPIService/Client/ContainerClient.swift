@@ -20,6 +20,7 @@ import Containerization
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
+import ContainerVersion
 
 /// A client for interacting with the container API server.
 ///
@@ -27,7 +28,7 @@ import Foundation
 /// container lifecycle operations. All methods that operate on a specific
 /// container take an `id` parameter.
 public struct ContainerClient: Sendable {
-    private static let serviceIdentifier = "com.apple.container.apiserver"
+    private static let serviceIdentifier = ServiceIdentity.apiServerService
 
     private let xpcClient: XPCClient
 

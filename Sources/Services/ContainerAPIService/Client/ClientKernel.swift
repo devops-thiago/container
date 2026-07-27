@@ -20,9 +20,10 @@ import ContainerizationError
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
+import ContainerVersion
 
 public struct ClientKernel {
-    static let serviceIdentifier = "com.apple.container.apiserver"
+    static let serviceIdentifier = ServiceIdentity.apiServerService
 }
 
 extension ClientKernel {

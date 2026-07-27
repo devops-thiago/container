@@ -679,3 +679,24 @@ let package = Package(
         ),
     ]
 )
+
+// Embedder support (SiliconShip): when CONTAINER_EMBEDDER_PLIST_DIR is set,
+// every executable links an embedded __TEXT __info_plist from
+// <dir>/<target-name>.plist. Sandboxed executables that run outside an app
+// context (launchd BundleProgram, symlinked CLI, spawned runtimes) crash in
+// _libsecinit_appsandbox without one, and ServiceIdentity reads the embedder's
+// mach-service prefix and app group from it. Unset (upstream builds), this is
+// a no-op.
+if let plistDir = ProcessInfo.processInfo.environment["CONTAINER_EMBEDDER_PLIST_DIR"], !plistDir.isEmpty {
+    for target in package.targets where target.type == .executable {
+        var settings = target.linkerSettings ?? []
+        settings.append(
+            .unsafeFlags([
+                "-Xlinker", "-sectcreate",
+                "-Xlinker", "__TEXT",
+                "-Xlinker", "__info_plist",
+                "-Xlinker", "\(plistDir)/\(target.name).plist",
+            ]))
+        target.linkerSettings = settings
+    }
+}
