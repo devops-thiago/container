@@ -74,6 +74,15 @@ public struct RuntimeClient: Sendable {
         let xpcClient = XPCClient(connection: endpointConnection, label: label)
         return RuntimeClient(id: id, runtime: runtime, client: xpcClient)
     }
+
+    /// Create a RuntimeClient from a brokered endpoint (sandboxed embedding:
+    /// the instance has no mach service; its anonymous listener endpoint
+    /// arrives via the apiserver's runtimeAttach route).
+    public static func create(id: String, runtime: String, endpoint: xpc_endpoint_t) -> RuntimeClient {
+        let label = Self.machServiceLabel(runtime: runtime, id: id)
+        let client = XPCClient(endpoint: endpoint, label: label)
+        return RuntimeClient(id: id, runtime: runtime, client: client)
+    }
 }
 
 // Runtime Methods

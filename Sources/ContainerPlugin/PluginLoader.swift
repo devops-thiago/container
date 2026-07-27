@@ -18,6 +18,7 @@ import ContainerizationOS
 import Darwin
 import Foundation
 import Logging
+import Synchronization
 import SystemPackage
 import ContainerVersion
 
@@ -344,6 +345,27 @@ extension PluginLoader {
         }
 
         let processedArgs = (args ?? ["start"]) + (resourceURL.map { ["--resources", $0.path] } ?? []) + (debug ? ["--debug"] : [])
+
+        // Sandboxed embedding: launchd is off limits (no launchctl, and a
+        // sandboxed process cannot bootstrap jobs). Static plugins are
+        // SMAppService agents pre-registered by the host app, so launchd
+        // already owns their mach names and demand-starts them — nothing to
+        // do here. Instanced plugins (one per container) are posix_spawned as
+        // inherit-sandbox children that dial the apiserver back and post
+        // their anonymous endpoint (see RuntimeInstanceRegistry).
+        if ServiceIdentity.appGroup != nil {
+            guard let instanceId else {
+                log?.debug(
+                    "static plugin is an SMAppService agent; skipping launchd registration",
+                    metadata: ["id": "\(id)"])
+                return
+            }
+            env["CONTAINER_ATTACH_SERVICE"] = ServiceIdentity.apiServerService
+            let argv = [plugin.binaryURL.path] + processedArgs + serviceConfig.defaultArguments
+            try Self.spawnInstance(label: id, instanceId: instanceId, argv: argv, env: env, log: log)
+            return
+        }
+
         let plist = LaunchPlist(
             label: id,
             arguments: [plugin.binaryURL.path] + processedArgs + serviceConfig.defaultArguments,
@@ -369,6 +391,13 @@ extension PluginLoader {
         guard plugin.config.servicesConfig != nil else {
             return
         }
+
+        if ServiceIdentity.appGroup != nil {
+            guard instanceId != nil else { return }
+            let id = launchdLabel(plugin: plugin, instanceId: instanceId)
+            Self.terminateInstance(label: id, log: log)
+            return
+        }
         let deadline = Self.launchctlDeadline(timeout: timeout)
         let domain = try ServiceManager.getDomainString(
             timeout: Self.remainingLaunchctlTimeout(until: deadline)
@@ -387,6 +416,75 @@ extension PluginLoader {
     ) -> [String: String] {
         env.filter { key, _ in
             key.hasPrefix("CONTAINER_") || additionalAllowKeys.contains(key)
+        }
+    }
+}
+
+// MARK: - Spawned instances (sandboxed embedding)
+
+extension PluginLoader {
+    /// Live instance processes, keyed by launchd-style label. Holding the
+    /// Process keeps its terminationHandler (the reaper) alive.
+    private static let instances = Mutex<[String: Foundation.Process]>([:])
+
+    static func spawnInstance(
+        label: String,
+        instanceId: String,
+        argv: [String],
+        env: [String: String],
+        log: Logger?
+    ) throws {
+        let process = Foundation.Process()
+        process.executableURL = URL(fileURLWithPath: argv[0])
+        process.arguments = Array(argv.dropFirst())
+        process.environment = env
+        process.standardInput = FileHandle.nullDevice
+        // The helper logs to its own file under logRoot; don't tie its stdio
+        // to ours.
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { proc in
+            Self.instances.withLock { _ = $0.removeValue(forKey: label) }
+            log?.info(
+                "runtime instance exited",
+                metadata: [
+                    "label": "\(label)",
+                    "status": "\(proc.terminationStatus)",
+                ])
+        }
+        try process.run()
+        Self.instances.withLock { $0[label] = process }
+        log?.info(
+            "spawned runtime instance",
+            metadata: [
+                "label": "\(label)",
+                "pid": "\(process.processIdentifier)",
+            ])
+    }
+
+    static func terminateInstance(label: String, log: Logger?) {
+        guard let process = Self.instances.withLock({ $0[label] }) else {
+            log?.debug("no spawned instance to terminate", metadata: ["label": "\(label)"])
+            return
+        }
+        log?.info(
+            "terminating runtime instance",
+            metadata: ["label": "\(label)", "pid": "\(process.processIdentifier)"])
+        process.terminate()
+    }
+
+    /// Labels of currently live spawned instances.
+    public static func spawnedInstanceLabels() -> [String] {
+        Self.instances.withLock { Array($0.keys) }
+    }
+
+    /// Quit path: SIGTERM every spawned instance (graceful container stop
+    /// happens first through the runtime API; this is the backstop).
+    public static func terminateAllInstances(log: Logger? = nil) {
+        let all = Self.instances.withLock { Array($0.values) }
+        for process in all where process.isRunning {
+            log?.info("terminating instance", metadata: ["pid": "\(process.processIdentifier)"])
+            process.terminate()
         }
     }
 }

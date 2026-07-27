@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import Foundation
 import SystemPackage
 
@@ -23,15 +24,30 @@ public struct ApplicationRoot {
     /// Otherwise, the system uses the default "~/Library/Application Support/com.apple.container".
     public static let environmentName = "CONTAINER_APP_ROOT"
 
-    /// The default root directory used when ``environmentName`` is not set:
-    /// `~/Library/Application Support/com.apple.container`.
-    public static let defaultPath = FilePath(
-        FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!.path(percentEncoded: false)
-    )
-    .appending(FilePath.Component("com.apple.container"))
+    /// The default root directory used when ``environmentName`` is not set.
+    ///
+    /// Under sandboxed embedding (an app group is configured), the group
+    /// container is the only filesystem every engine process shares, so state
+    /// lives there — mirroring PathUtils.BaseConfigPath.appRoot. Otherwise
+    /// the upstream `~/Library/Application Support/com.apple.container`.
+    public static let defaultPath: FilePath = {
+        if let group = ServiceIdentity.appGroup,
+            let url = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: group)
+        {
+            return FilePath(url.path(percentEncoded: false))
+                .appending(FilePath.Component("Library"))
+                .appending(FilePath.Component("Application Support"))
+                .appending(FilePath.Component("engine"))
+        }
+        return FilePath(
+            FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.path(percentEncoded: false)
+        )
+        .appending(FilePath.Component("com.apple.container"))
+    }()
 
     /// The resolved root directory path, always lexically normalized.
     ///
