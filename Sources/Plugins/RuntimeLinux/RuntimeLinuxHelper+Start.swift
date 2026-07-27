@@ -83,13 +83,32 @@ extension RuntimeLinuxHelper {
                     log: log
                 )
 
-                let endpointServer = XPCServer(
-                    identifier: machServiceLabel,
-                    routes: [
-                        RuntimeRoutes.createEndpoint.rawValue: XPCServer.route(server.createEndpoint)
-                    ],
-                    log: log
-                )
+                // Sandboxed embedding: the instance was posix_spawned (no
+                // launchd mach name). Post the anonymous listener's endpoint
+                // back to the apiserver's registry instead of vending a
+                // createEndpoint mach service. The dial succeeds because this
+                // process inherits its spawner's sandbox.
+                let attachService = ProcessInfo.processInfo.environment["CONTAINER_ATTACH_SERVICE"]
+                var endpointServer: XPCServer?
+                if let attachService {
+                    log.info("attaching to broker", metadata: ["service": "\(attachService)"])
+                    let broker = XPCClient(service: attachService)
+                    // Literal route string: XPCRoute lives in ContainerAPIClient,
+                    // which this helper deliberately does not link.
+                    let attach = XPCMessage(route: "runtimeAttach")
+                    attach.set(key: "id", value: uuid)
+                    attach.set(key: "endpoint", value: xpc_endpoint_create(anonymousConnection))
+                    attach.set(key: "pid", value: Int64(getpid()))
+                    _ = try await broker.send(attach, responseTimeout: .seconds(30))
+                } else {
+                    endpointServer = XPCServer(
+                        identifier: machServiceLabel,
+                        routes: [
+                            RuntimeRoutes.createEndpoint.rawValue: XPCServer.route(server.createEndpoint)
+                        ],
+                        log: log
+                    )
+                }
 
                 let mainServer = XPCServer(
                     connection: anonymousConnection,
@@ -114,8 +133,10 @@ extension RuntimeLinuxHelper {
 
                 log.info("starting XPC server")
                 try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask {
-                        try await endpointServer.listen()
+                    if let endpointServer {
+                        group.addTask {
+                            try await endpointServer.listen()
+                        }
                     }
                     group.addTask {
                         try await mainServer.listen()

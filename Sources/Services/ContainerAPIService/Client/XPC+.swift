@@ -196,6 +196,9 @@ public enum XPCRoute: String {
 
     case ping
     case systemShutdown
+    /// Spawned runtime instances post their anonymous listener endpoint here
+    /// (sandboxed embedding; see RuntimeInstanceRegistry).
+    case runtimeAttach
 
     case installKernel
     case getDefaultKernel

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerizationError
+import ContainerVersion
 import Darwin
 import Dispatch
 import Foundation
@@ -34,6 +35,19 @@ private final class LaunchctlOutput: Sendable {
 
 public struct ServiceManager {
     private static let terminationGrace: TimeInterval = 0.1
+
+    /// Sandboxed embedding: launchctl is unavailable (a sandboxed process
+    /// cannot manage launchd jobs). Static services are SMAppService agents
+    /// owned by the host app; per-container instances are tracked in
+    /// PluginLoader's spawned-process table. Every entry point below degrades
+    /// to those sources when an app group is configured, so call sites stay
+    /// unchanged.
+    private static var sandboxedEmbedding: Bool { ServiceIdentity.appGroup != nil }
+
+    private static func stripDomain(_ label: String) -> String {
+        // "gui/501/tld.example.label" -> "tld.example.label"
+        label.split(separator: "/").last.map(String.init) ?? label
+    }
 
     private static func runLaunchctlCommand(args: [String], timeout: TimeInterval? = nil) throws -> Int32 {
         let launchctl = Foundation.Process()
@@ -129,12 +143,21 @@ public struct ServiceManager {
 
     /// Register a service by providing the path to a plist.
     public static func register(plistPath: String) throws {
+        if sandboxedEmbedding {
+            throw ContainerizationError(
+                .unsupported,
+                message: "launchd registration is owned by the host app under sandboxed embedding")
+        }
         let domain = try Self.getDomainString()
         _ = try runLaunchctlCommand(args: ["bootstrap", domain, plistPath])
     }
 
     /// Deregister a service by a launchd label.
     public static func deregister(fullServiceLabel label: String, timeout: TimeInterval? = nil) throws {
+        if sandboxedEmbedding {
+            PluginLoader.terminateInstance(label: stripDomain(label), log: nil)
+            return
+        }
         let status = try runLaunchctlCommand(args: ["bootout", label], timeout: timeout)
         guard status == 0 else {
             throw ContainerizationError(
@@ -146,21 +169,38 @@ public struct ServiceManager {
 
     /// Deregister a service and pass return status
     public static func deregister(fullServiceLabel label: String, status: inout Int32) throws {
+        if sandboxedEmbedding {
+            PluginLoader.terminateInstance(label: stripDomain(label), log: nil)
+            status = 0
+            return
+        }
         status = try runLaunchctlCommand(args: ["bootout", label])
     }
 
     /// Restart a service by a launchd label.
     public static func kickstart(fullServiceLabel label: String) throws {
+        if sandboxedEmbedding {
+            throw ContainerizationError(
+                .unsupported,
+                message: "restart static services by unregister/register via the host app")
+        }
         _ = try runLaunchctlCommand(args: ["kickstart", "-k", label])
     }
 
     /// Send a signal to a service by a launchd label.
     public static func kill(fullServiceLabel label: String, signal: Int32 = 15) throws {
+        if sandboxedEmbedding {
+            PluginLoader.terminateInstance(label: stripDomain(label), log: nil)
+            return
+        }
         _ = try runLaunchctlCommand(args: ["kill", "\(signal)", label])
     }
 
     /// Retrieve labels for all loaded launch units.
     public static func enumerate(timeout: TimeInterval? = nil) throws -> [String] {
+        if sandboxedEmbedding {
+            return PluginLoader.spawnedInstanceLabels()
+        }
         let deadline = launchctlDeadline(timeout: timeout)
         let launchctl = Foundation.Process()
         launchctl.executableURL = URL(fileURLWithPath: "/bin/launchctl")
@@ -211,6 +251,17 @@ public struct ServiceManager {
         fullServiceLabel label: String,
         timeout: TimeInterval? = nil
     ) throws -> Bool {
+        if sandboxedEmbedding {
+            let bare = stripDomain(label)
+            if PluginLoader.spawnedInstanceLabels().contains(bare) {
+                return true
+            }
+            // Static services are SMAppService agents registered by the host
+            // app; from inside the engine they are reachable iff registered,
+            // so report registration optimistically and let dials surface
+            // the truth.
+            return bare.hasPrefix(ServiceIdentity.machPrefix)
+        }
         let exitStatus = try runLaunchctlCommand(args: ["list", label], timeout: timeout)
         return exitStatus == 0
     }
@@ -250,6 +301,12 @@ public struct ServiceManager {
     }
 
     public static func getDomainString(timeout: TimeInterval? = nil) throws -> String {
+        if sandboxedEmbedding {
+            // SMAppService agents and spawned instances both live in the
+            // user's gui domain; asking launchctl would spawn a process for
+            // an answer that is constant here.
+            return "gui/\(getuid())"
+        }
         let currentSessionType = try getLaunchdSessionType(timeout: timeout)
         switch currentSessionType {
         case LaunchPlist.Domain.System.rawValue:
