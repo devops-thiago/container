@@ -34,10 +34,22 @@ public struct ReleaseVersion {
         #endif
     }
 
+    /// The engine's own version.
+    ///
+    /// The enclosing `.app` bundle is only a sensible source when that bundle
+    /// *is* the engine. Inside an embedder it is the host application, whose
+    /// version has nothing to do with the engine's — reporting it made
+    /// `container --version` claim the host app's number while the commit came
+    /// from the engine, which is worse than either alone. When an embedder is
+    /// configured, the version compiled in at build time is authoritative.
     public static func version() -> String {
+        let compiled = get_release_version().map { String(cString: $0) }
+        if ServiceIdentity.isEmbedded {
+            return compiled ?? "0.0.0"
+        }
         let appBundle = Bundle.appBundle(executablePath: CommandLine.executablePath)
         let bundleVersion = appBundle?.infoDictionary?["CFBundleShortVersionString"] as? String
-        return bundleVersion ?? get_release_version().map { String(cString: $0) } ?? "0.0.0"
+        return bundleVersion ?? compiled ?? "0.0.0"
     }
 
     public static func gitCommit() -> String? {
