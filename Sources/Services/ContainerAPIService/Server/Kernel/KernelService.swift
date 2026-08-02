@@ -99,7 +99,6 @@ public actor KernelService {
             "KernelService: enter",
             metadata: [
                 "func": "\(#function)",
-                "tar": "\(tar)",
                 "kernelFilePath": "\(kernelFilePath)",
                 "platform": "\(String(describing: platform))",
             ]
@@ -109,7 +108,6 @@ public actor KernelService {
                 "KernelService: exit",
                 metadata: [
                     "func": "\(#function)",
-                    "tar": "\(tar)",
                     "kernelFilePath": "\(kernelFilePath)",
                     "platform": "\(String(describing: platform))",
                 ]
@@ -141,7 +139,9 @@ public actor KernelService {
         if !isLocalTar {
             let taskManager = ProgressTaskCoordinator()
             let downloadTask = await taskManager.startTask()
-            self.log.debug("KernelService: start download", metadata: ["tar": "\(tar)"])
+            // No URL in the metadata: a kernel source can carry a token or an internal
+            // hostname, and this log is world-readable.
+            self.log.debug("KernelService: start download")
             tarFile = tempDir.appendingPathComponent(tar.lastPathComponent)
             var downloadProgressUpdate: ProgressUpdateHandler?
             if let progressUpdate {

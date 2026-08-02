@@ -319,6 +319,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "Logging", package: "swift-log"),
                 "ContainerAPIService",
                 "ContainerAPIClient",
                 "ContainerNetworkClient",
