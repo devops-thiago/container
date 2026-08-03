@@ -482,6 +482,16 @@ public actor MachinesService {
         }
     }
 
+    /// The user's home directory as the system records it, unaffected by sandbox
+    /// redirection. Falls back to Foundation only if the password entry is unreadable, which
+    /// would mean something far more broken than a mount.
+    static var realHomeDirectory: String {
+        guard let entry = getpwuid(getuid()) else {
+            return FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        return String(cString: entry.pointee.pw_dir)
+    }
+
     public func stop(id: String) async throws {
         self.log.debug("\(#function)")
 
@@ -653,7 +663,14 @@ extension MachineConfiguration {
             )
         )
 
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // The real home, from the password database — not Foundation's answer.
+        //
+        // Inside an App Sandbox, `homeDirectoryForCurrentUser` and `NSHomeDirectory()` are
+        // both redirected to the embedder's container, so a machine would mount
+        // ~/Library/Containers/<bundle-id>/Data and the guest would see a home directory
+        // holding nothing but `Library`. It boots and looks like it worked. `getpwuid` is not
+        // redirected, and this is the directory the user means.
+        let home = MachinesService.realHomeDirectory
         config.mounts = [
             .virtiofs(
                 source: sbin.string,
