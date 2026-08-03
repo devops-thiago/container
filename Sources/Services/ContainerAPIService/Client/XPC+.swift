@@ -34,6 +34,15 @@ public enum XPCKeys: String {
     case containerOptions
     /// Opaque runtime-specific data.
     case runtimeData
+    /// Sandbox extension tokens for host directories this container will bind-mount.
+    ///
+    /// A sandboxed embedder cannot reach a folder its user picked in another process, and a
+    /// security-scoped bookmark cannot be handed over because bookmarks are app-keyed. A
+    /// token can: the embedder mints one per chosen directory and the server consumes them,
+    /// which extends the sandbox of the server *and* of the runtime helper it spawns, since
+    /// that helper inherits its profile. Absent or empty for an unsandboxed engine, which
+    /// needs no grant to open a path.
+    case sandboxExtensionTokens
     /// Vsock port number key.
     case port
     /// Exit code for a process

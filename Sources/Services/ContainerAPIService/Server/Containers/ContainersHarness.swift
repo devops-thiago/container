@@ -203,8 +203,16 @@ public struct ContainersHarness: Sendable {
 
         let initImage = message.string(key: .initImage)
         let runtimeData = message.dataNoCopy(key: .runtimeData)
+        // A malformed token blob is the embedder's bug, not the user's: fail the create with
+        // the decode error rather than starting a container whose mounts cannot work.
+        var tokens: [String] = []
+        if let tdata = message.dataNoCopy(key: .sandboxExtensionTokens) {
+            tokens = try JSONDecoder().decode([String].self, from: tdata)
+        }
 
-        try await service.create(configuration: config, kernel: kernel, options: options, initImage: initImage, runtimeData: runtimeData)
+        try await service.create(
+            configuration: config, kernel: kernel, options: options, initImage: initImage,
+            runtimeData: runtimeData, sandboxExtensionTokens: tokens)
         return message.reply()
     }
 
