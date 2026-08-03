@@ -46,12 +46,17 @@ public struct ContainerClient: Sendable {
     }
 
     /// Create a new container with the given configuration.
+    ///
+    /// - Parameter sandboxExtensionTokens: grants for host directories this container will
+    ///   bind-mount, minted by a sandboxed embedder for folders its user chose. Empty for an
+    ///   unsandboxed engine, which opens paths without needing one.
     public func create(
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default,
         kernel: Kernel,
         initImage: String? = nil,
-        runtimeData: Data? = nil
+        runtimeData: Data? = nil,
+        sandboxExtensionTokens: [String] = []
     ) async throws {
         do {
             let request = XPCMessage(route: .containerCreate)
@@ -69,6 +74,14 @@ public struct ContainerClient: Sendable {
 
             if let runtimeData {
                 request.set(key: .runtimeData, value: runtimeData)
+            }
+
+            // JSON like every other structured field on this route: XPCMessage carries data,
+            // strings and scalars, not string arrays.
+            if !sandboxExtensionTokens.isEmpty {
+                request.set(
+                    key: .sandboxExtensionTokens,
+                    value: try JSONEncoder().encode(sandboxExtensionTokens))
             }
 
             try await xpcSend(message: request)
