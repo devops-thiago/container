@@ -145,6 +145,15 @@ extension Application {
             throw ArgumentParser.ExitCode(exitCode)
         }
 
+        /// The user's home directory as the system records it, unaffected by sandbox
+        /// redirection.
+        static var realHomeDirectory: String {
+            guard let entry = getpwuid(getuid()) else {
+                return FileManager.default.homeDirectoryForCurrentUser.path
+            }
+            return String(cString: entry.pointee.pw_dir)
+        }
+
         func getWorkingDirectory(_ snapshot: MachineSnapshot, user: ProcessConfiguration.User) -> String {
             if let cwd = processFlags.cwd {
                 return cwd
@@ -153,7 +162,11 @@ extension Application {
             if snapshot.bootConfig.homeMount == .none {
                 return fallback
             }
-            let home = FilePath(FileManager.default.homeDirectoryForCurrentUser.path)
+            // The real home, not Foundation's: sandboxed, `homeDirectoryForCurrentUser`
+            // answers with this process's container, and the working directory would never
+            // look like it sits under it — so `container machine run` from a project folder
+            // would silently start in `/` instead of where the user is.
+            let home = FilePath(Self.realHomeDirectory)
             let cwd = FilePath(FileManager.default.currentDirectoryPath)
             guard cwd.starts(with: home) else {
                 return fallback
