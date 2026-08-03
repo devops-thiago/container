@@ -98,6 +98,17 @@ extension Application {
         }
 
         public func run() async throws {
+            // Same reasoning as `system start`: the host app owns the engine's lifetime,
+            // and stopping it from here would ask launchctl to bootout an SMAppService job
+            // the app is holding open. Say what to do instead.
+            if ServiceIdentity.isEmbedded {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: """
+                        this engine is embedded in an app, which starts and stops it. \
+                        Quit the app to stop the engine.
+                        """)
+            }
             let log = Logger(
                 label: ServiceIdentity.machPrefix + "cli",
                 factory: { label in
