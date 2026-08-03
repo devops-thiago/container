@@ -47,16 +47,16 @@ public struct ContainerClient: Sendable {
 
     /// Create a new container with the given configuration.
     ///
-    /// - Parameter sandboxExtensionTokens: grants for host directories this container will
-    ///   bind-mount, minted by a sandboxed embedder for folders its user chose. Empty for an
-    ///   unsandboxed engine, which opens paths without needing one.
+    /// - Parameter hostDirectoryBookmarks: bookmarks for host directories this container
+    ///   will bind-mount, made by a sandboxed embedder for folders its user chose. Empty for
+    ///   an unsandboxed engine, which opens paths without needing a grant.
     public func create(
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default,
         kernel: Kernel,
         initImage: String? = nil,
         runtimeData: Data? = nil,
-        sandboxExtensionTokens: [String] = []
+        hostDirectoryBookmarks: [Data] = []
     ) async throws {
         do {
             let request = XPCMessage(route: .containerCreate)
@@ -77,11 +77,12 @@ public struct ContainerClient: Sendable {
             }
 
             // JSON like every other structured field on this route: XPCMessage carries data,
-            // strings and scalars, not string arrays.
-            if !sandboxExtensionTokens.isEmpty {
+            // strings and scalars, not arrays. Data encodes as base64 here, which is what
+            // keeps a bookmark's bytes intact across the boundary.
+            if !hostDirectoryBookmarks.isEmpty {
                 request.set(
-                    key: .sandboxExtensionTokens,
-                    value: try JSONEncoder().encode(sandboxExtensionTokens))
+                    key: .hostDirectoryBookmarks,
+                    value: try JSONEncoder().encode(hostDirectoryBookmarks))
             }
 
             try await xpcSend(message: request)

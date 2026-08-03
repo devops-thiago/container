@@ -59,7 +59,7 @@ public actor ContainersService {
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
     /// Host directories a sandboxed embedder has granted, per container. Inert unsandboxed.
-    private let sandboxExtensions: SandboxExtensions
+    private let hostDirectoryAccess: HostDirectoryAccess
 
     // FIXME: Find a better mechanism for services running on the APIServer to work with each other
     private weak var networksService: NetworksService?
@@ -81,7 +81,7 @@ public actor ContainersService {
         self.log = log
         self.debugHelpers = debugHelpers
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
-        self.sandboxExtensions = SandboxExtensions(log: log)
+        self.hostDirectoryAccess = HostDirectoryAccess(log: log)
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
     }
 
@@ -267,11 +267,11 @@ public actor ContainersService {
     }
 
     /// Create a new container from the provided id and configuration.
-    /// - Parameter sandboxExtensionTokens: grants for host directories this container
-    ///   bind-mounts, minted by a sandboxed embedder. Consumed before the bundle is written,
-    ///   so the runtime helper spawned later inherits a profile that already reaches them.
-    public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil, sandboxExtensionTokens: [String] = []) async throws {
-        await self.sandboxExtensions.consume(tokens: sandboxExtensionTokens, for: configuration.id)
+    /// - Parameter hostDirectoryBookmarks: grants for host directories this container
+    ///   bind-mounts, made by a sandboxed embedder. Resolved before the bundle is written, so
+    ///   the runtime helper spawned later inherits a profile that already reaches them.
+    public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil, hostDirectoryBookmarks: [Data] = []) async throws {
+        await self.hostDirectoryAccess.resolve(bookmarks: hostDirectoryBookmarks, for: configuration.id)
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -1074,9 +1074,9 @@ public actor ContainersService {
         }
 
         // Give back any host-directory grants this container was holding. Before the early
-        // return below: a container the exit handler already reaped still consumed
-        // extensions at create, and nothing else would ever hand them back.
-        await self.sandboxExtensions.release(for: id)
+        // return below: a container the exit handler already reaped still resolved bookmarks
+        // at create, and nothing else would ever hand them back.
+        await self.hostDirectoryAccess.release(for: id)
 
         // Did the exit container handler win?
         if self.containers[id] == nil {
