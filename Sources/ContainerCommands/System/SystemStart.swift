@@ -88,6 +88,21 @@ extension Application {
         }
 
         public func run() async throws {
+            // Embedded, the engine's lifetime belongs to the host app: its agents are
+            // SMAppService jobs the app registers, and launchd already owns their mach
+            // names. Refuse here rather than partway through — the launchd path below
+            // creates directories and writes a plist into the app root before
+            // ServiceManager.register rejects it, leaving a stray file and an error about
+            // sandboxed embedding that means nothing to someone at a Terminal prompt.
+            if ServiceIdentity.isEmbedded {
+                throw ContainerizationError(
+                    .unsupported,
+                    message: """
+                        this engine is embedded in an app, which starts and stops it. \
+                        Open the app to start the engine; `container` talks to it once it \
+                        is running.
+                        """)
+            }
             try ConfigurationLoader.copyConfigurationToReadOnly(to: appRoot)
             // Pass appRoot before installRoot: ConfigurationLoader uses first-match-wins
             // precedence, so user-provided config in appRoot overrides the defaults
