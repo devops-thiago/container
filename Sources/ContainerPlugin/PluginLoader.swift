@@ -520,9 +520,13 @@ extension PluginLoader {
         for index in 0..<count {
             let pid = pids[index]
             guard pid > 0, pid != selfPid else { continue }
-            var buffer = [CChar](repeating: 0, count: 4096)
-            guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { continue }
-            let path = String(cString: buffer)
+            // `proc_pidpath` returns the length it wrote, so the string is built from that
+            // rather than by scanning for a terminator — which is also what the array form of
+            // `String(cString:)` was deprecated for asking callers to assume.
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+            guard length > 0 else { continue }
+            let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
             // Helpers only: never the app itself or the CLI the user may be running.
             guard path.hasPrefix(root), path.contains("/libexec/container/plugins/") else {
                 continue
