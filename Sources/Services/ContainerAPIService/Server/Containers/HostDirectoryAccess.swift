@@ -109,6 +109,13 @@ actor HostDirectoryAccess {
         return true
     }
 
+    /// Whether this process already holds dynamic host-directory access for a container.
+    /// Empty bookmark sets deliberately do not count: they mean the sandbox's static profile
+    /// already covers the mounts, so bootstrap may validate the persisted empty set normally.
+    func hasGrants(for id: String) -> Bool {
+        granted[id] != nil
+    }
+
     /// Give up a container's grants. Idempotent: a container deleted twice, or one that never
     /// had any, is not an error.
     func release(for id: String) {
