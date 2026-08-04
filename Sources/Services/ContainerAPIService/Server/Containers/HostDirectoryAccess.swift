@@ -51,17 +51,18 @@ actor HostDirectoryAccess {
         self.log = log
     }
 
-    /// Take up the grants for a container.
-    ///
-    /// A bookmark that will not resolve is logged and skipped rather than thrown: the mount it
-    /// belongs to then fails at start with a filesystem error naming the directory, which says
-    /// more than a create-time "invalid bookmark" would.
+    /// Replace the grants held for a container.
     ///
     /// Stale bookmarks are used anyway. Staleness means the directory moved and the bookmark
     /// was rebuilt from its recorded identity — the resolved URL is still the folder the user
     /// picked, which is the question being asked here.
-    func resolve(bookmarks: [Data], for id: String) {
-        guard !bookmarks.isEmpty else { return }
+    ///
+    /// Resolution is all-or-nothing. Resolve every replacement before releasing the previous
+    /// URLs so a malformed bookmark or bootstrap retry cannot create an access gap, retain a
+    /// partial grant set, or accumulate duplicates.
+    @discardableResult
+    func resolve(bookmarks: [Data], for id: String) -> Bool {
+        var resolutionFailed = false
         var resolved: [URL] = []
         for bookmark in bookmarks {
             var stale = false
@@ -78,16 +79,34 @@ actor HostDirectoryAccess {
                 }
                 resolved.append(url)
             } catch {
+                resolutionFailed = true
                 log?.warning(
                     "failed to resolve host directory bookmark",
                     metadata: ["id": "\(id)", "error": "\(error)"])
             }
         }
-        guard !resolved.isEmpty else { return }
-        granted[id, default: []].append(contentsOf: resolved)
-        log?.info(
-            "resolved host directory grants",
-            metadata: ["id": "\(id)", "count": "\(resolved.count)"])
+
+        guard !resolutionFailed else {
+            for url in resolved {
+                url.stopAccessingSecurityScopedResource()
+            }
+            return false
+        }
+
+        let previous = granted.removeValue(forKey: id) ?? []
+        if !resolved.isEmpty {
+            granted[id] = resolved
+        }
+        for url in previous {
+            url.stopAccessingSecurityScopedResource()
+        }
+
+        if !resolved.isEmpty {
+            log?.info(
+                "resolved host directory grants",
+                metadata: ["id": "\(id)", "count": "\(resolved.count)"])
+        }
+        return true
     }
 
     /// Give up a container's grants. Idempotent: a container deleted twice, or one that never
