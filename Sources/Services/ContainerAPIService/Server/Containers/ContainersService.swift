@@ -20,6 +20,7 @@ import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
 import ContainerRuntimeClient
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationEXT4
@@ -55,6 +56,8 @@ public actor ContainersService {
     private let runtimePlugins: [Plugin]
     private let exitMonitor: ExitMonitor
     private let containerSystemConfig: ContainerSystemConfig
+
+    private static let hostDirectoryBookmarksFilename = "host-directory-bookmarks.json"
 
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
@@ -128,6 +131,7 @@ public actor ContainersService {
                     }
 
                     let bundle = ContainerResource.Bundle(path: dir)
+                    try Self.removePersistedHostDirectoryBookmarks(at: dir)
                     try? bundle.delete()
                     continue
                 }
@@ -151,12 +155,22 @@ public actor ContainersService {
                     )
                 }
             } catch {
+                let loadError = error
+                do {
+                    try Self.removePersistedHostDirectoryBookmarks(at: dir)
+                } catch {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "failed to remove persisted host-directory authorization at \(dir.path)",
+                        cause: error
+                    )
+                }
                 try? FileManager.default.removeItem(at: dir)
                 log.warning(
                     "failed to load container",
                     metadata: [
                         "path": "\(dir.path)",
-                        "error": "\(error)",
+                        "error": "\(loadError)",
                     ])
             }
         }
@@ -268,10 +282,12 @@ public actor ContainersService {
 
     /// Create a new container from the provided id and configuration.
     /// - Parameter hostDirectoryBookmarks: grants for host directories this container
-    ///   bind-mounts, made by a sandboxed embedder. Resolved before the bundle is written, so
-    ///   the runtime helper spawned later inherits a profile that already reaches them.
-    public func create(configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil, hostDirectoryBookmarks: [Data] = []) async throws {
-        await self.hostDirectoryAccess.resolve(bookmarks: hostDirectoryBookmarks, for: configuration.id)
+    ///   bind-mounts, made by a sandboxed embedder. Persisted with the container and resolved
+    ///   only after every throwing create operation, so failed creates cannot retain access.
+    public func create(
+        configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil,
+        hostDirectoryBookmarks: [Data] = []
+    ) async throws {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -341,6 +357,9 @@ public actor ContainersService {
             }
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
+            let requiredHostDirectoryBookmarks =
+                ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
+                ? hostDirectoryBookmarks : []
             let systemPlatform = kernel.platform
 
             // Fetch init image (custom or default)
@@ -379,7 +398,9 @@ public actor ContainersService {
                     runtimeData: runtimeData
                 )
 
+                try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
                 try runtimeConfig.writeRuntimeConfiguration()
+                try Self.persistHostDirectoryBookmarks(requiredHostDirectoryBookmarks, at: path)
 
                 let snapshot = ContainerSnapshot(
                     configuration: configuration,
@@ -387,8 +408,12 @@ public actor ContainersService {
                     networks: [],
                     startedDate: nil
                 )
+                await self.hostDirectoryAccess.resolve(
+                    bookmarks: requiredHostDirectoryBookmarks,
+                    for: configuration.id)
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
             } catch {
+                try? FileManager.default.removeItem(at: path)
                 throw error
             }
         }
@@ -426,6 +451,7 @@ public actor ContainersService {
 
             let path = self.containerRoot.appendingPathComponent(id)
             let (config, _) = try Self.getContainerConfiguration(at: path)
+            try await self.restoreHostDirectoryAccess(for: id, configuration: config, at: path)
 
             var networkBootstrapInfos = [NetworkBootstrapInfo]()
             for n in config.networks {
@@ -1116,7 +1142,11 @@ public actor ContainersService {
             try? ServiceManager.deregister(fullServiceLabel: label)
         }
 
-        // Always try to delete the bundle directory, even if it's incomplete
+        // Remove the persisted capability separately so a later bundle-delete failure cannot
+        // leave authorization behind after this container is forgotten.
+        try Self.removePersistedHostDirectoryBookmarks(at: path)
+
+        // Always try to delete the bundle directory, even if it's incomplete.
         do {
             try bundle.delete()
         } catch {
@@ -1133,6 +1163,50 @@ public actor ContainersService {
 
     private func cleanUp(id: String, context: AsyncLock.Context) async throws {
         try await self._cleanUp(id: id)
+    }
+
+    private static func persistHostDirectoryBookmarks(_ bookmarks: [Data], at path: URL) throws {
+        let data = try JSONEncoder().encode(bookmarks)
+        let destination = path.appendingPathComponent(Self.hostDirectoryBookmarksFilename)
+        try data.write(to: destination, options: .atomic)
+    }
+
+    private static func removePersistedHostDirectoryBookmarks(at path: URL) throws {
+        let bookmarksPath = path.appendingPathComponent(Self.hostDirectoryBookmarksFilename)
+        guard FileManager.default.fileExists(atPath: bookmarksPath.path) else { return }
+        try FileManager.default.removeItem(at: bookmarksPath)
+    }
+
+    private func restoreHostDirectoryAccess(
+        for id: String,
+        configuration: ContainerConfiguration,
+        at path: URL
+    ) async throws {
+        let requiresAuthorization =
+            ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
+        guard requiresAuthorization else {
+            await self.hostDirectoryAccess.resolve(bookmarks: [], for: id)
+            return
+        }
+
+        let bundle = ContainerResource.Bundle(path: path)
+        let bookmarksPath = bundle.filePath(for: Self.hostDirectoryBookmarksFilename)
+        guard FileManager.default.fileExists(atPath: bookmarksPath.path) else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "container \(id) predates persisted host-directory authorization; recreate it to re-authorize bind mounts"
+            )
+        }
+
+        let bookmarks: [Data] = try bundle.load(filename: Self.hostDirectoryBookmarksFilename)
+        guard !bookmarks.isEmpty,
+            await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id)
+        else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "failed to restore host-directory authorization for container \(id); recreate it to re-authorize bind mounts"
+            )
+        }
     }
 
     private func getContainerCreationOptions(id: String) throws -> ContainerCreateOptions {
