@@ -357,6 +357,10 @@ public actor ContainersService {
             }
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
+            // Only bookmarks the caller actually supplied represent dynamic grants. A
+            // sandboxed virtiofs mount can already be authorized by the apiserver's static
+            // profile (the app-group container, home directory, /Volumes, and other declared
+            // roots), and the CLI correctly sends no bookmark for those paths.
             let requiredHostDirectoryBookmarks =
                 ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
                 ? hostDirectoryBookmarks : []
@@ -408,9 +412,16 @@ public actor ContainersService {
                     networks: [],
                     startedDate: nil
                 )
-                await self.hostDirectoryAccess.resolve(
-                    bookmarks: requiredHostDirectoryBookmarks,
-                    for: configuration.id)
+                guard
+                    await self.hostDirectoryAccess.resolve(
+                        bookmarks: requiredHostDirectoryBookmarks,
+                        for: configuration.id)
+                else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "failed to resolve host-directory authorization for container \(configuration.id)"
+                    )
+                }
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
             } catch {
                 try? FileManager.default.removeItem(at: path)
@@ -1189,6 +1200,14 @@ public actor ContainersService {
             return
         }
 
+        // A bookmark received over XPC carries an implicit interprocess sandbox extension.
+        // Once create has resolved and retained it, reloading the plain bookmark from disk is
+        // both redundant and weaker: persisted plain bookmarks do not recreate that hand-off.
+        // Stopped containers therefore reuse their live grants for this apiserver lifetime.
+        if await self.hostDirectoryAccess.hasGrants(for: id) {
+            return
+        }
+
         let bundle = ContainerResource.Bundle(path: path)
         let bookmarksPath = bundle.filePath(for: Self.hostDirectoryBookmarksFilename)
         guard FileManager.default.fileExists(atPath: bookmarksPath.path) else {
@@ -1199,9 +1218,17 @@ public actor ContainersService {
         }
 
         let bookmarks: [Data] = try bundle.load(filename: Self.hostDirectoryBookmarksFilename)
-        guard !bookmarks.isEmpty,
-            await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id)
-        else {
+        // Empty is the durable representation for mounts covered by the apiserver's static
+        // profile. A nonempty bookmark must arrive from the embedder in this process lifetime:
+        // loading its plain bytes from disk can reconstruct a URL, but cannot recreate the
+        // interprocess sandbox extension that made the directory accessible.
+        guard bookmarks.isEmpty else {
+            throw ContainerizationError(
+                .invalidState,
+                message: "host-directory authorization for container \(id) expired when the engine restarted; recreate it to re-authorize bind mounts"
+            )
+        }
+        guard await self.hostDirectoryAccess.resolve(bookmarks: [], for: id) else {
             throw ContainerizationError(
                 .invalidState,
                 message: "failed to restore host-directory authorization for container \(id); recreate it to re-authorize bind mounts"
