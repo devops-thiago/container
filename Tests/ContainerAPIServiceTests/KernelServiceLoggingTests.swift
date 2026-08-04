@@ -54,20 +54,12 @@ struct KernelServiceLoggingTests {
             set { metadata[key] = newValue }
         }
 
-        func log(
-            level: Logger.Level,
-            message: Logger.Message,
-            metadata explicitMetadata: Logger.Metadata?,
-            source: String,
-            file: String,
-            function: String,
-            line: UInt
-        ) {
+        func log(event: LogEvent) {
             var combinedMetadata = metadata
-            if let explicitMetadata {
-                combinedMetadata.merge(explicitMetadata) { _, explicit in explicit }
+            if let eventMetadata = event.metadata {
+                combinedMetadata.merge(eventMetadata) { _, explicit in explicit }
             }
-            capture.append(message: message.description, metadata: combinedMetadata)
+            capture.append(message: event.message.description, metadata: combinedMetadata)
         }
     }
 
@@ -92,6 +84,7 @@ struct KernelServiceLoggingTests {
                 kernelFilePath: "kernel",
                 platform: .linuxArm,
                 progressUpdate: nil,
+                expectedDigest: "sha256:" + String(repeating: "0", count: 64),
                 force: false)
             Issue.record("expected the unsupported source URL to fail")
         } catch {
