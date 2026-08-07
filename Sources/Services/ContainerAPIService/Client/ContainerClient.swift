@@ -15,12 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
-import ContainerVersion
 
 /// A client for interacting with the container API server.
 ///

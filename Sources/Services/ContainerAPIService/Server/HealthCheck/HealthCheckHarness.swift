@@ -60,10 +60,18 @@ public actor HealthCheckHarness {
         // Extra optional fields for richer client display
         reply.set(key: .apiServerBuild, value: ReleaseVersion.buildType())
         reply.set(key: .apiServerAppName, value: "container-apiserver")
-        if let lifecycleGeneration, let processNonce {
+        // The nonce identifies this process and nothing else, so it is reported whenever there
+        // is one. It used to be withheld unless a lifecycle generation came with it, which made
+        // it invisible to anyone not speaking the launchd-takeover protocol — and that protocol
+        // is gone under SMAppService, where launchd starts the agent and passes no generation.
+        // A client that watches the nonce to notice a replacement engine saw nil forever and
+        // could only re-announce on every poll.
+        if let processNonce {
+            reply.set(key: .processNonce, value: processNonce)
+        }
+        if let lifecycleGeneration {
             reply.set(key: .lifecycleProtocolVersion, value: SystemHealth.currentLifecycleProtocolVersion)
             reply.set(key: .lifecycleGeneration, value: lifecycleGeneration)
-            reply.set(key: .processNonce, value: processNonce)
         }
         return reply
     }

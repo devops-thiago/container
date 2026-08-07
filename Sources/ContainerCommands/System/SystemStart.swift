@@ -18,13 +18,13 @@ import ArgumentParser
 import ContainerAPIClient
 import ContainerPersistence
 import ContainerPlugin
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import Foundation
 import MachineAPIClient
 import SystemPackage
 import TerminalProgress
-import ContainerVersion
 
 extension Application {
     public struct SystemStart: AsyncLoggableCommand {

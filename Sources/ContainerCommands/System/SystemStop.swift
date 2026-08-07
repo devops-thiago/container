@@ -18,6 +18,7 @@ import ArgumentParser
 import ContainerAPIClient
 import ContainerPlugin
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -25,7 +26,6 @@ import ContainerizationOS
 import Darwin
 import Foundation
 import Logging
-import ContainerVersion
 
 extension Application {
     public struct SystemStop: AsyncLoggableCommand {
