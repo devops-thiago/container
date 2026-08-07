@@ -1223,17 +1223,25 @@ public actor ContainersService {
         }
 
         if !supplied.isEmpty {
-            guard await self.hostDirectoryAccess.resolve(bookmarks: supplied, for: id) else {
-                throw ContainerizationError(
-                    .invalidArgument,
-                    message: "the bind-mount authorization supplied for container \(id) does not open its directories"
-                )
+            if await self.hostDirectoryAccess.resolve(bookmarks: supplied, for: id) {
+                // Replaces what create wrote, so a later start with no embedder to ask still has
+                // the most recent grants to try rather than the oldest.
+                try? Self.persistHostDirectoryBookmarks(supplied, at: path)
+                try await self.ensurePoolCoversBindMounts(of: configuration)
+                return
             }
-            // Replaces what create wrote, so a later start with no embedder to ask still has
-            // the most recent grants to try rather than the oldest.
-            try? Self.persistHostDirectoryBookmarks(supplied, at: path)
-            try await self.ensurePoolCoversBindMounts(of: configuration)
-            return
+            // Not fatal, because the commonest way to get here is a grant that is newer than the
+            // bookmarks carrying it. The embedder mints its set before it calls; if this same
+            // call then raised a panel and the user granted the folder, the set it sent predates
+            // the answer and opens nothing. Failing here told the user their authorization was
+            // bad at the exact moment they had just given it — starting a machine failed once,
+            // then worked on the next click, which is how this was found.
+            //
+            // So fall through to the sources that reflect the grant: what this container already
+            // holds, what was persisted, and the boot-wide pool the panel just filled.
+            self.log.info(
+                "supplied bind-mount authorization did not open its directories; falling back",
+                metadata: ["id": "\(id)"])
         }
 
         if await self.hostDirectoryAccess.hasGrants(for: id) {
