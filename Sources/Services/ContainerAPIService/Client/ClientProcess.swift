@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -23,7 +24,6 @@ import Foundation
 import NIOCore
 import NIOPosix
 import TerminalProgress
-import ContainerVersion
 
 /// A protocol that defines the methods and data members available to a process
 /// started inside of a container.

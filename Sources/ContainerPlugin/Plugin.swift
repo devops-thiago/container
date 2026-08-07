@@ -14,8 +14,8 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import Foundation
 import ContainerVersion
+import Foundation
 
 /// Value type that contains the plugin configuration, the parsed name of the
 /// plugin and whether a CLI surface for the plugin was found.

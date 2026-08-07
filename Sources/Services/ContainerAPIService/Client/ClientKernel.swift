@@ -14,13 +14,13 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
-import ContainerVersion
 
 public struct ClientKernel {
     static let serviceIdentifier = ServiceIdentity.apiServerService

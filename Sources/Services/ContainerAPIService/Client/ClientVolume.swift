@@ -15,10 +15,10 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import Foundation
-import ContainerVersion
 
 public struct ClientVolume {
     static let serviceIdentifier = ServiceIdentity.apiServerService
