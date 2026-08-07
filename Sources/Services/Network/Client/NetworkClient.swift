@@ -15,11 +15,11 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
 import Foundation
-import ContainerVersion
 
 /// A client for interacting with a single network.
 public struct NetworkClient: Sendable {
