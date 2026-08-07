@@ -44,6 +44,9 @@ public enum XPCKeys: String {
     /// ever re-extend their creator. Absent or empty for an unsandboxed engine, which needs no
     /// grant to open a path.
     case hostDirectoryBookmarks
+    /// A single host directory the engine wants and cannot open, sent to the embedder so it
+    /// can grant it — after asking the user, if it has to.
+    case hostDirectoryPath
     /// Vsock port number key.
     case port
     /// Exit code for a process
@@ -211,6 +214,13 @@ public enum XPCRoute: String {
     case runtimeAttach
     /// Hands a recorded instance endpoint back to a helper that must dial it.
     case runtimeResolve
+    /// The embedder pushing folders its user has already granted, as fresh plain bookmarks.
+    /// Sent at connect and whenever another folder is granted, so an ordinary CLI bind mount
+    /// needs no round trip and keeps working once the app quits.
+    case hostDirectoryGrantsPublish
+    /// Served by the *embedder*, not here: the engine asking for a folder nothing has granted.
+    /// The reply carries a bookmark, or nothing if the user declined.
+    case hostDirectoryGrantRequest
 
     case installKernel
     case getDefaultKernel

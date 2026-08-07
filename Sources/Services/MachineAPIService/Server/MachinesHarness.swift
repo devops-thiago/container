@@ -107,7 +107,13 @@ public struct MachinesHarness: Sendable {
             dynamicEnv = try JSONDecoder().decode([String: String].self, from: dynamicEnvData)
         }
 
-        let snapshot = try await service.boot(id: id, dynamicEnv: dynamicEnv)
+        var bookmarks: [Data] = []
+        if let data = message.dataNoCopy(key: MachineKeys.hostDirectoryBookmarks.rawValue) {
+            bookmarks = try JSONDecoder().decode([Data].self, from: data)
+        }
+
+        let snapshot = try await service.boot(
+            id: id, dynamicEnv: dynamicEnv, hostDirectoryBookmarks: bookmarks)
         let data = try JSONEncoder().encode(snapshot)
 
         let reply = message.reply()

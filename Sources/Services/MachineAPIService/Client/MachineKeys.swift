@@ -31,4 +31,11 @@ public enum MachineKeys: String {
     case logs
     /// Special-case environment variables recomputed on container machine start
     case dynamicEnv
+    /// Bookmark data authorizing the home directory a machine mounts.
+    ///
+    /// The machine service cannot mint this for itself. A bookmark lends exactly the reach its
+    /// maker holds, so one made here for a folder this process cannot open would resolve to the
+    /// right directory and lend nothing (`docs/sandbox-spikes.md`, S4r6). It has to come from
+    /// the embedder, which is where the user answered the panel.
+    case hostDirectoryBookmarks
 }

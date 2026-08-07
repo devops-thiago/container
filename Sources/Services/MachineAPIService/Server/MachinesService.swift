@@ -326,7 +326,14 @@ public actor MachinesService {
         ociPlatform.architecture == "amd64" ? .linuxAmd : .linuxArm
     }
 
-    public func boot(id: String?, dynamicEnv: [String: String] = [:]) async throws -> MachineSnapshot {
+    /// - Parameter hostDirectoryBookmarks: authorization for the home directory this machine
+    ///   mounts, from the embedder. Forwarded to the container service, which is what actually
+    ///   holds the grant — this process only assembles the configuration.
+    public func boot(
+        id: String?,
+        dynamicEnv: [String: String] = [:],
+        hostDirectoryBookmarks: [Data] = []
+    ) async throws -> MachineSnapshot {
         self.log.debug("\(#function)")
 
         guard let id = id ?? self.default?.id else {
@@ -386,11 +393,13 @@ public actor MachinesService {
                 try await self.client.create(
                     configuration: config,
                     options: ContainerCreateOptions(autoRemove: true, rootFsOverride: rootfs),
-                    kernel: kernel
+                    kernel: kernel,
+                    hostDirectoryBookmarks: hostDirectoryBookmarks
                 )
 
                 let process = try await self.client.bootstrap(
-                    id: cid, stdio: [nil, nil, nil], dynamicEnv: dynamicEnv)
+                    id: cid, stdio: [nil, nil, nil], dynamicEnv: dynamicEnv,
+                    hostDirectoryBookmarks: hostDirectoryBookmarks)
                 try await process.start()
 
                 try fhs.append(contentsOf: await self.client.logs(id: cid))

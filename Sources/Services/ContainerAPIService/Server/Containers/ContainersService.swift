@@ -357,13 +357,16 @@ public actor ContainersService {
             }
 
             let path = self.containerRoot.appendingPathComponent(configuration.id)
-            // Only bookmarks the caller actually supplied represent dynamic grants. A
-            // sandboxed virtiofs mount can already be authorized by the apiserver's static
-            // profile (the app-group container, home directory, /Volumes, and other declared
-            // roots), and the CLI correctly sends no bookmark for those paths.
+            // Bookmarks the caller supplied, or — for the CLI, which has none — whatever the
+            // boot-wide pool already holds / can obtain from the embedder. The static file
+            // exceptions that used to cover home and /Volumes are gone (QA1773), so every
+            // virtiofs source needs a grant from somewhere.
             let requiredHostDirectoryBookmarks =
                 ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
                 ? hostDirectoryBookmarks : []
+            if ServiceIdentity.appGroup != nil {
+                try await self.ensurePoolCoversBindMounts(of: configuration)
+            }
             let systemPlatform = kernel.platform
 
             // Fetch init image (custom or default)
@@ -1199,12 +1202,13 @@ public actor ContainersService {
 
     /// Make sure this process can open the container's bind mounts before it starts.
     ///
-    /// Three sources, in order of authority. Grants the embedder just handed us are best: they
-    /// were minted moments ago from a durable app-scoped bookmark and are the only thing that
-    /// works after the machine restarted. Grants already held from an earlier start in this
-    /// boot are next. What was persisted at create is the last resort, and it is only good
-    /// within the boot that created it — `HostDirectoryAccess.resolve` is what notices when it
-    /// is not, because a lapsed bookmark decodes perfectly and opens nothing.
+    /// Supplied bookmarks from the embedder first — minted moments ago, and the only thing
+    /// that works after a restart. Then whatever this container already holds from an earlier
+    /// start in this boot. Then the boot-wide pool, which is how every CLI request gets its
+    /// directories: either from grants the app already published, or by asking the app (which
+    /// can put a panel in front of the user). Persisted bookmarks are last and only good
+    /// within the boot that wrote them — a lapsed one decodes perfectly and opens nothing,
+    /// which is what `HostDirectoryAccess.resolve` now notices (S6d).
     private func restoreHostDirectoryAccess(
         for id: String,
         configuration: ContainerConfiguration,
@@ -1228,29 +1232,45 @@ public actor ContainersService {
             // Replaces what create wrote, so a later start with no embedder to ask still has
             // the most recent grants to try rather than the oldest.
             try? Self.persistHostDirectoryBookmarks(supplied, at: path)
+            try await self.ensurePoolCoversBindMounts(of: configuration)
             return
         }
 
         if await self.hostDirectoryAccess.hasGrants(for: id) {
+            try await self.ensurePoolCoversBindMounts(of: configuration)
             return
         }
 
         let bundle = ContainerResource.Bundle(path: path)
         let bookmarksPath = bundle.filePath(for: Self.hostDirectoryBookmarksFilename)
-        guard FileManager.default.fileExists(atPath: bookmarksPath.path) else {
-            throw ContainerizationError(
-                .invalidState,
-                message: "container \(id) predates persisted host-directory authorization; recreate it to re-authorize bind mounts"
-            )
+        if FileManager.default.fileExists(atPath: bookmarksPath.path) {
+            let bookmarks: [Data] = try bundle.load(filename: Self.hostDirectoryBookmarksFilename)
+            if !bookmarks.isEmpty,
+                await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id)
+            {
+                try await self.ensurePoolCoversBindMounts(of: configuration)
+                return
+            }
         }
 
-        let bookmarks: [Data] = try bundle.load(filename: Self.hostDirectoryBookmarksFilename)
-        guard await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id) else {
-            throw ContainerizationError(
-                .invalidState,
-                message:
-                    "the bind-mount authorization for container \(id) did not survive the restart; start it from SiliconShip, which can re-authorize it without asking again"
-            )
+        // CLI path, and the fallback when every bookmark source is empty or lapsed: the pool
+        // is what the app published, or what it is about to grant from a panel.
+        try await self.ensurePoolCoversBindMounts(of: configuration)
+        await self.hostDirectoryAccess.resolve(bookmarks: [], for: id)
+    }
+
+    /// Every virtiofs source this container names must be openable in this process. Asks the
+    /// embedder for any that is not — which may put a panel in front of the user.
+    private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration) async throws {
+        let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.source))
+        for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
+            guard await HostDirectoryGrants.shared.request(source) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message:
+                        "cannot mount \(source): SiliconShip has no permission for that folder. Grant it in the app, or keep the app open so it can ask."
+                )
+            }
         }
     }
 
