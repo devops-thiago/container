@@ -431,7 +431,15 @@ public actor ContainersService {
     }
 
     /// Bootstrap the init process of the container.
-    public func bootstrap(id: String, stdio: [FileHandle?], dynamicEnv: [String: String]) async throws {
+    ///
+    /// - Parameter hostDirectoryBookmarks: fresh bind-mount grants from the embedder, if it has
+    ///   any. A start after the machine restarted has no other source of them.
+    public func bootstrap(
+        id: String,
+        stdio: [FileHandle?],
+        dynamicEnv: [String: String],
+        hostDirectoryBookmarks: [Data] = []
+    ) async throws {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -462,7 +470,8 @@ public actor ContainersService {
 
             let path = self.containerRoot.appendingPathComponent(id)
             let (config, _) = try Self.getContainerConfiguration(at: path)
-            try await self.restoreHostDirectoryAccess(for: id, configuration: config, at: path)
+            try await self.restoreHostDirectoryAccess(
+                for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks)
 
             var networkBootstrapInfos = [NetworkBootstrapInfo]()
             for n in config.networks {
@@ -1188,10 +1197,19 @@ public actor ContainersService {
         try FileManager.default.removeItem(at: bookmarksPath)
     }
 
+    /// Make sure this process can open the container's bind mounts before it starts.
+    ///
+    /// Three sources, in order of authority. Grants the embedder just handed us are best: they
+    /// were minted moments ago from a durable app-scoped bookmark and are the only thing that
+    /// works after the machine restarted. Grants already held from an earlier start in this
+    /// boot are next. What was persisted at create is the last resort, and it is only good
+    /// within the boot that created it — `HostDirectoryAccess.resolve` is what notices when it
+    /// is not, because a lapsed bookmark decodes perfectly and opens nothing.
     private func restoreHostDirectoryAccess(
         for id: String,
         configuration: ContainerConfiguration,
-        at path: URL
+        at path: URL,
+        supplied: [Data]
     ) async throws {
         let requiresAuthorization =
             ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
@@ -1200,10 +1218,19 @@ public actor ContainersService {
             return
         }
 
-        // A bookmark received over XPC carries an implicit interprocess sandbox extension.
-        // Once create has resolved and retained it, reloading the plain bookmark from disk is
-        // both redundant and weaker: persisted plain bookmarks do not recreate that hand-off.
-        // Stopped containers therefore reuse their live grants for this apiserver lifetime.
+        if !supplied.isEmpty {
+            guard await self.hostDirectoryAccess.resolve(bookmarks: supplied, for: id) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "the bind-mount authorization supplied for container \(id) does not open its directories"
+                )
+            }
+            // Replaces what create wrote, so a later start with no embedder to ask still has
+            // the most recent grants to try rather than the oldest.
+            try? Self.persistHostDirectoryBookmarks(supplied, at: path)
+            return
+        }
+
         if await self.hostDirectoryAccess.hasGrants(for: id) {
             return
         }
@@ -1218,20 +1245,11 @@ public actor ContainersService {
         }
 
         let bookmarks: [Data] = try bundle.load(filename: Self.hostDirectoryBookmarksFilename)
-        // Empty is the durable representation for mounts covered by the apiserver's static
-        // profile. A nonempty bookmark must arrive from the embedder in this process lifetime:
-        // loading its plain bytes from disk can reconstruct a URL, but cannot recreate the
-        // interprocess sandbox extension that made the directory accessible.
-        guard bookmarks.isEmpty else {
+        guard await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id) else {
             throw ContainerizationError(
                 .invalidState,
-                message: "host-directory authorization for container \(id) expired when the engine restarted; recreate it to re-authorize bind mounts"
-            )
-        }
-        guard await self.hostDirectoryAccess.resolve(bookmarks: [], for: id) else {
-            throw ContainerizationError(
-                .invalidState,
-                message: "failed to restore host-directory authorization for container \(id); recreate it to re-authorize bind mounts"
+                message:
+                    "the bind-mount authorization for container \(id) did not survive the restart; start it from SiliconShip, which can re-authorize it without asking again"
             )
         }
     }

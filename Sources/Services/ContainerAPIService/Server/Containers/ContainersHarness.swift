@@ -62,7 +62,13 @@ public struct ContainersHarness: Sendable {
         let data = message.dataNoCopy(key: .dynamicEnv)
         let env = try data.map { try JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
 
-        try await service.bootstrap(id: id, stdio: stdio, dynamicEnv: env)
+        var bookmarks: [Data] = []
+        if let bdata = message.dataNoCopy(key: .hostDirectoryBookmarks) {
+            bookmarks = try JSONDecoder().decode([Data].self, from: bdata)
+        }
+
+        try await service.bootstrap(
+            id: id, stdio: stdio, dynamicEnv: env, hostDirectoryBookmarks: bookmarks)
         return message.reply()
     }
 
