@@ -14,8 +14,8 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerizationError
 import ContainerVersion
+import ContainerizationError
 import Darwin
 import Dispatch
 import Foundation

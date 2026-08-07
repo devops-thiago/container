@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import ContainerXPC
 import ContainerizationOS
 import Darwin
@@ -21,7 +22,6 @@ import Foundation
 import Logging
 import Synchronization
 import SystemPackage
-import ContainerVersion
 
 public struct PluginLoader: Sendable {
     public static let lifecycleGenerationEnvironmentName = "CONTAINER_LIFECYCLE_GENERATION"
@@ -71,12 +71,13 @@ public struct PluginLoader: Sendable {
     }
 
     public static func isValidLifecycleGeneration(_ value: String) -> Bool {
-        !value.isEmpty && value.utf8.allSatisfy {
-            (97...122).contains($0)
-                || (65...90).contains($0)
-                || (48...57).contains($0)
-                || $0 == 45
-        }
+        !value.isEmpty
+            && value.utf8.allSatisfy {
+                (97...122).contains($0)
+                    || (65...90).contains($0)
+                    || (48...57).contains($0)
+                    || $0 == 45
+            }
     }
 
     public static func generationQualifiedLabel(_ label: String, lifecycleGeneration: String?) -> String {

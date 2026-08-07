@@ -22,7 +22,6 @@ import ContainerVersion
 import ContainerizationError
 import Foundation
 import Logging
-import ContainerVersion
 
 extension Application {
     public struct SystemStatus: AsyncLoggableCommand {

@@ -16,13 +16,13 @@
 
 import ContainerAPIClient
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
 import ContainerizationOS
 import Foundation
 import TerminalProgress
-import ContainerVersion
 
 /// A client for interacting with a container runtime service instance.
 public struct RuntimeClient: Sendable {
