@@ -45,6 +45,13 @@ public struct ContainerClient: Sendable {
         try await xpcClient.send(message, responseTimeout: timeout)
     }
 
+    /// For calls that can end up waiting on a permission panel.
+    ///
+    /// Creating or starting a container whose bind mount names an ungranted folder makes the
+    /// engine ask the embedder, which may put a picker in front of someone. See
+    /// `XPCClient.grantAwareResponseTimeout` for why this has to outlast that wait.
+    private static let grantAwareTimeout: Duration = XPCClient.grantAwareResponseTimeout
+
     /// Create a new container with the given configuration.
     ///
     /// - Parameter hostDirectoryBookmarks: bookmarks for host directories this container
@@ -85,7 +92,7 @@ public struct ContainerClient: Sendable {
                     value: try JSONEncoder().encode(hostDirectoryBookmarks))
             }
 
-            try await xpcSend(message: request)
+            try await xpcSend(message: request, timeout: Self.grantAwareTimeout)
         } catch let error as ContainerizationError {
             throw error
         } catch {
@@ -177,7 +184,10 @@ public struct ContainerClient: Sendable {
             }
 
             request.set(key: .id, value: id)
-            try await xpcClient.send(request)
+            // Starting can ask for folders too: a container created while the app held grants
+            // may be started later from a terminal with nothing resolved, and the engine has
+            // to be able to ask before this gives up on it.
+            try await xpcSend(message: request, timeout: Self.grantAwareTimeout)
             return ClientProcessImpl(containerId: id, xpcClient: xpcClient)
         } catch {
             throw ContainerizationError(
