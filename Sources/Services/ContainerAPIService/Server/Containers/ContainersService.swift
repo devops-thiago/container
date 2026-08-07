@@ -1264,11 +1264,28 @@ public actor ContainersService {
     private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration) async throws {
         let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.source))
         for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
-            guard await HostDirectoryGrants.shared.request(source) else {
+            // Each outcome is a different thing for the user to do, so each says so. The old
+            // single message covered them all and named the fix for only one of them.
+            switch await HostDirectoryGrants.shared.request(source) {
+            case .granted:
+                continue
+            case .declined:
                 throw ContainerizationError(
                     .invalidArgument,
                     message:
-                        "cannot mount \(source): SiliconShip has no permission for that folder. Grant it in the app, or keep the app open so it can ask."
+                        "cannot mount \(source): permission for that folder was declined. Run this again and choose that folder when asked."
+                )
+            case .noEmbedder:
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message:
+                        "cannot mount \(source): no permission for that folder, and the app is not open to ask for it. Open SiliconShip and try again, or mount a folder you have already granted."
+                )
+            case .timedOut:
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message:
+                        "cannot mount \(source): the permission request was not answered within five minutes. Run this again and choose that folder when asked."
                 )
             }
         }
