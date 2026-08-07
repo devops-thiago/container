@@ -14,10 +14,10 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import Foundation
-import ContainerVersion
 
 /// Client API for disk usage operations
 public struct ClientDiskUsage {

@@ -17,6 +17,7 @@
 import ContainerImagesServiceClient
 import ContainerPersistence
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import Containerization
 import ContainerizationError
@@ -24,7 +25,6 @@ import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
-import ContainerVersion
 
 // MARK: ClientImage structure
 

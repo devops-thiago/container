@@ -15,12 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOS
 import Foundation
-import ContainerVersion
 
 /// A client for managing virtual networks through the container API server.
 ///

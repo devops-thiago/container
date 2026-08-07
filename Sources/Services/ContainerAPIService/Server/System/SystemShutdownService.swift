@@ -17,11 +17,11 @@
 import ContainerAPIClient
 import ContainerPlugin
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import Foundation
 import Logging
-import ContainerVersion
 
 private enum ShutdownContainerListState: Sendable {
     case pending
