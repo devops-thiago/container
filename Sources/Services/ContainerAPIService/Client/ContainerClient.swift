@@ -135,10 +135,18 @@ public struct ContainerClient: Sendable {
     }
 
     /// Bootstrap the container's init process.
+    ///
+    /// - Parameter hostDirectoryBookmarks: fresh grants for the container's bind mounts, for a
+    ///   sandboxed engine. Supplying them on every start rather than only at create is what
+    ///   makes a bind mount survive a restart: the grant a bookmark carries lapses when the
+    ///   machine reboots, and the bytes the engine persisted at create cannot bring it back
+    ///   (`docs/sandbox-spikes.md`, S6d). Empty means "use whatever you already have", which is
+    ///   correct unsandboxed and for a caller that holds no grants of its own.
     public func bootstrap(
         id: String,
         stdio: [FileHandle?],
-        dynamicEnv: [String: String] = [:]
+        dynamicEnv: [String: String] = [:],
+        hostDirectoryBookmarks: [Data] = []
     ) async throws -> ClientProcess {
         let request = XPCMessage(route: .containerBootstrap)
 
@@ -161,6 +169,12 @@ public struct ContainerClient: Sendable {
         do {
             let dynamicEnv = try JSONEncoder().encode(dynamicEnv)
             request.set(key: .dynamicEnv, value: dynamicEnv)
+
+            if !hostDirectoryBookmarks.isEmpty {
+                request.set(
+                    key: .hostDirectoryBookmarks,
+                    value: try JSONEncoder().encode(hostDirectoryBookmarks))
+            }
 
             request.set(key: .id, value: id)
             try await xpcClient.send(request)

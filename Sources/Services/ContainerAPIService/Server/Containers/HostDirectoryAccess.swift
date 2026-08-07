@@ -40,7 +40,7 @@ import Logging
 ///
 /// Grants are held for the life of the container rather than the bootstrap: a container that
 /// is stopped and started again mounts the same directories, and the embedder is not asked
-/// for them a second time.
+/// for them a second time within this boot. Across a restart it must be — see `resolve`.
 actor HostDirectoryAccess {
     private let log: Logger?
     /// Resolved URLs, retained because releasing them is what ends the access, and because a
@@ -60,6 +60,13 @@ actor HostDirectoryAccess {
     /// Resolution is all-or-nothing. Resolve every replacement before releasing the previous
     /// URLs so a malformed bookmark or bootstrap retry cannot create an access gap, retain a
     /// partial grant set, or accumulate duplicates.
+    ///
+    /// Decoding a bookmark is not evidence that it carries anything. A bookmark whose grant
+    /// has lapsed — the state every plain bookmark is in after the machine restarts — resolves
+    /// to the right directory with `stale` false and then cannot be opened. Nothing in the
+    /// bookmark API reports that, so the only way to tell the two apart is to try the
+    /// directory, and the cost of not trying is a container that boots with a share the guest
+    /// sees as empty (`docs/sandbox-spikes.md`, S6d).
     @discardableResult
     func resolve(bookmarks: [Data], for id: String) -> Bool {
         var resolutionFailed = false
@@ -76,6 +83,13 @@ actor HostDirectoryAccess {
                     log?.debug(
                         "host directory bookmark is stale",
                         metadata: ["id": "\(id)", "path": "\(url.path)"])
+                }
+                guard Self.readable(url) else {
+                    resolutionFailed = true
+                    log?.warning(
+                        "host directory bookmark resolved but carries no access",
+                        metadata: ["id": "\(id)", "path": "\(url.path)"])
+                    continue
                 }
                 resolved.append(url)
             } catch {
@@ -133,5 +147,22 @@ actor HostDirectoryAccess {
     /// sandbox profile directly.
     func grantedPaths(for id: String) -> [String] {
         (granted[id] ?? []).map(\.path)
+    }
+
+    /// Whether this process can actually open what the bookmark named.
+    ///
+    /// Listing is the check because a bind-mount source is a directory and because the sandbox
+    /// denies the listing rather than the resolve. Anything that is not a directory falls back
+    /// to `access(2)`, which the sandbox also enforces, so an odd mount source is reported
+    /// honestly instead of being rejected for the wrong reason.
+    private static func readable(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return false
+        }
+        guard isDirectory.boolValue else {
+            return FileManager.default.isReadableFile(atPath: url.path)
+        }
+        return (try? FileManager.default.contentsOfDirectory(atPath: url.path)) != nil
     }
 }
