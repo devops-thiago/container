@@ -130,11 +130,39 @@ public actor HostDirectoryGrants {
     /// must allow more than this, or their own timeout fires first and reports nothing useful.
     public func request(_ path: String) async -> GrantOutcome {
         if covers(path) { return .granted }
-        guard let endpoint = InstanceEndpoints.endpoint(label: Self.vendorLabel) else {
+        guard var endpoint = InstanceEndpoints.endpoint(label: Self.vendorLabel) else {
             log?.warning(
                 "no embedder to ask for a host directory grant", metadata: ["path": "\(path)"])
             return .noEmbedder
         }
+
+        // One retry, because the first endpoint can be a dead one. The label holds whoever
+        // announced last, and an embedder that exited — or was displaced by a second process
+        // using the same kit — leaves an entry that dials nothing. The live embedder re-announces
+        // on a heartbeat, so waiting slightly longer than one heartbeat turns what would have
+        // been a failed command into a panel a moment later.
+        for attempt in 0...1 {
+            let outcome = await ask(path, at: endpoint)
+            guard case .noEmbedder = outcome, attempt == 0 else { return outcome }
+            guard
+                let fresh = await InstanceEndpoints.endpoint(
+                    label: Self.vendorLabel, timeout: Self.reannounceGrace)
+            else {
+                log?.warning(
+                    "no embedder re-announced after a dead grant endpoint",
+                    metadata: ["path": "\(path)"])
+                return .noEmbedder
+            }
+            endpoint = fresh
+        }
+        return .noEmbedder
+    }
+
+    /// Longer than the embedder's re-announce heartbeat, so a displaced listener has had its
+    /// chance to take the label back before this gives up.
+    private static let reannounceGrace: Duration = .seconds(45)
+
+    private func ask(_ path: String, at endpoint: xpc_endpoint_t) async -> GrantOutcome {
 
         let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
@@ -149,9 +177,23 @@ public actor HostDirectoryGrants {
             let opened = publish(bookmarks: [Data(bookmark)]) > 0 && covers(path)
             return opened ? .granted : .declined
         } catch {
+            // A dead endpoint and a person who never answered are different, and the endpoint
+            // table cannot tell them apart on its own: an embedder that exits, or one that is
+            // displaced by a second process announcing the same label, leaves an entry here that
+            // dials into nothing. Every later request would fail the same way, for the life of
+            // this engine, because whoever is still listening has no reason to announce again.
+            //
+            // So drop the entry and report it as nobody to ask. The caller waits out one
+            // heartbeat and tries whatever announced in the meantime, which is usually the
+            // embedder that was there the whole time.
+            let dead = "\(error)".contains("Connection invalid")
             log?.error(
                 "asking the embedder for a host directory failed",
-                metadata: ["path": "\(path)", "error": "\(error)"])
+                metadata: ["path": "\(path)", "error": "\(error)", "endpointDropped": "\(dead)"])
+            if dead {
+                InstanceEndpoints.remove(label: Self.vendorLabel)
+                return .noEmbedder
+            }
             return .timedOut
         }
     }
