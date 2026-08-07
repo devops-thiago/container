@@ -17,12 +17,12 @@
 import ContainerAPIClient
 import ContainerPersistence
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
 import TerminalProgress
-import ContainerVersion
 
 /// A client for interacting with the container machine API server.
 public struct MachineClient: Sendable {
@@ -207,7 +207,15 @@ public struct MachineClient: Sendable {
     }
 
     /// Boot a container machine.
-    public func boot(id: String?, dynamicEnv: [String: String] = [:]) async throws -> MachineSnapshot {
+    ///
+    /// - Parameter hostDirectoryBookmarks: authorization for the home directory the machine
+    ///   mounts, when the engine is sandboxed. Supplied on every boot rather than kept, because
+    ///   the grant a bookmark carries lapses when the machine restarts and does so invisibly.
+    public func boot(
+        id: String?,
+        dynamicEnv: [String: String] = [:],
+        hostDirectoryBookmarks: [Data] = []
+    ) async throws -> MachineSnapshot {
         do {
             let request = XPCMessage(route: MachineRoutes.bootMachine.rawValue)
             if let id {
@@ -216,6 +224,12 @@ public struct MachineClient: Sendable {
 
             let dynamicEnvData = try JSONEncoder().encode(dynamicEnv)
             request.set(key: MachineKeys.dynamicEnv.rawValue, value: dynamicEnvData)
+
+            if !hostDirectoryBookmarks.isEmpty {
+                request.set(
+                    key: MachineKeys.hostDirectoryBookmarks.rawValue,
+                    value: try JSONEncoder().encode(hostDirectoryBookmarks))
+            }
 
             let response = try await xpcSend(message: request, timeout: nil)
             guard let data = response.dataNoCopy(key: MachineKeys.snapshot.rawValue) else {
