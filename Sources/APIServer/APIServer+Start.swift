@@ -21,13 +21,13 @@ import ContainerLog
 import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationExtras
 import DNSServer
 import Foundation
 import Logging
 import SystemPackage
-import ContainerVersion
 
 extension APIServer {
     struct Start: AsyncParsableCommand {
@@ -108,6 +108,23 @@ extension APIServer {
                     let attachHarness = InstanceAttachHarness(log: log)
                     routes[XPCRoute.runtimeAttach] = XPCServer.route(attachHarness.attach)
                     routes[XPCRoute.runtimeResolve] = XPCServer.route(attachHarness.resolve)
+
+                    // The embedder pushing folders its user granted. Same table as the attach
+                    // routes above, because the embedder's grant listener is announced through
+                    // them: it can own no mach name either (S7a).
+                    await HostDirectoryGrants.shared.configure(log: log)
+                    routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route {
+                        (message: XPCMessage) async throws -> XPCMessage in
+                        guard
+                            let data = message.dataNoCopy(key: .hostDirectoryBookmarks),
+                            let bookmarks = try? JSONDecoder().decode([Data].self, from: data)
+                        else { return message.reply() }
+                        let kept = await HostDirectoryGrants.shared.publish(bookmarks: bookmarks)
+                        log.info(
+                            "embedder published host directory grants",
+                            metadata: ["sent": "\(bookmarks.count)", "kept": "\(kept)"])
+                        return message.reply()
+                    }
                 }
 
                 let containersService = try initializeContainersService(
