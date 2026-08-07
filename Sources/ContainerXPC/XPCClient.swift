@@ -31,6 +31,20 @@ public final class XPCClient: Sendable {
     /// service after it has been registered.
     public static let xpcRegistrationTimeout: Duration = .seconds(60)
 
+    /// How long the engine gives an embedder to answer a request for a host folder, panel and
+    /// all, and how long a caller must therefore be willing to wait for a call that can trigger
+    /// one. Five minutes is long enough to find a folder in a picker without leaving a command
+    /// looking hung when nobody is at the keyboard.
+    ///
+    /// Both ends read it from here because they are in different targets — the server side
+    /// depends on the client side, so neither could own it — and because a caller whose timeout
+    /// is shorter than the engine's wait reports "XPC timeout" in place of the sentence naming
+    /// the folder that needs permission. `grantAwareResponseTimeout` is what a caller uses: the
+    /// wait plus enough slack for the reply to come back.
+    public static let hostDirectoryPanelPatience: Duration = .seconds(300)
+
+    public static let grantAwareResponseTimeout: Duration = hostDirectoryPanelPatience + .seconds(30)
+
     private nonisolated(unsafe) let connection: xpc_connection_t
     private let q: DispatchQueue?
     private let service: String
