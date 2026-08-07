@@ -111,36 +111,48 @@ public actor HostDirectoryGrants {
         return Self.readable(URL(fileURLWithPath: target))
     }
 
+    /// Why a folder still cannot be opened, so the caller can say something true about it.
+    /// "Declined" and "nobody was there to ask" are different problems with different fixes,
+    /// and a single Bool told the user neither.
+    public enum GrantOutcome: Sendable {
+        case granted
+        case declined
+        case noEmbedder
+        case timedOut
+    }
+
     /// Ask the embedder for a folder nothing has granted yet, and pool what comes back.
     ///
     /// The embedder may show the user a panel before it answers, so this waits longer than an
-    /// ordinary call would: the timeout has to be a person's patience, not a machine's.
-    ///
-    /// - Returns: whether the folder can now be opened.
-    public func request(_ path: String) async -> Bool {
-        if covers(path) { return true }
+    /// ordinary call would: the timeout has to be a person's patience, not a machine's. Five
+    /// minutes is long enough to find a folder in a picker without being long enough that a
+    /// command looks hung when nobody is at the keyboard. Callers reaching the engine over XPC
+    /// must allow more than this, or their own timeout fires first and reports nothing useful.
+    public func request(_ path: String) async -> GrantOutcome {
+        if covers(path) { return .granted }
         guard let endpoint = InstanceEndpoints.endpoint(label: Self.vendorLabel) else {
             log?.warning(
                 "no embedder to ask for a host directory grant", metadata: ["path": "\(path)"])
-            return false
+            return .noEmbedder
         }
 
         let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
         message.set(key: XPCKeys.hostDirectoryPath.rawValue, value: path)
         do {
-            let reply = try await client.send(message, responseTimeout: .seconds(180))
+            let reply = try await client.send(message, responseTimeout: XPCClient.hostDirectoryPanelPatience)
             guard let bookmark = reply.dataNoCopy(key: XPCKeys.hostDirectoryBookmarks.rawValue)
             else {
                 log?.info("embedder declined host directory", metadata: ["path": "\(path)"])
-                return false
+                return .declined
             }
-            return publish(bookmarks: [Data(bookmark)]) > 0 && covers(path)
+            let opened = publish(bookmarks: [Data(bookmark)]) > 0 && covers(path)
+            return opened ? .granted : .declined
         } catch {
             log?.error(
                 "asking the embedder for a host directory failed",
                 metadata: ["path": "\(path)", "error": "\(error)"])
-            return false
+            return .timedOut
         }
     }
 
