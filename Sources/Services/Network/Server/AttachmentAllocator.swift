@@ -56,4 +56,9 @@ actor AttachmentAllocator {
     func lookup(hostname: String) async throws -> UInt32? {
         hostnames[hostname]
     }
+
+    /// Every current allocation, so a joining container can learn its peers' names.
+    func allocations() async -> [String: UInt32] {
+        hostnames
+    }
 }

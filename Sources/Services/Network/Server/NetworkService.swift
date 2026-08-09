@@ -32,4 +32,7 @@ public protocol NetworkService: Sendable {
 
     /// Return the attachment for a hostname if it is registered with the network.
     func lookup(hostname: String) async throws -> Attachment?
+
+    /// Return the attachments for every hostname registered with the network.
+    func attachments() async throws -> [Attachment]
 }

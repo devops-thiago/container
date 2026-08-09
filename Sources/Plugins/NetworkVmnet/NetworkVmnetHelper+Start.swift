@@ -106,6 +106,7 @@ extension NetworkVmnetHelper {
                         NetworkRoutes.status.rawValue: XPCServer.route(harness.status),
                         NetworkRoutes.allocate.rawValue: harness.allocate,
                         NetworkRoutes.lookup.rawValue: XPCServer.route(harness.lookup),
+                        NetworkRoutes.attachments.rawValue: XPCServer.route(harness.attachments),
                     ],
                     log: log
                 )

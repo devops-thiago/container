@@ -117,6 +117,10 @@ public actor RuntimeService {
     /// - Returns: An XPC message with the following parameters:
     ///   - endpoint: An XPC endpoint that can be used to communicate
     ///     with the runtime service.
+    /// What a guest's bare names are qualified with when nobody configured a domain.
+    /// `.internal` is reserved for private use, so it can never collide with a real zone.
+    static let defaultSearchDomain = "container.internal"
+
     @Sendable
     public func createEndpoint(_ message: XPCMessage) async throws -> XPCMessage {
         self.log.debug("enter", metadata: ["func": "\(#function)"])
@@ -184,6 +188,7 @@ public actor RuntimeService {
             var sessions: [XPCClientSession] = []
             var attachments: [Attachment] = []
             var interfaces: [Interface] = []
+            var peerAttachments: [Attachment] = []
             do {
                 for (index, info) in networkBootstrapInfos.enumerated() {
                     let attachmentConfig = config.networks[index]
@@ -225,6 +230,19 @@ public actor RuntimeService {
                     )
                     attachments.append(attachment)
                     interfaces.append(interface)
+
+                    // The names of everything already on this network, gathered while the
+                    // helper is on the line. They become /etc/hosts entries below: the guest
+                    // has no way to reach the engine's DNS resolver without a root-owned
+                    // /etc/resolver file on the host (macOS refuses unprivileged binds to
+                    // port 53 anywhere, so the resolver cannot sit where a stub looks), and
+                    // the hosts file is the one name table a guest consults that this side
+                    // fully controls. Peers that join later are not in it; a stack started
+                    // in dependency order sees the names it needs.
+                    if let peers = try? await client.attachments() {
+                        peerAttachments.append(
+                            contentsOf: peers.filter { $0.hostname != attachment.hostname })
+                    }
                 }
             } catch {
                 for session in sessions { session.close() }
@@ -242,6 +260,20 @@ public actor RuntimeService {
                         options: dns.options
                     )
                 }
+            }
+
+            // A guest with no search domain never qualifies a bare name, so `ping web` cannot
+            // match anything even where resolution works. Supply one when nothing asked for
+            // any. `.internal` is the ICANN-reserved private-use TLD, so a qualified miss that
+            // escapes to a public resolver stays a clean NXDOMAIN rather than a leak of a
+            // resolvable name.
+            if let dns = config.dns, dns.searchDomains.isEmpty {
+                config.dns = ContainerConfiguration.DNSConfiguration(
+                    nameservers: dns.nameservers,
+                    domain: dns.domain,
+                    searchDomains: [dns.domain ?? Self.defaultSearchDomain],
+                    options: dns.options
+                )
             }
 
             let stdio = message.stdio()
@@ -284,6 +316,18 @@ public actor RuntimeService {
                         Hosts.Entry(
                             ipAddress: primaryIfaceAddr.address.description,
                             hostnames: [czConfig.hostname ?? id],
+                        ))
+                }
+                // The containers already on this network, by bare name and qualified with the
+                // search domain, so both `web` and `web.container.internal` resolve. getaddrinfo
+                // reads hosts before DNS, which is what makes this work with no resolver in the
+                // path at all.
+                let searchDomain = config.dns?.searchDomains.first ?? Self.defaultSearchDomain
+                for peer in peerAttachments {
+                    hostsEntries.append(
+                        Hosts.Entry(
+                            ipAddress: peer.ipv4Address.address.description,
+                            hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"],
                         ))
                 }
                 czConfig.hosts = Hosts(entries: hostsEntries)

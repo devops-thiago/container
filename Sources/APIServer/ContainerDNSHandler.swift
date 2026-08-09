@@ -75,8 +75,34 @@ struct ContainerDNSHandler: DNSHandler {
         )
     }
 
+    /// The names containers are registered under and the names queries carry are not the
+    /// same shape, and this is where they meet. Registration keys are bare container ids —
+    /// never a dot in them. Queries arrive in wire form: always a trailing dot, and often
+    /// qualified by a search domain ("web.test." for "web"). Looking the raw question name
+    /// up in the table matched nothing, ever — even "web." missed "web" — which is how a
+    /// running resolver answered NXDOMAIN for every container it knew.
+    ///
+    /// So: drop the root dot, try the name as asked, and if that misses take the first
+    /// label. First-label matching is safe precisely because registered names are single
+    /// labels, and because every query that reaches this resolver was already scoped to a
+    /// container domain by the /etc/resolver file that routed it here.
+    private func registeredName(for question: Question) async throws -> String? {
+        let name = question.name.hasSuffix(".") ? String(question.name.dropLast()) : question.name
+        if try await networkService.lookup(hostname: name) != nil {
+            return name
+        }
+        guard let firstLabel = name.split(separator: ".").first.map(String.init),
+            firstLabel != name
+        else {
+            return nil
+        }
+        return try await networkService.lookup(hostname: firstLabel) != nil ? firstLabel : nil
+    }
+
     private func answerHost(question: Question) async throws -> ResourceRecord? {
-        guard let ipAllocation = try await networkService.lookup(hostname: question.name) else {
+        guard let hostname = try await registeredName(for: question),
+            let ipAllocation = try await networkService.lookup(hostname: hostname)
+        else {
             return nil
         }
         let ipv4 = ipAllocation.ipv4Address.address.description
@@ -88,7 +114,9 @@ struct ContainerDNSHandler: DNSHandler {
     }
 
     private func answerHost6(question: Question) async throws -> (record: ResourceRecord?, hostnameExists: Bool) {
-        guard let ipAllocation = try await networkService.lookup(hostname: question.name) else {
+        guard let hostname = try await registeredName(for: question),
+            let ipAllocation = try await networkService.lookup(hostname: hostname)
+        else {
             return (nil, false)
         }
         guard let ipv6Address = ipAllocation.ipv6Address else {

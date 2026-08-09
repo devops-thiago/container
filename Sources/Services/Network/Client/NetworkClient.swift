@@ -96,6 +96,20 @@ extension NetworkClient {
         }
     }
 
+    /// Every attachment the network currently has, so a joining container can learn the
+    /// names and addresses of the peers it shares the network with.
+    public func attachments() async throws -> [Attachment] {
+        let request = XPCMessage(route: NetworkRoutes.attachments.rawValue)
+        let client = createClient()
+        let response = try await client.send(request)
+        guard let data = response.dataNoCopy(key: NetworkKeys.attachments.rawValue) else {
+            // An old helper that predates the route answers with nothing rather than
+            // failing the boot of the container that asked.
+            return []
+        }
+        return try JSONDecoder().decode([Attachment].self, from: data)
+    }
+
     private func createClient() -> XPCClient {
         // Sandboxed embedding: spawned instances own no mach name; the
         // apiserver brokers their endpoints under that same name.
