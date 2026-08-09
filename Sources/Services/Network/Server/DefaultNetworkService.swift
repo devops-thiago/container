@@ -159,4 +159,19 @@ public actor DefaultNetworkService: NetworkService {
 
         return attachment
     }
+
+    /// Everything currently attached, so a joining container can be told about its peers.
+    /// Built through `lookup` per hostname rather than duplicating the construction: the
+    /// hostname-to-index invariant checks live there, and a hostname that fails them is
+    /// dropped here exactly as a single lookup for it would return nil.
+    @Sendable
+    public func attachments() async throws -> [Attachment] {
+        var result: [Attachment] = []
+        for hostname in await allocator.allocations().keys.sorted() {
+            if let attachment = try await lookup(hostname: hostname) {
+                result.append(attachment)
+            }
+        }
+        return result
+    }
 }
