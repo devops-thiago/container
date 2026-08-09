@@ -21,4 +21,6 @@ public enum NetworkRoutes: String {
     case allocate = "com.apple.container.network/allocate"
     /// Retrieves the allocation for a hostname.
     case lookup = "com.apple.container.network/lookup"
+
+    case attachments = "com.apple.container.network/attachments"
 }

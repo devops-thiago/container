@@ -72,6 +72,15 @@ public actor NetworkHarness: Sendable {
         reply.setMatchKind(match.kind)
         return reply
     }
+
+    @Sendable
+    public func attachments(_ message: XPCMessage) async throws -> XPCMessage {
+        let reply = message.reply()
+        let attachments = try await service.attachments()
+        let data = try JSONEncoder().encode(attachments)
+        reply.set(key: NetworkKeys.attachments.rawValue, value: data)
+        return reply
+    }
 }
 
 extension XPCMessage {
