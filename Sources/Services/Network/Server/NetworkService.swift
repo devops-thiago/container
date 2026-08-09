@@ -41,4 +41,7 @@ public protocol NetworkService: Sendable {
     /// Returns the attachment that the name resolves to and how the name matched, or nil if the name
     /// does not resolve on this network.
     func lookup(name: String) async throws -> NetworkMatch?
+
+    /// Return the attachments for every hostname registered with the network.
+    func attachments() async throws -> [Attachment]
 }

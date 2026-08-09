@@ -164,4 +164,9 @@ actor AttachmentAllocator {
         }
         return nil
     }
+
+    /// Every current allocation, so a joining container can learn its peers' names.
+    func allocations() async -> [String: UInt32] {
+        hostnames
+    }
 }
