@@ -23,6 +23,18 @@ COVERAGE_FLAG ?=
 export RELEASE_VERSION ?= $(shell git describe --tags --always)
 export GIT_COMMIT := $(shell git rev-parse HEAD)
 
+# Pin the toolchain instead of depending on machine-global `xcode-select -s`.
+#
+# `swift test` requires Xcode, not just CommandLineTools: SwiftPM links XCTest into every test
+# bundle on macOS, and CLT does not ship it. Confusingly Testing.framework *is* in CLT, so the
+# build fails with `no such module 'Testing'` and reads like a swift-testing problem when it is
+# really a missing XCTest — which sends you looking in entirely the wrong place. Anyone whose
+# `xcode-select` points at CommandLineTools cannot run `make test` at all without this.
+#
+# Override to build against another Xcode.
+DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
+export DEVELOPER_DIR
+
 # Commonly used locations
 SWIFT := "/usr/bin/swift"
 # Shared swift build invocation; callers append --build-tests / --product / etc.
