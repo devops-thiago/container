@@ -44,6 +44,25 @@ struct DirectoryWatcherTest {
         return try await body(tempPath)
     }
 
+    /// Wait for the watcher to report, rather than assuming a fixed delay was long enough.
+    ///
+    /// fsevents delivery latency depends on whatever else the machine is doing, so a fixed sleep
+    /// is a race a loaded machine loses. Polling returns as soon as the event lands, which is
+    /// both faster in the normal case and survivable in the slow one.
+    /// Waits on the condition being asserted, not on a proxy for it. Counting reports is such a
+    /// proxy and a misleading one: the watcher can report the same file twice, so a wait for
+    /// "two reports" is satisfied by one name arriving twice and returns before the second name
+    /// ever shows up.
+    private func waitUntil(
+        within timeout: Duration = .seconds(10), _ condition: () -> Bool
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     private actor CreatedPaths {
         nonisolated(unsafe) public var paths: [FilePath]
 
@@ -82,8 +101,9 @@ struct DirectoryWatcherTest {
             FileManager.default.createFile(atPath: newFile.string, contents: nil)
             try await waitUntil { !createdPaths.paths.isEmpty }
 
-            #expect(!createdPaths.paths.isEmpty, "directory watcher failed to detect new file")
-            #expect(createdPaths.paths.first!.lastComponent?.string == name)
+            let detected = try #require(
+                createdPaths.paths.first, "directory watcher failed to detect new file")
+            #expect(detected.lastComponent?.string == name)
         }
     }
 
@@ -113,8 +133,9 @@ struct DirectoryWatcherTest {
             FileManager.default.createFile(atPath: newFile.string, contents: nil)
             try await waitUntil { !createdPaths.paths.isEmpty }
 
-            #expect(!createdPaths.paths.isEmpty, "directory watcher failed to detect parent directory")
-            #expect(createdPaths.paths.first!.lastComponent?.string == name)
+            let detected = try #require(
+                createdPaths.paths.first, "directory watcher failed to detect parent directory")
+            #expect(detected.lastComponent?.string == name)
         }
     }
 
@@ -145,8 +166,9 @@ struct DirectoryWatcherTest {
             FileManager.default.createFile(atPath: newFile.string, contents: nil)
             try await waitUntil { !createdPaths.paths.isEmpty }
 
-            #expect(!createdPaths.paths.isEmpty, "directory watcher failed to detect parent directory")
-            #expect(createdPaths.paths.first!.lastComponent?.string == name)
+            let detected = try #require(
+                createdPaths.paths.first, "directory watcher failed to detect parent directory")
+            #expect(detected.lastComponent?.string == name)
         }
     }
 
@@ -186,7 +208,11 @@ struct DirectoryWatcherTest {
 
             let file2 = dirPath.appending(afterDelete)
             FileManager.default.createFile(atPath: file2.string, contents: nil)
-            try await waitUntil { createdPaths.paths.contains { $0.lastComponent?.string == afterDelete } }
+
+            try await waitUntil {
+                Set(createdPaths.paths.compactMap { $0.lastComponent?.string })
+                    == Set([beforeDelete, afterDelete])
+            }
 
             #expect(!createdPaths.paths.isEmpty, "directory watcher failed to detect new file")
             #expect(
