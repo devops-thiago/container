@@ -174,4 +174,24 @@ extension K8sHelper {
         let output = try YAMLEncoder().encode(updated)
         try output.write(toFile: path.string, atomically: true, encoding: .utf8)
     }
+
+    /// Point the node's own admin kubeconfigs at 127.0.0.1 instead of the VM address.
+    ///
+    /// kubeadm writes them against the advertise address, and the node image's entrypoint
+    /// rewrites everything *except* them when the node comes back with a different IP — so
+    /// after such a restart every kubectl inside the node, ours included, dials an address
+    /// that no longer exists. The loopback is in the serving certificate's SANs on every
+    /// boot, which makes these files restart-proof rather than patched-up.
+    static func pinAdminKubeconfigsToLoopback(nodeID: String, client: ContainerClient) async throws {
+        let r = try await execCapture(
+            containerId: nodeID, executable: "/bin/sh",
+            arguments: [
+                "-c",
+                "sed -i -E 's|server: https://[0-9.]+:6443|server: https://127.0.0.1:6443|' /etc/kubernetes/admin.conf /etc/kubernetes/super-admin.conf",
+            ],
+            client: client)
+        guard r.code == 0 else {
+            throw ContainerizationError(.internalError, message: "pinning admin kubeconfigs failed on \(nodeID): \(r.output)")
+        }
+    }
 }

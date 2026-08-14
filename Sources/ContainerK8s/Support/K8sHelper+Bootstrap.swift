@@ -66,6 +66,8 @@ extension K8sHelper {
             throw ContainerizationError(.internalError, message: "kubeadm init failed on \(nodeID): \(r.output)")
         }
 
+        try await pinAdminKubeconfigsToLoopback(nodeID: nodeID, client: client)
+
         r = try await execCapture(
             containerId: nodeID, executable: "/bin/sh",
             arguments: ["-c", "mkdir -p /root/.kube && cp \(kubeconfigPath) /root/.kube/config"],
