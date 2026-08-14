@@ -37,23 +37,7 @@ public struct K8sDelete: AsyncParsableCommand {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: K8sHelper.pluginName)
 
-        let client = ContainerClient()
-
-        if let container = try? await client.get(id: name) {
-            guard container.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-                log.error("container is not a k8s cluster, refusing delete", metadata: ["name": "\(name)"])
-                throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
-            }
-        }
-
-        do {
-            try? await client.stop(id: name)
-            try await client.delete(id: name)
-        } catch let error as ContainerizationError where error.code == .notFound {
-            log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
-        }
-
-        try K8sHelper.removeConfig(containerId: name, log: log)
+        try await K8sClusters.delete(name: name, log: log)
         print(name)
     }
 }

@@ -40,6 +40,8 @@ public struct K8sWriteConfig: AsyncParsableCommand {
         let log = Logger(label: K8sHelper.pluginName)
 
         let targetPath = kubeconfig.map { FilePath($0) }
+        // Merge semantics on purpose, unlike `K8sClusters.kubeconfigYAML`: this command's
+        // contract is to add a context to an existing config file, not replace it.
         let client = ContainerClient()
         let fqdn = await K8sHelper.detectFQDN(name: name)
         let rawConfig = try await K8sHelper.fetchConfig(containerId: name, client: client, log: log)
