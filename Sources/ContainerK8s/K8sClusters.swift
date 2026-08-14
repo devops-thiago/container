@@ -220,6 +220,36 @@ public enum K8sClusters {
         return try YAMLEncoder().encode(config)
     }
 
+    /// Start a stopped cluster and wait until it answers again. The steps are `k8s start`'s.
+    public static func start(name: String = K8sClusters.defaultName, log: Logger) async throws {
+        let client = ContainerClient()
+        let container = try await client.get(id: name)
+
+        guard container.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
+            throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
+        }
+
+        if container.status == .running { return }
+
+        let io = try ProcessIO.create(tty: false, interactive: false, detach: true)
+        defer { try? io.close() }
+        let process = try await client.bootstrap(id: name, stdio: io.stdio)
+        try await process.start()
+        try io.closeAfterStart()
+
+        try await K8sHelper.waitForNodeBooted(containerId: name, client: client, log: log)
+        try await K8sHelper.waitForReady(containerId: name, client: client, log: log)
+
+        do {
+            let fqdn = await K8sHelper.detectFQDN(name: name)
+            let rawConfig = try await K8sHelper.fetchConfig(containerId: name, client: client, log: log)
+            let config = try await K8sHelper.transformConfig(rawConfig, containerId: name, fqdn: fqdn, client: client)
+            try K8sHelper.mergeConfig(config, containerId: name, log: log)
+        } catch {
+            log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
+        }
+    }
+
     /// Stop and remove a cluster, and drop its context from the default kubeconfig.
     public static func delete(name: String = K8sClusters.defaultName, log: Logger) async throws {
         let client = ContainerClient()
