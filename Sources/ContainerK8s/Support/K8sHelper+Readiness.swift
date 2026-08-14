@@ -45,10 +45,21 @@ extension K8sHelper {
         let timeout = 120
         log.info("Waiting for node to boot", metadata: ["node": "\(containerId)"])
         for attempt in 1...timeout {
-            let result = try await execCapture(
-                containerId: containerId, executable: "/bin/sh",
-                arguments: ["-c", "test -S /run/containerd/containerd.sock"], client: client)
-            if result.code == 0 { return }
+            // Right after bootstrap the runtime client registers asynchronously, so a probe
+            // can land while the container still reports stopped and the exec throws
+            // invalidState — wrapped in the client's internalError, so the chain has to be
+            // walked. That is "not booted yet", the very condition this loop waits out —
+            // only the last attempt lets it escape as an error.
+            let code: Int32
+            do {
+                code = try await execCapture(
+                    containerId: containerId, executable: "/bin/sh",
+                    arguments: ["-c", "test -S /run/containerd/containerd.sock"], client: client
+                ).code
+            } catch let error where attempt < timeout && Self.isContainerNotRunning(error) {
+                code = -1
+            }
+            if code == 0 { return }
             if attempt == timeout {
                 log.info("check container logs with 'container logs \(containerId)'")
                 throw ContainerizationError(
@@ -107,5 +118,15 @@ extension K8sHelper {
             .timeout,
             message: "k8s cluster \(containerId) kube-system pods did not become available within \(podReadyTimeout * 2)s"
         )
+    }
+
+    /// Whether an error, anywhere down its cause chain, says the container is not running.
+    static func isContainerNotRunning(_ error: any Error) -> Bool {
+        var current: (any Error)? = error
+        while let containerization = current as? ContainerizationError {
+            if containerization.code == .invalidState { return true }
+            current = containerization.cause
+        }
+        return false
     }
 }
