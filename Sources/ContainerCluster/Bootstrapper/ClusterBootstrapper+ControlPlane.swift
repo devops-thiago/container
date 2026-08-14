@@ -56,6 +56,8 @@ extension ClusterBootstrapper {
             throw ContainerizationError(.internalError, message: "kubeadm init failed on \(nodeID): \(r.output)")
         }
 
+        try await ClusterHelper.pinAdminKubeconfigsToLoopback(nodeID: nodeID, client: client)
+
         r = try await ClusterHelper.execCapture(
             containerId: nodeID, executable: "/bin/sh",
             arguments: ["-c", "mkdir -p /root/.kube && cp \(ClusterHelper.kubeconfigPath) /root/.kube/config"],

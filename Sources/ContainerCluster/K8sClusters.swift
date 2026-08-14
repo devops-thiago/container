@@ -238,6 +238,9 @@ public enum K8sClusters {
         try io.closeAfterStart()
 
         try await K8sHelper.waitForNodeBooted(containerId: name, client: client, log: log)
+        // Idempotent, and it heals clusters created before the loopback pin existed: their
+        // admin kubeconfigs still name whatever address the node had at kubeadm init.
+        try await K8sHelper.pinAdminKubeconfigsToLoopback(nodeID: name, client: client)
         try await K8sHelper.waitForReady(containerId: name, client: client, log: log)
 
         do {
