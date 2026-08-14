@@ -40,7 +40,15 @@ extension K8sHelper {
         let configYAML = initConfigYAML(advertiseAddress: advertiseAddress, certSANs: apiServerSANs)
         var r = try await execCapture(
             containerId: nodeID, executable: "/bin/sh",
-            arguments: ["-c", "cat > /etc/kubernetes/kubeadm-config.yaml <<'EOF'\n\(configYAML)\nEOF"],
+            // Also at /kind/kubeadm.conf: the node image's entrypoint reads it on every boot
+            // whose IP differs from the last one, to regenerate the API server's serving
+            // certificate. Without it a restarted node whose address moved exits 1 before
+            // containerd ever comes up — `k8s start` only worked when the allocator happened
+            // to hand the old address back.
+            arguments: [
+                "-c",
+                "mkdir -p /kind && cat > /etc/kubernetes/kubeadm-config.yaml <<'EOF'\n\(configYAML)\nEOF\ncp /etc/kubernetes/kubeadm-config.yaml /kind/kubeadm.conf",
+            ],
             client: client)
         guard r.code == 0 else {
             throw ContainerizationError(.internalError, message: "write kubeadm config failed on \(nodeID): \(r.output)")
