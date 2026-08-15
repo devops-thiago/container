@@ -76,20 +76,42 @@ extension MachineAPIServer {
                 let service = try MachinesService(appRoot: pluginStateRoot, resourceRoot: resourceRoot, log: log)
                 let harness = MachinesHarness(service: service)
 
+                var routes = [
+                    MachineRoutes.listMachine.rawValue: XPCServer.route(harness.list),
+                    MachineRoutes.createMachine.rawValue: XPCServer.route(harness.create),
+                    MachineRoutes.deleteMachine.rawValue: XPCServer.route(harness.delete),
+                    MachineRoutes.setDefault.rawValue: XPCServer.route(harness.setDefault),
+                    MachineRoutes.getDefault.rawValue: XPCServer.route(harness.getDefault),
+                    MachineRoutes.bootMachine.rawValue: XPCServer.route(harness.boot),
+                    MachineRoutes.stopMachine.rawValue: XPCServer.route(harness.stop),
+                    MachineRoutes.inspectMachine.rawValue: XPCServer.route(harness.inspect),
+                    MachineRoutes.setConfig.rawValue: XPCServer.route(harness.setConfig),
+                    MachineRoutes.logsMachine.rawValue: XPCServer.route(harness.logs),
+                ]
+
+                // This helper is dialed straight by the CLI, not only through the API server,
+                // so launchd will demand-start it for a `container machine …` invocation with
+                // no app running — and `boot` would go on to start a VM nobody can see. Every
+                // route is gated: unlike the API server there is no health route to keep open,
+                // because nothing here is used to ask whether the engine exists.
+                let ownerWatchdog = OwnerWatchdog(log: log)
+                for (name, handler) in routes {
+                    routes[name] = ownerWatchdog.wrap(handler)
+                }
+
                 let server = XPCServer(
-                    identifier: MachineClient.serviceIdentifier,
-                    routes: [
-                        MachineRoutes.listMachine.rawValue: XPCServer.route(harness.list),
-                        MachineRoutes.createMachine.rawValue: XPCServer.route(harness.create),
-                        MachineRoutes.deleteMachine.rawValue: XPCServer.route(harness.delete),
-                        MachineRoutes.setDefault.rawValue: XPCServer.route(harness.setDefault),
-                        MachineRoutes.getDefault.rawValue: XPCServer.route(harness.getDefault),
-                        MachineRoutes.bootMachine.rawValue: XPCServer.route(harness.boot),
-                        MachineRoutes.stopMachine.rawValue: XPCServer.route(harness.stop),
-                        MachineRoutes.inspectMachine.rawValue: XPCServer.route(harness.inspect),
-                        MachineRoutes.setConfig.rawValue: XPCServer.route(harness.setConfig),
-                        MachineRoutes.logsMachine.rawValue: XPCServer.route(harness.logs),
-                    ], log: log)
+                    identifier: MachineClient.serviceIdentifier, routes: routes, log: log)
+
+                // Machines are backed by API-server containers (`MachineSnapshot.containerId`),
+                // so their teardown belongs to that server's own owner-loss path, which stops
+                // every container it has. Stopping them from here as well would race it across
+                // two processes shutting down at once, for no gain.
+                let ownerWatch = Task {
+                    await ownerWatchdog.waitForOwnerLoss()
+                    log.info("machine helper has no owning app; stopping")
+                    Darwin.exit(0)
+                }
+                defer { ownerWatch.cancel() }
 
                 log.info("starting XPC server")
                 try await server.listen()
