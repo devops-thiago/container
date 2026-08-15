@@ -87,6 +87,10 @@ public enum XPCKeys: String {
     case lifecycleGeneration
     case processNonce
 
+    /// The pid of the app claiming ownership of the engine, sent on the health ping.
+    /// Only the host app sets it; a CLI ping leaves it unset and so claims nothing.
+    case ownerProcessIdentifier
+
     /// Generation-aware system shutdown.
     case expectedLifecycleGeneration
     case expectedProcessNonce
