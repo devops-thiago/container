@@ -16,6 +16,7 @@
 
 import ContainerVersion
 import ContainerXPC
+import ContainerizationError
 import ContainerizationOS
 import Darwin
 import Foundation
@@ -455,6 +456,15 @@ extension PluginLoader {
     /// Process keeps its terminationHandler (the reaper) alive.
     private static let instances = Mutex<[String: Foundation.Process]>([:])
 
+    /// Set once teardown begins, and never cleared: the process is on its way out.
+    ///
+    /// Killing a helper is itself a reason for something to want it back — a network whose
+    /// helper just died looks exactly like one that needs provisioning, and the request that
+    /// notices arrives while we are still shutting down. Without this the sweep and the
+    /// respawn chase each other, and whichever helper is spawned after the sweep is orphaned
+    /// by the exit a moment later, holding the vmnet interface it just claimed.
+    private static let shuttingDown = Mutex<Bool>(false)
+
     static func spawnInstance(
         label: String,
         instanceId: String,
@@ -462,6 +472,10 @@ extension PluginLoader {
         env: [String: String],
         log: Logger?
     ) throws {
+        guard !Self.shuttingDown.withLock({ $0 }) else {
+            log?.info("refusing to spawn instance during shutdown", metadata: ["label": "\(label)"])
+            throw ContainerizationError(.invalidState, message: "engine is shutting down")
+        }
         let process = Foundation.Process()
         process.executableURL = URL(fileURLWithPath: argv[0])
         process.arguments = Array(argv.dropFirst())
@@ -607,6 +621,9 @@ extension PluginLoader {
     /// launchd allows a job after its own SIGTERM, and a helper that will not go in that time is
     /// killed outright — this is the last moment anything can be done about it.
     public static func terminateAllInstances(log: Logger? = nil, waitFor: Duration = .seconds(2)) {
+        // Before the sweep, not after: anything asking for a helper from here on is asking for
+        // one that would outlive us.
+        Self.shuttingDown.withLock { $0 = true }
         let all = Self.instances.withLock { Array($0.values) }
         var asked: [Process] = []
         for process in all where process.isRunning {
