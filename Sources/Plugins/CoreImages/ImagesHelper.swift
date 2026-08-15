@@ -73,11 +73,31 @@ extension ImagesHelper {
                 var routes = [String: XPCServer.RouteHandler]()
                 try self.initializeContentService(root: appRoot, log: log, routes: &routes)
                 try self.initializeImagesService(root: appRoot, containerSystemConfig: containerSystemConfig, log: log, routes: &routes)
+                // `ClientImage` dials this helper directly rather than going through the API
+                // server, so launchd demand-starts it for a `container image …` invocation
+                // with no app running. Gate every route and stop when there is no app, for
+                // the same reason the API server does: otherwise closing the app leaves a
+                // reachable engine behind, one service at a time.
+                let ownerWatchdog = OwnerWatchdog(log: log)
+                for (name, handler) in routes {
+                    routes[name] = ownerWatchdog.wrap(handler)
+                }
+
                 let xpc = XPCServer(
                     identifier: serviceIdentifier,
                     routes: routes,
                     log: log
                 )
+
+                // Nothing to tear down: this helper holds no VMs and no containers, and an
+                // interrupted pull leaves only content-store garbage the next pull replaces.
+                let ownerWatch = Task {
+                    await ownerWatchdog.waitForOwnerLoss()
+                    log.info("images helper has no owning app; stopping")
+                    Darwin.exit(0)
+                }
+                defer { ownerWatch.cancel() }
+
                 log.info("starting XPC server")
                 try await xpc.listen()
             } catch {
