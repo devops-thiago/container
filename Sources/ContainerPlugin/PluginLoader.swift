@@ -522,17 +522,8 @@ extension PluginLoader {
         for index in 0..<count {
             let pid = pids[index]
             guard pid > 0, pid != selfPid else { continue }
-            // `proc_pidpath` returns the length it wrote, so the string is built from that
-            // rather than by scanning for a terminator — which is also what the array form of
-            // `String(cString:)` was deprecated for asking callers to assume.
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-            guard length > 0 else { continue }
-            let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
             // Helpers only: never the app itself or the CLI the user may be running.
-            guard path.hasPrefix(root), path.contains("/libexec/container/plugins/") else {
-                continue
-            }
+            guard let path = helperPath(of: pid, under: root) else { continue }
             log?.info(
                 "reaping orphaned instance",
                 metadata: ["pid": "\(pid)", "path": "\(path)"])
@@ -550,9 +541,36 @@ extension PluginLoader {
             if victims.isEmpty { return }
         }
         for pid in victims {
-            log?.info("orphan ignored SIGTERM; sending SIGKILL", metadata: ["pid": "\(pid)"])
+            // Checked again, not trusted from five seconds ago. The path is what authorises
+            // killing this number at all, and in the grace above a victim can exit and the
+            // kernel hand its number to something else — which the liveness probe cannot tell
+            // apart from the victim still running. Re-reading the path is what keeps SIGKILL
+            // pointed at our own helper.
+            guard let path = helperPath(of: pid, under: root) else {
+                log?.info("orphan exited during grace; not killing", metadata: ["pid": "\(pid)"])
+                continue
+            }
+            log?.info(
+                "orphan ignored SIGTERM; sending SIGKILL",
+                metadata: ["pid": "\(pid)", "path": "\(path)"])
             kill(pid, SIGKILL)
         }
+    }
+
+    /// The executable path of `pid`, but only when it is one of our own plugin helpers living
+    /// under `root`. nil for everything else, including a pid that has since exited.
+    private static func helperPath(of pid: pid_t, under root: String) -> String? {
+        // `proc_pidpath` returns the length it wrote, so the string is built from that rather
+        // than by scanning for a terminator — which is also what the array form of
+        // `String(cString:)` was deprecated for asking callers to assume.
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
+        guard path.hasPrefix(root), path.contains("/libexec/container/plugins/") else {
+            return nil
+        }
+        return path
     }
 
     /// Labels of currently live spawned instances.
