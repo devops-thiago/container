@@ -599,11 +599,32 @@ extension PluginLoader {
 
     /// Quit path: SIGTERM every spawned instance (graceful container stop
     /// happens first through the runtime API; this is the backstop).
-    public static func terminateAllInstances(log: Logger? = nil) {
+    ///
+    /// Waits for them, briefly. Asking and exiting in the same breath is what leaves a helper
+    /// orphaned holding a vmnet network: SIGTERM is delivered but the parent is gone before the
+    /// child finishes unwinding, and reparenting to launchd means nothing collects it until the
+    /// next engine start sweeps for orphans. The wait is bounded well inside the few seconds
+    /// launchd allows a job after its own SIGTERM, and a helper that will not go in that time is
+    /// killed outright — this is the last moment anything can be done about it.
+    public static func terminateAllInstances(log: Logger? = nil, waitFor: Duration = .seconds(2)) {
         let all = Self.instances.withLock { Array($0.values) }
+        var asked: [Process] = []
         for process in all where process.isRunning {
             log?.info("terminating instance", metadata: ["pid": "\(process.processIdentifier)"])
             process.terminate()
+            asked.append(process)
+        }
+        guard !asked.isEmpty else { return }
+
+        let deadline = ContinuousClock.now.advanced(by: waitFor)
+        while ContinuousClock.now < deadline {
+            asked.removeAll { !$0.isRunning }
+            if asked.isEmpty { return }
+            usleep(50_000)
+        }
+        for process in asked where process.isRunning {
+            log?.info("instance ignored SIGTERM; killing", metadata: ["pid": "\(process.processIdentifier)"])
+            kill(process.processIdentifier, SIGKILL)
         }
     }
 }
