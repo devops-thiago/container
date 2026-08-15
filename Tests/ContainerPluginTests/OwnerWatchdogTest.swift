@@ -97,6 +97,27 @@ struct OwnerWatchdogTest {
         #expect(await subject.isOwned() == false)
     }
 
+    @Test func startupWorkWaitsForTheAppAndIsSkippedIfItNeverComes() async {
+        let start = ContinuousClock.now
+        let running = Running(false)
+        let subject = watchdog(now: start, running: running)
+        // Nothing to work for yet, and the poll loop has not given up either, so a caller
+        // asking whether to provision is still waiting rather than being told to skip.
+        _ = await subject.tick(now: start)
+        #expect(await subject.isOwned() == false)
+        // Once the grace runs out the answer is no, which is what keeps a CLI-demand-started
+        // engine from claiming a vmnet interface on its way out the door.
+        #expect(await subject.tick(now: start.advanced(by: OwnerWatchdog.graceBeforeFirstOwner)))
+        #expect(await subject.waitUntilOwnedOrExpired() == false)
+    }
+
+    @Test func startupWorkProceedsOnceTheAppIsSeen() async {
+        let start = ContinuousClock.now
+        let subject = watchdog(now: start, running: Running(true))
+        _ = await subject.tick(now: start)
+        #expect(await subject.waitUntilOwnedOrExpired())
+    }
+
     @Test func expiryIsFinal() async {
         let start = ContinuousClock.now
         let running = Running(false)
