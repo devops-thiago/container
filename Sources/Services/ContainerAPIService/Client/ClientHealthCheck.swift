@@ -29,19 +29,9 @@ extension ClientHealthCheck {
         XPCClient(service: serviceIdentifier)
     }
 
-    /// - Parameter claimingOwner: the pid to name as the engine's owner, for the host app
-    ///   only. The engine shuts itself down once its owner exits, so a caller that passes a
-    ///   pid here is promising the engine may live as long as that process — which is true of
-    ///   the app and false of every CLI invocation, hence the default of nil.
-    public static func ping(
-        timeout: Duration? = XPCClient.xpcRegistrationTimeout,
-        claimingOwner: pid_t? = nil
-    ) async throws -> SystemHealth {
+    public static func ping(timeout: Duration? = XPCClient.xpcRegistrationTimeout) async throws -> SystemHealth {
         let client = Self.newClient()
         let request = XPCMessage(route: .ping)
-        if let claimingOwner {
-            request.set(key: .ownerProcessIdentifier, value: Int64(claimingOwner))
-        }
         let reply = try await client.send(request, responseTimeout: timeout)
         return try decode(reply)
     }
@@ -49,13 +39,9 @@ extension ClientHealthCheck {
     /// Ping over an existing persistent session without creating another connection.
     public static func ping(
         session: XPCClientSession,
-        timeout: Duration? = XPCClient.xpcRegistrationTimeout,
-        claimingOwner: pid_t? = nil
+        timeout: Duration? = XPCClient.xpcRegistrationTimeout
     ) async throws -> SystemHealth {
         let request = XPCMessage(route: .ping)
-        if let claimingOwner {
-            request.set(key: .ownerProcessIdentifier, value: Int64(claimingOwner))
-        }
         let reply = try await session.send(request, responseTimeout: timeout)
         return try decode(reply)
     }
