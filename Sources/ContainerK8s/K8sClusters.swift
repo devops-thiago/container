@@ -82,7 +82,16 @@ public enum K8sClusters {
         }
     }
 
+    /// What a create finished with, beyond the cluster itself.
+    public struct CreateResult: Sendable {
+        /// Whether the kubeconfig was merged. False means the cluster is up and usable but
+        /// nothing was written, so the caller has to say how to get one — advice only it can
+        /// phrase, since a command points at another command and an app points at a button.
+        public let kubeconfigWritten: Bool
+    }
+
     /// Create and start a single-node cluster. The steps and their order are `k8s create`'s.
+    @discardableResult
     public static func create(
         name: String = K8sClusters.defaultName,
         nodeImage: String = K8sClusters.defaultNodeImage,
@@ -93,7 +102,7 @@ public enum K8sClusters {
         imageFetch: Flags.ImageFetch = Flags.ImageFetch(maxConcurrentDownloads: 3),
         log: Logger,
         progressUpdate: @escaping ProgressUpdateHandler = { _ in }
-    ) async throws {
+    ) async throws -> CreateResult {
         guard nameValid(name) else {
             throw ContainerizationError(.invalidArgument, message: "cluster name \(name) is not a valid container ID")
         }
@@ -205,8 +214,12 @@ public enum K8sClusters {
             let kubeConfig = try await K8sHelper.transformConfig(rawConfig, containerId: name, fqdn: fqdn, client: client)
             try K8sHelper.mergeConfig(kubeConfig, containerId: name, setCurrentContext: true, log: log)
         } catch {
+            // Not fatal: the cluster is up, and only the kubeconfig is missing. Reported
+            // rather than thrown so the caller keeps the cluster and can say how to recover.
             log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
+            return CreateResult(kubeconfigWritten: false)
         }
+        return CreateResult(kubeconfigWritten: true)
     }
 
     /// The cluster's kubeconfig as YAML, rewritten to reach the API server from this host —

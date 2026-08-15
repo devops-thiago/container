@@ -509,13 +509,18 @@ extension PluginLoader {
     /// holding vmnet networks and VMs — until the machine reboots. Only
     /// processes running out of `installRoot` are touched, so a separately
     /// installed container engine is never disturbed.
-    public static func reapOrphanedInstances(installRoot: URL, log: Logger? = nil) {
+    /// - Returns: the pids sent SIGTERM, for `killSurvivingOrphans` to follow up on. Sending
+    ///   the signal is immediate and stays on the startup path, because a stale helper still
+    ///   holding a network has to be asked to go before anything new is spawned. Waiting to see
+    ///   whether it obeyed does not, and used to cost every start five seconds.
+    @discardableResult
+    public static func reapOrphanedInstances(installRoot: URL, log: Logger? = nil) -> [pid_t] {
         let root = installRoot.resolvingSymlinksInPath().path(percentEncoded: false)
         let selfPid = getpid()
 
         var pids = [pid_t](repeating: 0, count: 4096)
         let byteCount = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-        guard byteCount > 0 else { return }
+        guard byteCount > 0 else { return [] }
         let count = Int(byteCount) / MemoryLayout<pid_t>.size
 
         var victims: [pid_t] = []
@@ -531,12 +536,26 @@ extension PluginLoader {
             victims.append(pid)
         }
 
-        // SIGTERM alone is a request, and the vmnet helper was measured ignoring it — a
-        // single orphan survived two days of restarts, holding its network the whole
-        // time. Escalate to SIGKILL for whatever is still alive after a short grace.
-        guard !victims.isEmpty else { return }
+        return victims
+    }
+
+    /// Follow up on `reapOrphanedInstances`: SIGKILL whatever ignored the SIGTERM.
+    ///
+    /// SIGTERM alone is a request, and the vmnet helper was measured ignoring it — a single
+    /// orphan survived two days of restarts, holding its network the whole time. This waits a
+    /// short grace and then insists.
+    ///
+    /// Off the startup path deliberately. It sleeps, and running it inline delayed the
+    /// apiserver reaching its listen call by up to five seconds every time an orphan was
+    /// stubborn — before any client could connect at all.
+    public static func killSurvivingOrphans(
+        _ asked: [pid_t], installRoot: URL, log: Logger? = nil
+    ) async {
+        guard !asked.isEmpty else { return }
+        let root = installRoot.resolvingSymlinksInPath().path(percentEncoded: false)
+        var victims = asked
         for _ in 0..<10 {
-            usleep(500_000)
+            try? await Task.sleep(for: .milliseconds(500))
             victims.removeAll { kill($0, 0) != 0 }
             if victims.isEmpty { return }
         }

@@ -70,7 +70,7 @@ public struct K8sCreate: AsyncParsableCommand {
         defer { progress.finish() }
         progress.start()
 
-        try await K8sClusters.create(
+        let result = try await K8sClusters.create(
             name: name,
             nodeImage: nodeImage,
             cpus: resourceFlags.cpus,
@@ -83,6 +83,9 @@ public struct K8sCreate: AsyncParsableCommand {
         )
 
         progress.finish()
+        if !result.kubeconfigWritten {
+            log.info("cluster is running; use 'container k8s write-config --name \(name)' to write the kubeconfig")
+        }
         print(name)
     }
 }
