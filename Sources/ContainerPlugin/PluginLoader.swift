@@ -518,6 +518,7 @@ extension PluginLoader {
         guard byteCount > 0 else { return }
         let count = Int(byteCount) / MemoryLayout<pid_t>.size
 
+        var victims: [pid_t] = []
         for index in 0..<count {
             let pid = pids[index]
             guard pid > 0, pid != selfPid else { continue }
@@ -536,6 +537,21 @@ extension PluginLoader {
                 "reaping orphaned instance",
                 metadata: ["pid": "\(pid)", "path": "\(path)"])
             kill(pid, SIGTERM)
+            victims.append(pid)
+        }
+
+        // SIGTERM alone is a request, and the vmnet helper was measured ignoring it — a
+        // single orphan survived two days of restarts, holding its network the whole
+        // time. Escalate to SIGKILL for whatever is still alive after a short grace.
+        guard !victims.isEmpty else { return }
+        for _ in 0..<10 {
+            usleep(500_000)
+            victims.removeAll { kill($0, 0) != 0 }
+            if victims.isEmpty { return }
+        }
+        for pid in victims {
+            log?.info("orphan ignored SIGTERM; sending SIGKILL", metadata: ["pid": "\(pid)"])
+            kill(pid, SIGKILL)
         }
     }
 
