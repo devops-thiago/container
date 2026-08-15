@@ -143,6 +143,26 @@ public actor OwnerWatchdog {
         return true
     }
 
+    /// Wait until the app has been seen, or until the service has given up waiting.
+    ///
+    /// For startup work that only makes sense on behalf of an app — provisioning the persisted
+    /// networks, say. An engine launchd demand-started for a CLI with no app running is about
+    /// to exit, and a vmnet interface claimed on the way through outlives it as an orphan.
+    ///
+    /// - Returns: true if an app is there to work for, false if the service is leaving.
+    public func waitUntilOwnedOrExpired() async -> Bool {
+        // Reads state the poll loop maintains rather than driving its own, so the two cannot
+        // disagree about when the grace ran out.
+        while !everSeen, !expired {
+            do {
+                try await Task.sleep(for: poll)
+            } catch {
+                return false
+            }
+        }
+        return everSeen && !expired
+    }
+
     /// Poll until the app has been gone past the grace, then return so the caller can shut
     /// down. Never returns while the app is running.
     public func waitForOwnerLoss() async {
