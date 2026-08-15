@@ -52,7 +52,10 @@ struct OwnerWatchdogTest {
         alive.value = false
         // Noticing the death does not end the grace: a relaunch still has it to re-attach in.
         #expect(await subject.tick(now: start.advanced(by: .seconds(1))) == false)
-        #expect(await subject.isOwned() == false)
+        // And the engine keeps working through it. The reprieve exists so the relaunched app
+        // finds its containers still running; an engine that refused everything meanwhile
+        // would be up in name only.
+        #expect(await subject.isOwned())
 
         // The grace is counted from the last tick that saw the owner alive, not from the one
         // that noticed it gone — those are a single poll apart, and dating it from the last
@@ -83,6 +86,17 @@ struct OwnerWatchdogTest {
         #expect(await subject.isOwned() == false)
         #expect(await subject.tick(now: start.advanced(by: .seconds(1))) == false)
         #expect(await subject.tick(now: start.advanced(by: OwnerWatchdog.graceBeforeFirstOwner)))
+    }
+
+    @Test func aDeadOwnerPastTheGraceStopsServing() async {
+        let start = ContinuousClock.now
+        let alive = Alive()
+        let subject = watchdog(now: start) { _ in alive.value }
+        await subject.attach(pid: 42)
+        _ = await subject.tick(now: start)
+        alive.value = false
+        #expect(await subject.tick(now: start.advanced(by: OwnerWatchdog.graceAfterOwnerLoss)))
+        #expect(await subject.isOwned() == false)
     }
 
     @Test func expiryIsFinal() async {
