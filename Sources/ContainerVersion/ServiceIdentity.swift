@@ -50,6 +50,20 @@ public enum ServiceIdentity {
     public static let appGroup: String? =
         resolve(infoKey: "ContainerAppGroup", envKey: "CONTAINER_APP_GROUP")
 
+    /// The bundle identifier of the app this engine is embedded in, if any.
+    ///
+    /// Services are launchd agents rather than children of that app, so a force quit of it
+    /// cascades nowhere; each one watches for the app itself and stops when it goes. That
+    /// watch needs to know which app to look for, and cannot ask the enclosing bundle: the
+    /// plugin helpers live several directories below `Contents/`, too deep for
+    /// `Bundle.appBundle` to walk up to. So it travels the same way the prefix and group do —
+    /// an Info.plist key carried by every executable, with an environment override for tests.
+    ///
+    /// `nil` for a standalone `container` install, which has no app and so keeps the upstream
+    /// behaviour of running until it is stopped.
+    public static let hostAppBundleIdentifier: String? =
+        resolve(infoKey: "ContainerHostAppBundleIdentifier", envKey: "CONTAINER_HOST_APP_BUNDLE_ID")
+
     /// Whether this build is running inside an embedder rather than as a
     /// standalone `container` install. True when either identity key was
     /// supplied, which only an embedder does.

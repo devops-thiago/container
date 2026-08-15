@@ -29,7 +29,6 @@ public actor HealthCheckHarness {
     private let logRoot: FilePath?
     private let lifecycleGeneration: String?
     private let processNonce: String?
-    private let ownerWatchdog: OwnerWatchdog?
     private let log: Logger
 
     public init(
@@ -38,7 +37,6 @@ public actor HealthCheckHarness {
         logRoot: FilePath?,
         lifecycleGeneration: String? = nil,
         processNonce: String? = nil,
-        ownerWatchdog: OwnerWatchdog? = nil,
         log: Logger
     ) {
         self.appRoot = appRoot
@@ -46,19 +44,11 @@ public actor HealthCheckHarness {
         self.logRoot = logRoot
         self.lifecycleGeneration = lifecycleGeneration
         self.processNonce = processNonce
-        self.ownerWatchdog = ownerWatchdog
         self.log = log
     }
 
     @Sendable
     public func ping(_ message: XPCMessage) async -> XPCMessage {
-        // The ping carries the app's ownership claim, so it is handled before the reply is
-        // built: an engine that has just outlived a force quit is counting down to shutdown,
-        // and the relaunched app's first ping is what stops that clock.
-        let claimedOwner = message.int64(key: .ownerProcessIdentifier)
-        if claimedOwner > 0, let ownerWatchdog {
-            await ownerWatchdog.attach(pid: pid_t(claimedOwner))
-        }
         let reply = message.reply()
         reply.set(key: .appRoot, value: appRoot.absoluteString)
         reply.set(key: .installRoot, value: installRoot.absoluteString)
