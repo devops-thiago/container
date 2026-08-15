@@ -51,6 +51,10 @@ public actor OwnerWatchdog {
     private var owner: pid_t?
     private var deadline: ContinuousClock.Instant
     private var expired = false
+    /// Whether an app ever claimed this engine, which is what separates the two ways of
+    /// having no owner: an engine whose app was just killed is mid-reprieve and still has to
+    /// work, while one nobody ever claimed is a CLI demand-start and has to refuse.
+    private var everOwned = false
 
     public init(
         now: ContinuousClock.Instant = ContinuousClock.now,
@@ -75,10 +79,17 @@ public actor OwnerWatchdog {
             log.info("engine owner attached", metadata: ["pid": "\(pid)"])
         }
         owner = pid
+        everOwned = true
     }
 
-    /// Whether an owner is currently attached, which is what `wrap` gates work on.
-    public func isOwned() -> Bool { owner != nil && !expired }
+    /// Whether the engine may still do work.
+    ///
+    /// True through the whole reprieve, not just while the owner is breathing: the engine
+    /// stays up after a force quit precisely so the relaunched app can adopt it with its
+    /// workloads intact, and an engine that refused every request in that window would be
+    /// up in name only. What it does not survive is the deadline, or never having been
+    /// claimed at all.
+    public func isOwned() -> Bool { everOwned && !expired }
 
     /// Refuse a route while the engine is unowned.
     ///
