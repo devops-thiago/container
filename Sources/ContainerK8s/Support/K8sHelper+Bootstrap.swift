@@ -114,17 +114,42 @@ extension K8sHelper {
     }
 
     private static func loadKindnetManifest(log: Logger) async throws -> String {
-        let pluginLoader = try await Utility.createPluginLoader(log: log)
-        guard let plugin = pluginLoader.findPlugin(forExecutable: CommandLine.executablePath),
+        for url in await kindnetManifestCandidates(log: log) {
+            if let contents = try? String(contentsOf: url, encoding: .utf8) {
+                return contents
+            }
+        }
+        throw ContainerizationError(.internalError, message: "unable to locate the k8s plugin's kindnet manifest")
+    }
+
+    /// Where the kindnet manifest can live, in the order worth trying.
+    ///
+    /// Plugin discovery keys on the current executable, which only resolves when this code
+    /// runs *as* the k8s plugin binary. An embedder linking `ContainerK8s` runs it as its
+    /// own executable — the app — so the loader finds nothing there; for that case the
+    /// manifest is resolved relative to the executable instead: `<bundle>/Contents/MacOS/<app>`
+    /// and the plugin's resources both sit at fixed offsets from it.
+    private static func kindnetManifestCandidates(log: Logger) async -> [URL] {
+        var candidates: [URL] = []
+        if let pluginLoader = try? await Utility.createPluginLoader(log: log),
+            let plugin = pluginLoader.findPlugin(forExecutable: CommandLine.executablePath),
             let resourceURL = plugin.resourceURL
-        else {
-            throw ContainerizationError(.internalError, message: "unable to locate k8s plugin installation or resources")
+        {
+            candidates.append(resourceURL.appendingPathComponent("kindnet.yaml"))
         }
-        let url = resourceURL.appendingPathComponent("kindnet.yaml")
-        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
-            throw ContainerizationError(.internalError, message: "kindnet manifest resource missing at \(url.path)")
-        }
-        return contents
+        let executable = URL(fileURLWithPath: CommandLine.executablePath.string)
+            .resolvingSymlinksInPath()
+        let executableDir = executable.deletingLastPathComponent()
+        // The plugin's own layout: plugins/k8s/bin/k8s → plugins/k8s/resources/.
+        candidates.append(
+            executableDir.deletingLastPathComponent()
+                .appendingPathComponent("resources/kindnet.yaml"))
+        // The embedded layout, CLI and app alike: Contents/MacOS/<binary> →
+        // Contents/libexec/container/plugins/k8s/resources/.
+        candidates.append(
+            executableDir.deletingLastPathComponent()
+                .appendingPathComponent("libexec/container/plugins/k8s/resources/kindnet.yaml"))
+        return candidates
     }
 
     private static var nodePrepScript: String {
