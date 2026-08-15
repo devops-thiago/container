@@ -120,9 +120,10 @@ extension ClusterBootstrapper {
     }
 
     private static func loadKindnetManifest(log: Logger) async throws -> String {
-        let url = try await ClusterHelper.pluginResourceURL(log: log).appendingPathComponent("kindnet.yaml")
-        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
-            throw ContainerizationError(.internalError, message: "kindnet manifest resource missing at \(url.path)")
+        guard let url = await ClusterHelper.pluginResource(named: "kindnet.yaml", log: log),
+            let contents = try? String(contentsOf: url, encoding: .utf8)
+        else {
+            throw ContainerizationError(.internalError, message: "unable to locate the cluster plugin's kindnet manifest")
         }
         return contents
     }

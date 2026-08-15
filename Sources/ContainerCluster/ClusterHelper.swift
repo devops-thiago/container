@@ -69,13 +69,47 @@ public struct ClusterHelper {
     /// Returns the cluster-shim binary in the cluster plugin's resources.
     /// Builds made without container services running do not include it.
     static func clusterShimURL(log: Logger) async throws -> URL {
-        let shim = try await pluginResourceURL(log: log).appendingPathComponent("cluster-shim")
-        guard FileManager.default.fileExists(atPath: shim.path) else {
+        guard let shim = await pluginResource(named: "cluster-shim", log: log) else {
             throw ContainerizationError(
                 .notFound,
-                message: "--shared-image-store needs cluster-shim, and this build of container has none at \(shim.path)")
+                message: "--shared-image-store needs cluster-shim, and this build of container has none")
         }
         return shim
+    }
+
+    /// Returns the named file from the cluster plugin's resources, or nil when no
+    /// candidate location holds it.
+    static func pluginResource(named name: String, log: Logger) async -> URL? {
+        await pluginResourceCandidates(log: log)
+            .map { $0.appendingPathComponent(name) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Where the cluster plugin's resources can live, in the order worth trying.
+    ///
+    /// Plugin discovery keys on the current executable, which only resolves when this code
+    /// runs *as* the cluster plugin binary. An embedder linking `ContainerCluster` runs it as its
+    /// own executable — the app — so the loader finds nothing there; for that case the
+    /// resources are resolved relative to the executable instead: `<bundle>/Contents/MacOS/<app>`
+    /// and the plugin's resources both sit at fixed offsets from it.
+    static func pluginResourceCandidates(log: Logger) async -> [URL] {
+        var candidates: [URL] = []
+        if let resourceURL = try? await pluginResourceURL(log: log) {
+            candidates.append(resourceURL)
+        }
+        let executable = URL(fileURLWithPath: CommandLine.executablePath.string)
+            .resolvingSymlinksInPath()
+        let executableDir = executable.deletingLastPathComponent()
+        // The plugin's own layout: plugins/cluster/bin/cluster → plugins/cluster/resources/.
+        candidates.append(
+            executableDir.deletingLastPathComponent()
+                .appendingPathComponent("resources"))
+        // The embedded layout, CLI and app alike: Contents/MacOS/<binary> →
+        // Contents/libexec/container/plugins/cluster/resources/.
+        candidates.append(
+            executableDir.deletingLastPathComponent()
+                .appendingPathComponent("libexec/container/plugins/cluster/resources"))
+        return candidates
     }
 
     /// Returns the resources directory of the installed cluster plugin.
