@@ -91,8 +91,15 @@ extension APIServer {
                 // A previous apiserver may have died without reaping its
                 // helpers; they would otherwise hold vmnet networks and VMs
                 // forever.
-                PluginLoader.reapOrphanedInstances(
-                    installRoot: URL(fileURLWithPath: installRoot.string), log: log)
+                let root = URL(fileURLWithPath: installRoot.string)
+                let asked = PluginLoader.reapOrphanedInstances(installRoot: root, log: log)
+                // The SIGTERM above is on the startup path because a helper still holding a
+                // network has to be asked to go before new ones spawn. Finding out whether it
+                // obeyed is not: that waits, and waiting here delayed the listen call below by
+                // up to five seconds whenever an orphan was stubborn.
+                if !asked.isEmpty {
+                    Task { await PluginLoader.killSurvivingOrphans(asked, installRoot: root, log: log) }
+                }
 
                 log.info("configuring XPC server")
                 var routes = [XPCRoute: XPCServer.RouteHandler]()
