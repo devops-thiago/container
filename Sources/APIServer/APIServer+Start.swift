@@ -149,8 +149,7 @@ extension APIServer {
                     routes: &routes
                 )
                 await containersService.setNetworksService(networkService)
-                initializeHealthCheckService(
-                    processNonce: processNonce, ownerWatchdog: ownerWatchdog, log: log, routes: &routes)
+                initializeHealthCheckService(processNonce: processNonce, log: log, routes: &routes)
                 try initializeKernelService(log: log, routes: &routes)
                 let volumesService = try await initializeVolumeService(containersService: containersService, log: log, routes: &routes)
                 try initializeDiskUsageService(
@@ -199,14 +198,14 @@ extension APIServer {
                     routes[XPCRoute.systemShutdown] = shutdownService.shutdown
                 }
 
-                // Work is gated on the engine having a live owner; the engine's own plumbing
-                // is not. The ping carries the ownership claim, so gating it would leave the
-                // engine unclaimable, and it is also how a client asks whether the engine is
-                // there at all. The attach and resolve routes are helpers we spawned posting
-                // and dialing their endpoints, and the grant publish is the owner handing us
-                // its folder bookmarks — none of those are a user running a workload, and
-                // refusing them only stops the engine assembling itself. Nothing escapes
-                // through them either: the routes that start containers are all gated.
+                // Work is gated on the engine having a running app; the engine's own plumbing
+                // is not. The ping is how a client asks whether the engine is there at all,
+                // which it must be able to do precisely when the answer is no. The attach and
+                // resolve routes are helpers we spawned posting and dialing their endpoints,
+                // and the grant publish is the app handing us its folder bookmarks — none of
+                // those are a user running a workload, and refusing them only stops the engine
+                // assembling itself. Nothing escapes through them either: the routes that start
+                // containers are all gated.
                 let ungated: Set<XPCRoute> = [.ping, .runtimeAttach, .runtimeResolve, .hostDirectoryGrantsPublish]
                 for (route, handler) in routes where !ungated.contains(route) {
                     routes[route] = ownerWatchdog.wrap(handler)
@@ -423,7 +422,6 @@ extension APIServer {
 
         private func initializeHealthCheckService(
             processNonce: String,
-            ownerWatchdog: OwnerWatchdog,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
         ) {
@@ -438,7 +436,6 @@ extension APIServer {
                 logRoot: logRoot,
                 lifecycleGeneration: lifecycleGeneration,
                 processNonce: lifecycleGeneration == nil ? nil : processNonce,
-                ownerWatchdog: ownerWatchdog,
                 log: log
             )
             routes[XPCRoute.ping] = XPCServer.route(svc.ping)
