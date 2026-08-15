@@ -44,25 +44,6 @@ struct DirectoryWatcherTest {
         return try await body(tempPath)
     }
 
-    /// Wait for the watcher to report, rather than assuming a fixed delay was long enough.
-    ///
-    /// fsevents delivery latency depends on whatever else the machine is doing, so a fixed sleep
-    /// is a race a loaded machine loses. Polling returns as soon as the event lands, which is
-    /// both faster in the normal case and survivable in the slow one.
-    /// Waits on the condition being asserted, not on a proxy for it. Counting reports is such a
-    /// proxy and a misleading one: the watcher can report the same file twice, so a wait for
-    /// "two reports" is satisfied by one name arriving twice and returns before the second name
-    /// ever shows up.
-    private func waitUntil(
-        within timeout: Duration = .seconds(10), _ condition: () -> Bool
-    ) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if condition() { return }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-    }
-
     private actor CreatedPaths {
         nonisolated(unsafe) public var paths: [FilePath]
 
@@ -71,12 +52,21 @@ struct DirectoryWatcherTest {
         }
     }
 
-    /// Polls `condition` until it returns true or `timeout` elapses. Used only to wait for the
-    /// handler's async invocation after a mutation, never to guess how long watcher setup takes.
+    /// Polls `condition` until it holds or `timeout` elapses.
+    ///
+    /// fsevents delivery latency depends on whatever else the machine is doing, so a fixed sleep
+    /// is a race a loaded machine loses. This waits for the handler's async invocation after a
+    /// mutation, and never to guess how long watcher setup takes.
+    ///
+    /// It also waits on the condition actually being asserted rather than on a proxy for it.
+    /// Counting reports is such a proxy, and a misleading one: the watcher can report the same
+    /// file twice, so waiting for "two reports" is satisfied by one name arriving twice and
+    /// returns before the second name appears.
     private func waitUntil(timeout: Duration = .seconds(10), condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
-        while !condition() && ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(50))
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
         }
     }
 
