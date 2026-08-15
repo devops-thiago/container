@@ -104,6 +104,7 @@ extension APIServer {
                 log.info("configuring XPC server")
                 var routes = [XPCRoute: XPCServer.RouteHandler]()
                 let processNonce = UUID().uuidString
+                let ownerWatchdog = OwnerWatchdog(log: log)
                 let pluginLoader = try initializePluginLoader(log: log)
 
                 let pluginsService = try await initializePlugins(pluginLoader: pluginLoader, log: log, routes: &routes, debug: debug)
@@ -148,7 +149,8 @@ extension APIServer {
                     routes: &routes
                 )
                 await containersService.setNetworksService(networkService)
-                initializeHealthCheckService(processNonce: processNonce, log: log, routes: &routes)
+                initializeHealthCheckService(
+                    processNonce: processNonce, ownerWatchdog: ownerWatchdog, log: log, routes: &routes)
                 try initializeKernelService(log: log, routes: &routes)
                 let volumesService = try await initializeVolumeService(containersService: containersService, log: log, routes: &routes)
                 try initializeDiskUsageService(
@@ -197,6 +199,19 @@ extension APIServer {
                     routes[XPCRoute.systemShutdown] = shutdownService.shutdown
                 }
 
+                // Work is gated on the engine having a live owner; the engine's own plumbing
+                // is not. The ping carries the ownership claim, so gating it would leave the
+                // engine unclaimable, and it is also how a client asks whether the engine is
+                // there at all. The attach and resolve routes are helpers we spawned posting
+                // and dialing their endpoints, and the grant publish is the owner handing us
+                // its folder bookmarks — none of those are a user running a workload, and
+                // refusing them only stops the engine assembling itself. Nothing escapes
+                // through them either: the routes that start containers are all gated.
+                let ungated: Set<XPCRoute> = [.ping, .runtimeAttach, .runtimeResolve, .hostDirectoryGrantsPublish]
+                for (route, handler) in routes where !ungated.contains(route) {
+                    routes[route] = ownerWatchdog.wrap(handler)
+                }
+
                 let server = XPCServer(
                     identifier: ServiceIdentity.apiServerService,
                     routes: routes.reduce(
@@ -221,6 +236,23 @@ extension APIServer {
                         // they can only start once the listener above is up.
                         await networkService.startPersistedNetworks()
                         return .success(())
+                    }
+
+                    group.addTask {
+                        // The host app is not this process's parent — launchd is — so a force
+                        // quit of the app kills only the app and cascades nowhere. Waiting on
+                        // the owner here is what actually makes the engine's lifetime the
+                        // app's. It doubles as the exit for an engine that launchd
+                        // demand-started for a CLI with no app running, which nobody ever
+                        // claims.
+                        await ownerWatchdog.waitForOwnerLoss()
+                        log.info("engine has no owning app; stopping")
+                        await Self.stopContainersOnOwnerLoss(containersService: containersService, log: log)
+                        // Same backstop as the SIGTERM path: spawned runtime and network
+                        // helpers are our children and would otherwise be orphaned holding
+                        // VMs and vmnet interfaces.
+                        PluginLoader.terminateAllInstances(log: log)
+                        Darwin.exit(0)
                     }
 
                     // start up host table DNS
@@ -287,6 +319,32 @@ extension APIServer {
                         "error": "\(error)",
                     ])
                 APIServer.exit(withError: error)
+            }
+        }
+
+        /// Stop running containers before the engine exits for want of an owner.
+        ///
+        /// Best-effort and bounded: the app normally stops containers itself on Quit, and this
+        /// runs on the path where it never got the chance. A container that will not stop in
+        /// time is left to `terminateAllInstances`, which is not graceful but does not leak.
+        private static func stopContainersOnOwnerLoss(containersService: ContainersService, log: Logger) async {
+            guard let snapshots = try? await containersService.list(), !snapshots.isEmpty else { return }
+            log.info("stopping containers before engine exit", metadata: ["count": "\(snapshots.count)"])
+            let options = ContainerStopOptions(timeoutInSeconds: 5, signal: nil)
+            await withTaskGroup(of: Void.self) { group in
+                for snapshot in snapshots {
+                    group.addTask {
+                        do {
+                            try await containersService.stop(
+                                id: snapshot.id, options: options, responseTimeout: .seconds(20))
+                        } catch {
+                            log.error(
+                                "failed to stop container before engine exit",
+                                metadata: ["id": "\(snapshot.id)", "error": "\(error)"]
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -365,6 +423,7 @@ extension APIServer {
 
         private func initializeHealthCheckService(
             processNonce: String,
+            ownerWatchdog: OwnerWatchdog,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
         ) {
@@ -379,6 +438,7 @@ extension APIServer {
                 logRoot: logRoot,
                 lifecycleGeneration: lifecycleGeneration,
                 processNonce: lifecycleGeneration == nil ? nil : processNonce,
+                ownerWatchdog: ownerWatchdog,
                 log: log
             )
             routes[XPCRoute.ping] = XPCServer.route(svc.ping)
