@@ -233,6 +233,15 @@ extension APIServer {
                     group.addTask {
                         // Networks spawn helpers that announce back to us, so
                         // they can only start once the listener above is up.
+                        //
+                        // And only on behalf of an app. launchd demand-starts this engine for
+                        // any dial, including a CLI one with no app running, and that engine
+                        // is about to exit — a vmnet interface claimed on the way through
+                        // outlives it as an orphan holding the network.
+                        guard await ownerWatchdog.waitUntilOwnedOrExpired() else {
+                            log.info("no owning app; not provisioning persisted networks")
+                            return .success(())
+                        }
                         await networkService.startPersistedNetworks()
                         return .success(())
                     }
