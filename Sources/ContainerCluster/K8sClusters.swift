@@ -98,7 +98,7 @@ public enum K8sClusters {
         cpus: Int64? = nil,
         memory: String? = nil,
         autoRemove: Bool = false,
-        registry: Flags.Registry = Flags.Registry(scheme: "auto"),
+        registry: Flags.Registry = Flags.Registry(scheme: "https"),
         imageFetch: Flags.ImageFetch = Flags.ImageFetch(maxConcurrentDownloads: 3),
         log: Logger,
         progressUpdate: @escaping ProgressUpdateHandler = { _ in }
@@ -201,9 +201,11 @@ public enum K8sClusters {
 
         await progressUpdate([.setDescription("Running kubeadm init")])
         try await K8sHelper.prepareNode(nodeID: name, client: client, log: log)
+        // A single-node cluster is its own worker, so the control-plane taint has to go —
+        // the same answer `k8s create` gives for its default roles.
         try await K8sHelper.bootstrapControlPlane(
             nodeID: name, apiServerSANs: sans, advertiseAddress: vmIP,
-            client: client, log: log)
+            schedulable: true, client: client, log: log)
 
         await progressUpdate([.setDescription("Waiting for cluster to be ready")])
         try await K8sHelper.waitForReady(containerId: name, client: client, log: log)
