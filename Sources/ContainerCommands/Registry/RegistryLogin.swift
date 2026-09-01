@@ -20,6 +20,7 @@ import ContainerPersistence
 import ContainerPlugin
 import Containerization
 import ContainerizationError
+import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 
@@ -90,7 +91,8 @@ extension Application {
                     shouldRetry: ({ response in
                         response.status.code >= 500
                     })
-                )
+                ),
+                tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
             )
             try await client.ping()
             try keychain.save(hostname: server, username: username, password: password)
