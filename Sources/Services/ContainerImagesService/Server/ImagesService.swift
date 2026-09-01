@@ -434,6 +434,16 @@ extension ImagesService {
         do {
             return try await body(authentication)
         } catch let err as RegistryClient.Error {
+            // The token server answered the saved login with its own challenge and the client
+            // will not go further — the credential is what is wrong, and only the caller can
+            // fix that. Name the host so an embedder can ask for that registry's login again;
+            // the raw text talks about an insecure exchange and reads like a network fault.
+            if case .insecureCredentialExchange = err, authentication != nil {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "registry \(host) rejected the saved login",
+                    cause: err)
+            }
             guard case .invalidStatus(_, let status, _) = err else {
                 throw err
             }
