@@ -36,6 +36,9 @@ public enum InstanceEndpoints {
         /// Who published it, as the token they presented; nil for an entry this process
         /// seeded for itself (a resolved endpoint cached locally).
         let owner: String?
+        /// The publisher's process, by its own account, so a label whose publisher has
+        /// exited can be published again by a successor with a new token.
+        let pid: pid_t?
     }
 
     private static let storage = Mutex<[String: Box]>([:])
@@ -54,12 +57,19 @@ public enum InstanceEndpoints {
     /// kit, or something less friendly — cannot take the label over and receive what the
     /// broker sends to it. An entry with no owner is this process's own cache and carries
     /// no such claim.
-    public static func attach(label: String, endpoint: xpc_endpoint_t, owner: String? = nil) throws {
+    /// A publisher that has exited holds nothing: its label may be taken by a new token.
+    /// Every process gets a fresh token, so an app relaunched after a force quit — the
+    /// engine survives one on purpose — would otherwise find its own label refused until
+    /// the engine restarted. The liveness checked is the *recorded* publisher's, not the
+    /// caller's claim, so a same-user process cannot talk its way past a live app.
+    public static func attach(label: String, endpoint: xpc_endpoint_t, owner: String? = nil, pid: pid_t? = nil) throws {
         try storage.withLock { table in
-            if let existing = table[label]?.owner, existing != owner {
-                throw OwnedByAnother(label: label)
+            if let existing = table[label], let existingOwner = existing.owner, existingOwner != owner {
+                guard let previous = existing.pid, !isAlive(previous) else {
+                    throw OwnedByAnother(label: label)
+                }
             }
-            table[label] = Box(endpoint: endpoint, owner: owner)
+            table[label] = Box(endpoint: endpoint, owner: owner, pid: pid)
         }
         let pending = waiters.withLock { $0.removeValue(forKey: label) ?? [] }
         for waiter in pending {
@@ -70,6 +80,12 @@ public enum InstanceEndpoints {
     /// The token `label` was published with, or nil when it is unpublished or unowned.
     public static func owner(label: String) -> String? {
         storage.withLock { $0[label]?.owner }
+    }
+
+    static func isAlive(_ pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno != ESRCH
     }
 
     public static func remove(label: String) {
