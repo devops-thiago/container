@@ -364,6 +364,9 @@ extension PluginLoader {
                 return
             }
             env["CONTAINER_ATTACH_SERVICE"] = ServiceIdentity.apiServerService
+            // The token this process publishes with; a helper that inherits it can attach its
+            // own endpoint and resolve its siblings', and nothing that did not inherit it can.
+            env[InstanceAttach.tokenEnvironmentName] = InstanceAttach.ownerToken
             let argv = [plugin.binaryURL.path] + processedArgs + serviceConfig.defaultArguments
             // Evict any endpoint a previous instance (possibly an orphan of a
             // crashed apiserver) left under this label: the wait below must be
