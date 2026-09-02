@@ -16,6 +16,7 @@
 
 import Foundation
 import Logging
+import Security
 import XPC
 
 /// How a spawned plugin instance publishes itself under sandboxed embedding.
@@ -27,6 +28,32 @@ import XPC
 /// the ordinary unsandboxed launchd path and keeps its mach service.
 public enum InstanceAttach {
     public static let environmentName = "CONTAINER_ATTACH_SERVICE"
+    /// The environment variable a spawning apiserver uses to hand its helpers the owner
+    /// token they attach and resolve with.
+    public static let tokenEnvironmentName = "CONTAINER_ATTACH_TOKEN"
+    /// The message key the token travels under, on attach, resolve, and the calls a broker
+    /// makes back to an endpoint it recorded.
+    public static let tokenKey = "token"
+
+    /// The capability this process presents at the broker: unforgeable, per process, and
+    /// the only thing that binds a label in the endpoint table to whoever published it.
+    ///
+    /// Same-EUID is the only identity the XPC boundary itself establishes, and every process
+    /// of the user has it, so a label held by EUID alone could be replaced or resolved by any
+    /// of them. A random 256-bit token the publisher alone knows cannot. Helpers the apiserver
+    /// spawns inherit the apiserver's token through the environment, so they resolve each
+    /// other; an embedder mints its own and shares it with nobody, so its endpoint can be
+    /// dialed only by the broker that recorded it.
+    public static let ownerToken: String = {
+        if let inherited = ProcessInfo.processInfo.environment[tokenEnvironmentName], !inherited.isEmpty {
+            return inherited
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            fatalError("could not draw an attach token from the system RNG")
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }()
     /// The apiserver route that records an instance endpoint.
     public static let route = "runtimeAttach"
     /// The apiserver route that hands one back out.
@@ -57,6 +84,7 @@ public enum InstanceAttach {
         message.set(key: "id", value: identifier)
         message.set(key: "endpoint", value: xpc_endpoint_create(connection))
         message.set(key: "pid", value: Int64(getpid()))
+        message.set(key: tokenKey, value: ownerToken)
         _ = try await client.send(message, responseTimeout: .seconds(30))
     }
 
@@ -75,12 +103,13 @@ public enum InstanceAttach {
             let client = XPCClient(service: broker)
             let message = XPCMessage(route: resolveRoute)
             message.set(key: "id", value: identifier)
+            message.set(key: tokenKey, value: ownerToken)
             let reply = try await client.send(message, responseTimeout: .seconds(30))
             guard let endpoint = reply.endpoint(key: "endpoint") else {
                 log.error("broker has no endpoint", metadata: ["id": "\(identifier)"])
                 return false
             }
-            InstanceEndpoints.attach(label: identifier, endpoint: endpoint)
+            try? InstanceEndpoints.attach(label: identifier, endpoint: endpoint)
             return true
         } catch {
             log.error(
