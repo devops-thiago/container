@@ -47,6 +47,12 @@ public enum XPCKeys: String {
     /// A single host directory the engine wants and cannot open, sent to the embedder so it
     /// can grant it — after asking the user, if it has to.
     case hostDirectoryPath
+    /// How many seconds the asker waits for the answer; the embedder takes its panel down at
+    /// that point and treats a later choice as no answer.
+    case hostDirectoryDeadlineSeconds
+    /// One request, one identity: the embedder's log names it, and a late answer is tied to
+    /// the request it was for rather than to whatever asks next.
+    case hostDirectoryRequestID
     /// Vsock port number key.
     case port
     /// Exit code for a process
