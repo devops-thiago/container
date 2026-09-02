@@ -37,9 +37,18 @@ struct InstanceAttachHarnessTests {
     }
 
     /// The attach route's decision, as the route makes it once the envelope is parsed.
-    private func attach(_ label: String, token: String?, endpoint: xpc_endpoint_t? = nil) throws {
+    private func attach(_ label: String, token: String?, endpoint: xpc_endpoint_t? = nil, pid: pid_t = getpid()) throws {
         try InstanceAttachHarness.record(
-            label: label, endpoint: endpoint ?? self.endpoint(), token: token, pid: getpid(), log: log)
+            label: label, endpoint: endpoint ?? self.endpoint(), token: token, pid: pid, log: log)
+    }
+
+    /// A pid that no longer exists: a child that has already exited and been reaped.
+    private func deadPID() -> pid_t {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try? child.run()
+        child.waitUntilExit()
+        return child.processIdentifier
     }
 
     /// The resolve route's decision.
@@ -111,6 +120,29 @@ struct InstanceAttachHarnessTests {
             }
         }
         #expect(InstanceEndpoints.owner(label: label) == embedderToken)
+    }
+
+    @Test("a label whose publisher has exited can be taken by a successor's token")
+    func deadPublisherLabelIsTakenOver() throws {
+        let label = unique("grants")
+        try attach(label, token: "old-app-token", pid: deadPID())
+        // The relaunched app, with the token every new process mints, publishes again.
+        let successor = endpoint()
+        try attach(label, token: "new-app-token", endpoint: successor)
+        #expect(InstanceEndpoints.endpoint(label: label) === successor)
+        #expect(InstanceEndpoints.owner(label: label) == "new-app-token")
+    }
+
+    @Test("a label whose publisher is alive is not taken over by a different token")
+    func livePublisherLabelIsKept() throws {
+        let label = unique("grants")
+        let mine = endpoint()
+        try attach(label, token: "live-app-token", endpoint: mine, pid: getpid())
+        #expect(throws: ContainerizationError.self) {
+            try attach(label, token: "impostor", pid: getpid())
+        }
+        #expect(InstanceEndpoints.endpoint(label: label) === mine)
+        #expect(InstanceEndpoints.owner(label: label) == "live-app-token")
     }
 
     @Test("a resolve for a label nobody published returns no endpoint rather than refusing")
