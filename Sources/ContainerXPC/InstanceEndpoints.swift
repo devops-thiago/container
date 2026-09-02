@@ -33,17 +33,43 @@ public enum InstanceEndpoints {
     /// xpc_endpoint_t is a thread-safe libXPC object; Swift can't see that.
     private struct Box: @unchecked Sendable {
         let endpoint: xpc_endpoint_t
+        /// Who published it, as the token they presented; nil for an entry this process
+        /// seeded for itself (a resolved endpoint cached locally).
+        let owner: String?
     }
 
     private static let storage = Mutex<[String: Box]>([:])
     private static let waiters = Mutex<[String: [CheckedContinuation<Void, Never>]]>([:])
 
-    public static func attach(label: String, endpoint: xpc_endpoint_t) {
-        storage.withLock { $0[label] = Box(endpoint: endpoint) }
+    /// A label already published under a different owner token.
+    public struct OwnedByAnother: Error, CustomStringConvertible {
+        public let label: String
+        public var description: String { "endpoint label \(label) is owned by another publisher" }
+    }
+
+    /// Record `endpoint` under `label` for `owner`.
+    ///
+    /// A label, once published with a token, can be re-published only with the same token:
+    /// re-announces from the same process go through, a second process — same user, same
+    /// kit, or something less friendly — cannot take the label over and receive what the
+    /// broker sends to it. An entry with no owner is this process's own cache and carries
+    /// no such claim.
+    public static func attach(label: String, endpoint: xpc_endpoint_t, owner: String? = nil) throws {
+        try storage.withLock { table in
+            if let existing = table[label]?.owner, existing != owner {
+                throw OwnedByAnother(label: label)
+            }
+            table[label] = Box(endpoint: endpoint, owner: owner)
+        }
         let pending = waiters.withLock { $0.removeValue(forKey: label) ?? [] }
         for waiter in pending {
             waiter.resume()
         }
+    }
+
+    /// The token `label` was published with, or nil when it is unpublished or unowned.
+    public static func owner(label: String) -> String? {
+        storage.withLock { $0[label]?.owner }
     }
 
     public static func remove(label: String) {
