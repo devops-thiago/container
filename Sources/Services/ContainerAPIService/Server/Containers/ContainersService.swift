@@ -663,7 +663,8 @@ public actor ContainersService {
     public func stop(
         id: String,
         options: ContainerStopOptions,
-        responseTimeout: Duration? = nil
+        responseTimeout: Duration? = nil,
+        requiredLabels: [String: String]? = nil
     ) async throws {
         log.debug(
             "ContainersService: enter",
@@ -685,6 +686,9 @@ public actor ContainersService {
         let clock = ContinuousClock()
         let responseDeadline = responseTimeout.map { clock.now.advanced(by: $0) }
         let state = try self._getContainerState(id: id)
+        try Self.require(requiredLabels, on: state, id: id)
+        // From here the stop goes through this state's own runtime client, not through the
+        // ID again, so what is stopped is what was just checked.
 
         // Stop should be idempotent.
         let client: RuntimeClient
@@ -881,8 +885,36 @@ public actor ContainersService {
         return try await client.statistics()
     }
 
+    /// Whether `state` carries every label in `required`. The precondition a caller attaches
+    /// when it validated a container by ID and must not act on whatever else that ID names by
+    /// the time the action runs — a k8s node's delete, for one.
+    static func labelsSatisfied(required: [String: String]?, actual: [String: String]) -> Bool {
+        guard let required else { return true }
+        return required.allSatisfy { actual[$0.key] == $0.value }
+    }
+
+    /// The second check, under the lock and against the table as it is now: a delete that
+    /// validated the ID a moment ago must not remove whatever the ID names by the time the
+    /// lock is held.
+    private func requireStillLabelled(id: String, _ required: [String: String]?) throws {
+        try Self.require(required, on: try self._getContainerState(id: id), id: id)
+    }
+
+    private static func require(_ required: [String: String]?, on state: ContainerState, id: String) throws {
+        guard labelsSatisfied(required: required, actual: state.snapshot.configuration.labels) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "container \(id) does not carry the labels this operation requires")
+        }
+    }
+
     /// Delete a container and its resources.
-    public func delete(id: String, force: Bool) async throws {
+    ///
+    /// - Parameter requiredLabels: labels the container must carry, checked once up front and
+    ///   again under the lock immediately before removal. Between a caller's own lookup and
+    ///   this call the ID can come to name a different container; the second check is what
+    ///   keeps that one alive.
+    public func delete(id: String, force: Bool, requiredLabels: [String: String]? = nil) async throws {
         log.info(
             "ContainersService: enter",
             metadata: [
@@ -902,6 +934,7 @@ public actor ContainersService {
         }
 
         let state = try self._getContainerState(id: id)
+        try Self.require(requiredLabels, on: state, id: id)
         switch state.snapshot.status {
         case .running:
             if !force {
@@ -924,6 +957,7 @@ public actor ContainersService {
                         "id": "\(id)",
                     ]
                 )
+                try await self.requireStillLabelled(id: id, requiredLabels)
                 try await self.cleanUp(id: id, context: context)
                 self.log.info(
                     "ContainersService: successful cleanup",
@@ -940,6 +974,7 @@ public actor ContainersService {
             )
         default:
             try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+                try await self.requireStillLabelled(id: id, requiredLabels)
                 try await self.cleanUp(id: id, context: context)
             }
         }
