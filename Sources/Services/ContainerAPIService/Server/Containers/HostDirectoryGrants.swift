@@ -167,6 +167,13 @@ public actor HostDirectoryGrants {
         let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
         message.set(key: XPCKeys.hostDirectoryPath.rawValue, value: path)
+        // The trust decision on the embedder's side of this call: its listener answers only
+        // a caller that presents the token it published its endpoint with. We hold that token
+        // because we are the broker it was published to; nobody else was given the endpoint
+        // (resolve refuses it), and nobody else knows the token.
+        if let token = InstanceEndpoints.owner(label: Self.vendorLabel) {
+            message.set(key: InstanceAttach.tokenKey, value: token)
+        }
         do {
             let reply = try await client.send(message, responseTimeout: XPCClient.hostDirectoryPanelPatience)
             guard let bookmark = reply.dataNoCopy(key: XPCKeys.hostDirectoryBookmarks.rawValue)
