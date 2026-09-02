@@ -64,23 +64,65 @@ public actor KernelService {
         }
 
         let kFile = url.resolvingSymlinksInPath()
-        let destPath = self.kernelDirectory.appendingPathComponent(kFile.lastPathComponent)
-        if force {
-            do {
-                try FileManager.default.removeItem(at: destPath)
-            } catch let error as NSError {
-                guard error.code == NSFileNoSuchFileError else {
-                    throw error
-                }
-            }
+        let name = kFile.lastPathComponent
+        let destPath = self.kernelDirectory.appendingPathComponent(name)
+        let fm = FileManager.default
+
+        if !force, fm.fileExists(atPath: destPath.path) {
+            throw ContainerizationError(.exists, message: "kernel \(name) is already installed")
         }
-        try FileManager.default.copyItem(at: kFile, to: destPath)
+
+        // Staged beside the destination and renamed over it, never removed first: a forced
+        // same-name replacement used to delete the working kernel and then copy, so a copy
+        // that failed left no kernel and a default symlink pointing at nothing. Everything
+        // that can fail — the copy, the size check, the sync, the rename — now happens while
+        // the old bytes are still where the symlink points.
+        let staged = self.kernelDirectory.appendingPathComponent(".\(name).staging-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: staged) }
+        try fm.copyItem(at: kFile, to: staged)
         try Task.checkCancellation()
-        do {
-            try self.setDefaultKernel(name: kFile.lastPathComponent, platform: platform)
-        } catch {
-            try? FileManager.default.removeItem(at: destPath)
-            throw error
+        try installHooks.afterStaging?()
+        try Self.verifyCopy(of: kFile, at: staged)
+        try Self.sync(staged)
+        // rename(2) replaces the destination atomically on the same volume.
+        guard rename(staged.path, destPath.path) == 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "could not move the staged kernel into place: \(String(cString: strerror(errno)))")
+        }
+        try self.setDefaultKernel(name: name, platform: platform)
+    }
+
+    /// Test seam: something to run once the replacement is staged and before it is moved
+    /// into place, so a failure at the worst moment can be proven harmless.
+    struct InstallHooks: Sendable {
+        var afterStaging: (@Sendable () throws -> Void)?
+    }
+    private var installHooks = InstallHooks()
+
+    func setInstallHooks(_ hooks: InstallHooks) {
+        installHooks = hooks
+    }
+
+    /// A staged copy is the source, byte for byte; a short copy is the failure this guards.
+    private static func verifyCopy(of source: URL, at staged: URL) throws {
+        let expected = try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? UInt64
+        let actual = try FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? UInt64
+        guard let expected, let actual, expected == actual, actual > 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "staged kernel is \(actual ?? 0) bytes, source is \(expected ?? 0)")
+        }
+    }
+
+    private static func sync(_ file: URL) throws {
+        let fd = open(file.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw ContainerizationError(.internalError, message: "could not open the staged kernel to sync it")
+        }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else {
+            throw ContainerizationError(.internalError, message: "could not sync the staged kernel")
         }
     }
 
@@ -246,8 +288,16 @@ public actor KernelService {
         }
         let name = "\(Self.defaultKernelNamePrefix)\(platform.architecture)"
         let defaultKernelPath = self.kernelDirectory.appendingPathComponent(name)
-        try? FileManager.default.removeItem(at: defaultKernelPath)
-        try FileManager.default.createSymbolicLink(at: defaultKernelPath, withDestinationURL: kernelPath)
+        // A fresh link renamed over the old one: the default never points at nothing, not even
+        // between a remove and a create.
+        let staged = self.kernelDirectory.appendingPathComponent(".\(name).staging-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(at: staged, withDestinationURL: kernelPath)
+        guard rename(staged.path, defaultKernelPath.path) == 0 else {
+            try? FileManager.default.removeItem(at: staged)
+            throw ContainerizationError(
+                .internalError,
+                message: "could not switch the default kernel: \(String(cString: strerror(errno)))")
+        }
     }
 
     public func getDefaultKernel(platform: SystemPlatform = .linuxArm) async throws -> Kernel {

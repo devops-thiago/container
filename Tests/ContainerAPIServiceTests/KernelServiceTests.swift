@@ -136,6 +136,74 @@ struct KernelServiceTests {
         }
     }
 
+    @Test func forcedSameNameReplacementKeepsTheOldKernelWhenStagingFails() async throws {
+        try await withTempDir { tempDir in
+            let service = try KernelService(
+                log: Logger(label: "com.apple.container.test.kernel-service"),
+                appRoot: tempDir.appendingPathComponent("app"))
+            let source = tempDir.appendingPathComponent("vmlinux")
+            let oldBytes = Data("old working kernel".utf8)
+            try oldBytes.write(to: source)
+            try await service.installKernel(kernelFile: source, platform: .linuxArm, force: false)
+            let installed = try await service.getDefaultKernel(platform: .linuxArm)
+            #expect(try Data(contentsOf: installed.path) == oldBytes)
+
+            // Same basename, new bytes, and a failure injected after the copy is staged —
+            // the moment the old code had already deleted the working kernel.
+            let newBytes = Data("replacement kernel that never lands".utf8)
+            try newBytes.write(to: source)
+            struct Injected: Error {}
+            await service.setInstallHooks(.init(afterStaging: { throw Injected() }))
+            await #expect(throws: Injected.self) {
+                try await service.installKernel(kernelFile: source, platform: .linuxArm, force: true)
+            }
+
+            let after = try await service.getDefaultKernel(platform: .linuxArm)
+            #expect(after.path == installed.path, "the default still names the same kernel file")
+            #expect(try Data(contentsOf: after.path) == oldBytes, "and its bytes are the old ones")
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: installed.path.deletingLastPathComponent().path)
+                .filter { $0.contains(".staging-") }
+            #expect(leftovers.isEmpty, "no staging object is left behind")
+        }
+    }
+
+    @Test func forcedSameNameReplacementSwapsTheBytesAtomically() async throws {
+        try await withTempDir { tempDir in
+            let service = try KernelService(
+                log: Logger(label: "com.apple.container.test.kernel-service"),
+                appRoot: tempDir.appendingPathComponent("app"))
+            let source = tempDir.appendingPathComponent("vmlinux")
+            try Data("old".utf8).write(to: source)
+            try await service.installKernel(kernelFile: source, platform: .linuxArm, force: false)
+            let before = try await service.getDefaultKernel(platform: .linuxArm)
+
+            let newBytes = Data("new kernel bytes".utf8)
+            try newBytes.write(to: source)
+            try await service.installKernel(kernelFile: source, platform: .linuxArm, force: true)
+
+            let after = try await service.getDefaultKernel(platform: .linuxArm)
+            #expect(after.path == before.path, "same name, same default")
+            #expect(try Data(contentsOf: after.path) == newBytes)
+        }
+    }
+
+    @Test func unforcedInstallRefusesToReplaceAnExistingKernel() async throws {
+        try await withTempDir { tempDir in
+            let service = try KernelService(
+                log: Logger(label: "com.apple.container.test.kernel-service"),
+                appRoot: tempDir.appendingPathComponent("app"))
+            let source = tempDir.appendingPathComponent("vmlinux")
+            try Data("first".utf8).write(to: source)
+            try await service.installKernel(kernelFile: source, platform: .linuxArm, force: false)
+            try Data("second".utf8).write(to: source)
+            await #expect(throws: ContainerizationError.self) {
+                try await service.installKernel(kernelFile: source, platform: .linuxArm, force: false)
+            }
+            let kernel = try await service.getDefaultKernel(platform: .linuxArm)
+            #expect(try Data(contentsOf: kernel.path) == Data("first".utf8))
+        }
+    }
+
     private static func writeTar(at tarFile: URL, path: String, data: Data) throws -> URL {
         let archiver = try ArchiveWriter(format: .paxRestricted, filter: .none, file: tarFile)
         let entry = WriteEntry()
