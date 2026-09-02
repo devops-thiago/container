@@ -59,7 +59,7 @@ public struct InstanceAttachHarness: Sendable {
             throw ContainerizationError(.invalidArgument, message: "instance attach: missing owner token")
         }
         do {
-            try InstanceEndpoints.attach(label: label, endpoint: endpoint, owner: token)
+            try InstanceEndpoints.attach(label: label, endpoint: endpoint, owner: token, pid: pid)
         } catch is InstanceEndpoints.OwnedByAnother {
             log.error("instance attach refused: label owned by another publisher", metadata: ["id": "\(label)", "pid": "\(pid)"])
             throw ContainerizationError(.invalidState, message: "instance attach: \(label) is published by another process")
