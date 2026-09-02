@@ -167,6 +167,13 @@ public actor HostDirectoryGrants {
         let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
         message.set(key: XPCKeys.hostDirectoryPath.rawValue, value: path)
+        // The panel outlives nobody: the embedder is told how long this side waits, so the
+        // panel comes down when the command that asked has already given up, and an approval
+        // after that is not kept for a request that no longer exists.
+        message.set(
+            key: XPCKeys.hostDirectoryDeadlineSeconds.rawValue,
+            value: Int64(XPCClient.hostDirectoryPanelPatience.components.seconds))
+        message.set(key: XPCKeys.hostDirectoryRequestID.rawValue, value: UUID().uuidString)
         // The trust decision on the embedder's side of this call: its listener answers only
         // a caller that presents the token it published its endpoint with. We hold that token
         // because we are the broker it was published to; nobody else was given the endpoint
