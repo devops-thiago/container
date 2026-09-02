@@ -52,4 +52,23 @@ extension ContainerListFilters {
         let labels = self.labels.merging([ResourceLabelKeys.plugin: Self.exclude("machine")]) { _, new in new }
         return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
     }
+
+    /// The plugins whose containers are infrastructure the engine manages for the user —
+    /// a machine's VM, a Kubernetes node — and which generic container operations must
+    /// neither list nor touch. One list, so every screen and every prune excludes the same
+    /// things; the plugin's own screen manages them through its own path.
+    public static let infrastructurePlugins: [String] = ["machine", "k8s"]
+
+    /// Whether a container carrying `labels` is engine-managed infrastructure.
+    public static func isInfrastructure(labels: [String: String]) -> Bool {
+        guard let plugin = labels[ResourceLabelKeys.plugin] else { return false }
+        return infrastructurePlugins.contains(plugin)
+    }
+
+    /// Exclude every infrastructure plugin's containers, not only machines.
+    public func withoutInfrastructure() -> ContainerListFilters {
+        let pattern = "^(?!(" + Self.infrastructurePlugins.joined(separator: "|") + ")$)"
+        let labels = self.labels.merging([ResourceLabelKeys.plugin: pattern]) { _, new in new }
+        return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
+    }
 }
