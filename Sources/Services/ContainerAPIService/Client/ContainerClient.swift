@@ -217,12 +217,23 @@ public struct ContainerClient: Sendable {
     }
 
     /// Stop the container and all processes currently executing inside.
-    public func stop(id: String, opts: ContainerStopOptions = ContainerStopOptions.default) async throws {
+    /// - Parameter requiredLabels: labels the container must carry, checked by the service
+    ///   against the object it is about to act on. A caller that validated a container by
+    ///   ID and then stops it by ID has otherwise no proof the ID still names the same
+    ///   thing; with this, an ordinary container that took the ID in between is refused.
+    public func stop(
+        id: String,
+        opts: ContainerStopOptions = ContainerStopOptions.default,
+        requiredLabels: [String: String]? = nil
+    ) async throws {
         do {
             let request = XPCMessage(route: .containerStop)
             let data = try JSONEncoder().encode(opts)
             request.set(key: .id, value: id)
             request.set(key: .stopOptions, value: data)
+            if let requiredLabels {
+                request.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
+            }
 
             try await xpcClient.send(request)
         } catch {
@@ -235,11 +246,17 @@ public struct ContainerClient: Sendable {
     }
 
     /// Delete the container along with any resources.
-    public func delete(id: String, force: Bool = false) async throws {
+    /// - Parameter requiredLabels: see `stop(id:opts:requiredLabels:)`. The service checks
+    ///   them again under its lock right before removal, so a same-ID replacement that lost
+    ///   the labels survives.
+    public func delete(id: String, force: Bool = false, requiredLabels: [String: String]? = nil) async throws {
         do {
             let request = XPCMessage(route: .containerDelete)
             request.set(key: .id, value: id)
             request.set(key: .forceDelete, value: force)
+            if let requiredLabels {
+                request.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
+            }
             try await xpcClient.send(request)
         } catch {
             throw ContainerizationError(

@@ -270,21 +270,64 @@ public enum K8sClusters {
 
     /// Stop and remove a cluster, and drop its context from the default kubeconfig.
     public static func delete(name: String = K8sClusters.defaultName, log: Logger) async throws {
-        let client = ContainerClient()
+        try await delete(name: name, containers: ContainerClient(), log: log)
+    }
 
-        if let container = try? await client.get(id: name) {
-            guard container.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-                throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
-            }
+    /// The labels a container must carry to be treated as a cluster node here.
+    static var nodeLabels: [String: String] { [ResourceLabelKeys.plugin: K8sHelper.pluginName] }
+
+    /// The delete, with its container access injectable.
+    ///
+    /// Fails closed: a lookup that errors performs no stop and no delete, because "could not
+    /// read it" is not "it is a cluster node". Only a definite not-found skips to the
+    /// kubeconfig cleanup. The stop and delete then carry the node labels as a requirement
+    /// the service re-checks against whatever the ID names when it acts, so an ordinary
+    /// container that took the name in between is refused rather than destroyed.
+    static func delete(name: String, containers: any K8sClusterContainers, log: Logger) async throws {
+        let container: ContainerSnapshot
+        do {
+            container = try await containers.get(id: name)
+        } catch let error as ContainerizationError where error.code == .notFound {
+            log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
+            try K8sHelper.removeConfig(containerId: name, log: log)
+            return
+        }
+        guard container.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
+            throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
         }
 
         do {
-            try? await client.stop(id: name)
-            try await client.delete(id: name)
+            do {
+                try await containers.stop(id: name, requiredLabels: nodeLabels)
+            } catch let error as ContainerizationError where error.code == .invalidArgument {
+                // The refusal that says the ID no longer names our node. Not the idempotent
+                // "already stopped" the stop otherwise tolerates.
+                throw error
+            } catch {
+                log.debug("cluster stop before delete failed; deleting anyway", metadata: ["name": "\(name)", "error": "\(error)"])
+            }
+            try await containers.delete(id: name, requiredLabels: nodeLabels)
         } catch let error as ContainerizationError where error.code == .notFound {
             log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
         }
 
         try K8sHelper.removeConfig(containerId: name, log: log)
+    }
+}
+
+/// What `K8sClusters.delete` needs from the engine, so a test can stand in for it.
+protocol K8sClusterContainers: Sendable {
+    func get(id: String) async throws -> ContainerSnapshot
+    func stop(id: String, requiredLabels: [String: String]) async throws
+    func delete(id: String, requiredLabels: [String: String]) async throws
+}
+
+extension ContainerClient: K8sClusterContainers {
+    func stop(id: String, requiredLabels: [String: String]) async throws {
+        try await stop(id: id, opts: .default, requiredLabels: requiredLabels)
+    }
+
+    func delete(id: String, requiredLabels: [String: String]) async throws {
+        try await delete(id: id, force: false, requiredLabels: requiredLabels)
     }
 }

@@ -65,6 +65,8 @@ public enum XPCKeys: String {
     case stopOptions
     /// Whether to force stop a container when deleting.
     case forceDelete
+    /// JSON `[String: String]`: labels the target must carry for a stop or delete to proceed.
+    case requiredLabels
     /// Plugins
     case pluginName
     case plugins
