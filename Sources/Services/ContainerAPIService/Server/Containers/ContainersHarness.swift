@@ -82,7 +82,7 @@ public struct ContainersHarness: Sendable {
                 message: "id cannot be empty"
             )
         }
-        try await service.stop(id: id, options: stopOptions)
+        try await service.stop(id: id, options: stopOptions, requiredLabels: try message.requiredLabels())
         return message.reply()
     }
 
@@ -286,7 +286,7 @@ public struct ContainersHarness: Sendable {
             throw ContainerizationError(.invalidArgument, message: "container ID \(id) is not a valid container ID")
         }
         let forceDelete = message.bool(key: .forceDelete)
-        try await service.delete(id: id, force: forceDelete)
+        try await service.delete(id: id, force: forceDelete, requiredLabels: try message.requiredLabels())
         return message.reply()
     }
 
@@ -417,5 +417,17 @@ public struct ContainersHarness: Sendable {
 
         try await service.exportRootfs(id: id, archive: archiveUrl)
         return message.reply()
+    }
+}
+
+extension XPCMessage {
+    /// The labels a stop or delete insists on, or nil when the caller made no demand.
+    fileprivate func requiredLabels() throws -> [String: String]? {
+        guard let data = data(key: .requiredLabels) else { return nil }
+        do {
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            throw ContainerizationError(.invalidArgument, message: "required labels are not a string map", cause: error)
+        }
     }
 }
