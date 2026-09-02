@@ -40,6 +40,9 @@ extension Application {
             })
         var output: String?
 
+        @Flag(name: .shortAndLong, help: "Replace an existing output file")
+        var force: Bool = false
+
         @Argument(help: "container ID")
         var id: String
 
@@ -68,11 +71,59 @@ extension Application {
                 try fileHandle.close()
             } else {
                 let outputURL = URL(fileURLWithPath: output!)
-                if FileManager.default.fileExists(atPath: outputURL.path(percentEncoded: false)) {
-                    try FileManager.default.removeItem(at: outputURL)
-                }
-                try FileManager.default.moveItem(at: archive, to: outputURL)
+                try ExportDestination.commit(archive: archive, to: outputURL, force: force)
             }
+        }
+    }
+}
+
+/// Where an exported archive ends up, and how it gets there without taking anything with it.
+///
+/// The output path used to be removed — recursively, whatever it was — before the archive was
+/// moved in, so a directory named by mistake was gone, and a move that then failed left neither
+/// the original nor the export. An existing destination is now refused unless `--force` says
+/// otherwise; a forced replacement stages the archive beside the destination and renames it
+/// over in one step, so the previous file survives every failure before that step; and a
+/// directory or a symlink is never replaced at all, forced or not.
+public enum ExportDestination {
+    public static func commit(
+        archive: URL,
+        to output: URL,
+        force: Bool,
+        rename: (String, String) -> Int32 = { Darwin.rename($0, $1) }
+    ) throws {
+        let path = output.path(percentEncoded: false)
+        var existing = stat()
+        let exists = lstat(path, &existing) == 0
+        if exists {
+            let kind = existing.st_mode & S_IFMT
+            guard kind == S_IFREG else {
+                let what = kind == S_IFDIR ? "a directory" : kind == S_IFLNK ? "a symbolic link" : "not a regular file"
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "refusing to replace \(path): it is \(what); export to a file path instead")
+            }
+            guard force else {
+                throw ContainerizationError(.exists, message: "\(path) exists; pass --force to replace it")
+            }
+        }
+
+        // Staged beside the destination so the final step is a rename on the same volume.
+        let staged = output.deletingLastPathComponent()
+            .appendingPathComponent(".\(output.lastPathComponent).\(UUID().uuidString).tmp")
+        do {
+            try FileManager.default.moveItem(at: archive, to: staged)
+        } catch {
+            throw ContainerizationError(.internalError, message: "export failed: could not stage the archive next to \(path)", cause: error)
+        }
+        guard rename(staged.path(percentEncoded: false), path) == 0 else {
+            let reason = String(cString: strerror(errno))
+            try? FileManager.default.removeItem(at: staged)
+            throw ContainerizationError(
+                .internalError,
+                message: exists
+                    ? "could not replace \(path): \(reason); the previous file was kept"
+                    : "could not put the export at \(path): \(reason)")
         }
     }
 }
