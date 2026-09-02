@@ -453,7 +453,13 @@ extension ImagesService {
             guard authentication != nil else {
                 throw ContainerizationError(.internalError, message: "\(String(describing: err)), no credentials found for host \(host)")
             }
-            throw err
+            // A registry that answers the saved login with 401 or 403 outright — basic auth,
+            // no token server — has rejected it just as surely as one whose token server
+            // did. Same message, so the embedder's sign-in offer covers both.
+            throw ContainerizationError(
+                .invalidState,
+                message: "registry \(host) rejected the saved login",
+                cause: err)
         }
     }
 
