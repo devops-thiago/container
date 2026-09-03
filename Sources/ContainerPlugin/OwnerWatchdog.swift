@@ -5,7 +5,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//   https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -100,7 +100,15 @@ public actor OwnerWatchdog {
     /// after a force quit precisely so the relaunched app can adopt it with its workloads
     /// intact, and one that refused every request in that window would be up in name only.
     /// What it does not survive is the deadline, or never having seen an app at all.
-    public func isOwned() -> Bool { everSeen && !expired }
+    /// Admission performs the first ownership observation atomically. The listener and poll
+    /// loop start concurrently, so a running app's first request must not lose merely because
+    /// the watchdog task has not received its first time slice yet.
+    public func isOwned() -> Bool {
+        if !everSeen, !expired {
+            _ = tick()
+        }
+        return everSeen && !expired
+    }
 
     /// Refuse a route while no app owns this service.
     ///

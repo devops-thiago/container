@@ -51,6 +51,9 @@ public struct K8sCreate: AsyncParsableCommand {
     @Option(help: "Node image reference (default: \(K8sHelper.nodeImage))")
     var nodeImage: String = K8sHelper.nodeImage
 
+    @Option(name: .long, help: "Number of worker nodes, 0...\(K8sClusters.maximumWorkers) (default: 0)")
+    var workers: Int = 0
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: K8sHelper.pluginName)
@@ -75,6 +78,7 @@ public struct K8sCreate: AsyncParsableCommand {
             nodeImage: nodeImage,
             cpus: resourceFlags.cpus,
             memory: resourceFlags.memory,
+            workers: workers,
             autoRemove: remove,
             registry: registryFlags,
             imageFetch: imageFetchFlags,

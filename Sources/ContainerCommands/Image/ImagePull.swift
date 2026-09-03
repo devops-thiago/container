@@ -61,7 +61,7 @@ extension Application {
 
         public init() {}
 
-        public init(platform: String? = nil, scheme: String = "auto", reference: String) {
+        public init(platform: String? = nil, scheme: String = "https", reference: String) {
             self.logOptions = Flags.Logging()
             self.registry = Flags.Registry(scheme: scheme)
             self.platform = platform

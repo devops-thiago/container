@@ -103,6 +103,9 @@ public struct ResourceLabelKeys {
     /// Indicates a owner of a resource managed by a plugin.
     public static let plugin = "com.apple.container.plugin"
 
+    /// Identifies the exact group of resources owned by a plugin.
+    public static let cluster = "com.apple.container.resource.cluster"
+
     /// Indicates a resource with a reserved or dedicated purpose.
     public static let role = "com.apple.container.resource.role"
 }

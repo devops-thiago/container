@@ -63,7 +63,14 @@ struct TestCLIExportCommand {
 
                 let exportPath = f.testDir.appending("export-live.tar")
                 try f.run(["export", name, "-o", exportPath.string]).check()
-                try f.run(["export", name, "-o", exportPath.string]).check()
+                let original = try Data(contentsOf: URL(filePath: exportPath.string))
+
+                let refused = try f.run(["export", name, "-o", exportPath.string])
+                #expect(refused.status != 0)
+                #expect(refused.error.contains("--force") || refused.error.contains("exists"))
+                #expect(try Data(contentsOf: URL(filePath: exportPath.string)) == original)
+
+                try f.run(["export", "--force", name, "-o", exportPath.string]).check()
 
                 let exportURL = URL(filePath: exportPath.string)
                 let attrs = try FileManager.default.attributesOfItem(atPath: exportPath.string)

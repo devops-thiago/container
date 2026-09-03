@@ -42,8 +42,8 @@ public enum InstanceAttach {
     /// of the user has it, so a label held by EUID alone could be replaced or resolved by any
     /// of them. A random 256-bit token the publisher alone knows cannot. Helpers the apiserver
     /// spawns inherit the apiserver's token through the environment, so they resolve each
-    /// other; an embedder mints its own and shares it with nobody, so its endpoint can be
-    /// dialed only by the broker that recorded it.
+    /// other. A host embedder must use its own non-inherited capability and authenticate its
+    /// fixed label separately; `GrantVendor` does both before this broker can dial it.
     public static let ownerToken: String = {
         if let inherited = ProcessInfo.processInfo.environment[tokenEnvironmentName], !inherited.isEmpty {
             return inherited

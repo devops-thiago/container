@@ -23,6 +23,13 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// The configuration of the container.
     public var configuration: ContainerConfiguration
 
+    /// An opaque identity for this exact creation of `id`.
+    ///
+    /// The API server generates and persists this value outside the user-supplied
+    /// configuration. Clients can carry it back as a mutation precondition, while labels
+    /// remain descriptive metadata and cannot impersonate a previous incarnation.
+    public let incarnation: String
+
     /// Identifier of the container.
     public var id: String {
         configuration.id
@@ -51,6 +58,7 @@ public struct ContainerSnapshot: Codable, Sendable {
 
     public init(
         configuration: ContainerConfiguration,
+        incarnation: String = "",
         status: RuntimeStatus,
         networks: [Attachment],
         startedDate: Date? = nil,
@@ -58,10 +66,34 @@ public struct ContainerSnapshot: Codable, Sendable {
         exitedAt: Date? = nil
     ) {
         self.configuration = configuration
+        self.incarnation = incarnation
         self.status = status
         self.networks = networks
         self.startedDate = startedDate
         self.exitCode = exitCode
         self.exitedAt = exitedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case configuration
+        case incarnation
+        case status
+        case networks
+        case startedDate
+        case exitCode
+        case exitedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        configuration = try container.decode(ContainerConfiguration.self, forKey: .configuration)
+        // Runtime helpers and older API servers did not emit an incarnation. Only the API
+        // server's persisted snapshots are mutation targets, and it always fills this field.
+        incarnation = try container.decodeIfPresent(String.self, forKey: .incarnation) ?? ""
+        status = try container.decode(RuntimeStatus.self, forKey: .status)
+        networks = try container.decode([Attachment].self, forKey: .networks)
+        startedDate = try container.decodeIfPresent(Date.self, forKey: .startedDate)
+        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
+        exitedAt = try container.decodeIfPresent(Date.self, forKey: .exitedAt)
     }
 }

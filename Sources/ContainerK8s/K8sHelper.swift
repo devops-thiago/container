@@ -92,33 +92,69 @@ public struct K8sHelper {
             }
         }
 
+        let clusterNames = controlPlanes.map { controlPlane in
+            explicitClusterName(for: controlPlane) ?? controlPlane.configuration.id
+        }
         var rows: [K8sNodeResource] = []
         var assignedWorkerIDs = Set<String>()
 
         for cp in controlPlanes.sorted(by: { $0.configuration.id < $1.configuration.id }) {
-            let clusterName = cp.configuration.id
+            let clusterName = explicitClusterName(for: cp) ?? cp.configuration.id
             rows.append(K8sNodeResource(clusterName: clusterName, snapshot: cp))
             let cpWorkers =
                 workers
-                .filter { $0.configuration.id.hasPrefix("\(clusterName)-worker-") }
+                .filter { worker in
+                    guard !assignedWorkerIDs.contains(worker.configuration.id) else { return false }
+                    if let explicit = explicitClusterName(for: worker) {
+                        return explicit == clusterName
+                    }
+                    // Compatibility for clusters created before the cluster label existed.
+                    // Longest-prefix ownership prevents `foo` from also claiming a worker
+                    // belonging to a nested cluster named `foo-worker-1`.
+                    return legacyClusterName(for: worker, candidates: clusterNames) == clusterName
+                }
                 .sorted { $0.configuration.id < $1.configuration.id }
-            for w in cpWorkers {
-                rows.append(K8sNodeResource(clusterName: clusterName, snapshot: w))
-                assignedWorkerIDs.insert(w.configuration.id)
+            for worker in cpWorkers {
+                rows.append(K8sNodeResource(clusterName: clusterName, snapshot: worker))
+                assignedWorkerIDs.insert(worker.configuration.id)
             }
         }
 
-        for w
+        for worker
             in workers
             .filter({ !assignedWorkerIDs.contains($0.configuration.id) })
             .sorted(by: { $0.configuration.id < $1.configuration.id })
         {
-            let clusterName = w.configuration.id
-                .components(separatedBy: "-worker-").dropLast().joined(separator: "-worker-")
-            rows.append(K8sNodeResource(clusterName: clusterName, snapshot: w))
+            let clusterName =
+                explicitClusterName(for: worker)
+                ?? legacyClusterName(for: worker, candidates: clusterNames)
+                ?? clusterNameDerivedFromWorkerID(worker.configuration.id)
+            rows.append(K8sNodeResource(clusterName: clusterName, snapshot: worker))
         }
 
         return rows
+    }
+
+    private static func explicitClusterName(for snapshot: ContainerSnapshot) -> String? {
+        guard let value = snapshot.configuration.labels[ResourceLabelKeys.cluster], !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func legacyClusterName(
+        for worker: ContainerSnapshot,
+        candidates: [String]
+    ) -> String? {
+        candidates
+            .filter { worker.configuration.id.hasPrefix("\($0)-worker-") }
+            .max { lhs, rhs in
+                lhs.count == rhs.count ? lhs > rhs : lhs.count < rhs.count
+            }
+    }
+
+    private static func clusterNameDerivedFromWorkerID(_ id: String) -> String {
+        id.components(separatedBy: "-worker-").dropLast().joined(separator: "-worker-")
     }
 
     static func renderTable<T: ListDisplayable>(_ items: [T]) -> String {
