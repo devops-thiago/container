@@ -73,6 +73,10 @@ public enum XPCKeys: String {
     case forceDelete
     /// JSON `[String: String]`: labels the target must carry for a stop or delete to proceed.
     case requiredLabels
+    /// Opaque identity of the exact object to mutate, or the caller-generated
+    /// identity requested for a create so rollback remains possible if reply delivery
+    /// is cancelled after the server commits.
+    case expectedIncarnation
     /// Plugins
     case pluginName
     case plugins
@@ -139,6 +143,7 @@ public enum XPCKeys: String {
 
     /// Kernel
     case kernel
+    case kernelInstallation
     case kernelTarURL
     case kernelFilePath
     case systemPlatform

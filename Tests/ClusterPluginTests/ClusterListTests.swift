@@ -33,12 +33,18 @@ private let fixtureDefaultMemoryMiB: UInt64 = {
 private func makeSnapshot(
     id: String,
     role: String,
+    clusterName: String? = nil,
     status: RuntimeStatus = .running,
     cpus: Int = 2,
     memoryMiB: UInt64 = 2048,
     addr: String = ""
 ) throws -> ContainerSnapshot {
-    let labelsJSON = #"{"com.apple.container.plugin":"cluster","com.apple.container.resource.role":"\#(role)"}"#
+    var labels = [
+        ResourceLabelKeys.plugin: ClusterHelper.pluginName,
+        ResourceLabelKeys.role: role,
+    ]
+    if let clusterName { labels[ResourceLabelKeys.cluster] = clusterName }
+    let labelsJSON = try String(decoding: JSONEncoder().encode(labels), as: UTF8.self)
     let networksJSON: String
     if addr.isEmpty {
         networksJSON = "[]"
@@ -65,12 +71,34 @@ private func makeSnapshot(
     return try JSONDecoder().decode(ContainerSnapshot.self, from: Data(json.utf8))
 }
 
-private func makeControlPlane(_ name: String, cpus: Int = fixtureDefaultCPUs, memoryMiB: UInt64 = fixtureDefaultMemoryMiB, addr: String = "") throws -> ContainerSnapshot {
-    try makeSnapshot(id: name, role: ClusterHelper.controlPlaneRoleName, cpus: cpus, memoryMiB: memoryMiB, addr: addr)
+private func makeControlPlane(
+    _ name: String,
+    clusterName: String? = nil,
+    cpus: Int = fixtureDefaultCPUs,
+    memoryMiB: UInt64 = fixtureDefaultMemoryMiB,
+    addr: String = ""
+) throws -> ContainerSnapshot {
+    try makeSnapshot(
+        id: name,
+        role: ClusterHelper.controlPlaneRoleName,
+        clusterName: clusterName,
+        cpus: cpus,
+        memoryMiB: memoryMiB,
+        addr: addr)
 }
 
-private func makeWorker(_ id: String, cpus: Int = max(fixtureDefaultCPUs / 2, 1), memoryMiB: UInt64 = max(fixtureDefaultMemoryMiB / 2, 512)) throws -> ContainerSnapshot {
-    try makeSnapshot(id: id, role: "worker", cpus: cpus, memoryMiB: memoryMiB)
+private func makeWorker(
+    _ id: String,
+    clusterName: String? = nil,
+    cpus: Int = max(fixtureDefaultCPUs / 2, 1),
+    memoryMiB: UInt64 = max(fixtureDefaultMemoryMiB / 2, 512)
+) throws -> ContainerSnapshot {
+    try makeSnapshot(
+        id: id,
+        role: ClusterHelper.workerRoleName,
+        clusterName: clusterName,
+        cpus: cpus,
+        memoryMiB: memoryMiB)
 }
 
 // MARK: - Cluster list state derivation and renderers
@@ -199,6 +227,134 @@ struct WorkerContainerNamesTests {
         let other = try makeWorker("dev2-worker-1")
         let names = ClusterHelper.workerContainerNames(from: [w1, other], clusterName: "dev")
         #expect(names == ["dev-worker-1"])
+    }
+}
+
+// MARK: - buildClusterRows ordering and grouping
+
+@Suite("ClusterHelper.buildClusterRows")
+struct BuildClusterRowsTests {
+    @Test func emptyInputProducesNoRows() {
+        #expect(ClusterHelper.buildClusterRows(from: []).isEmpty)
+    }
+
+    @Test func singleControlPlaneAlone() throws {
+        let cp = try makeControlPlane("dev")
+        let rows = ClusterHelper.buildClusterRows(from: [cp])
+        #expect(rows.count == 1)
+        #expect(rows[0].snapshot.configuration.id == "dev")
+    }
+
+    @Test func controlPlaneFollowedByItsWorkers() throws {
+        let cp = try makeControlPlane("dev")
+        let w1 = try makeWorker("dev-worker-1")
+        let w2 = try makeWorker("dev-worker-2")
+        let rows = ClusterHelper.buildClusterRows(from: [w2, w1, cp])
+        #expect(rows.count == 3)
+        #expect(rows[0].snapshot.id == "dev")
+        #expect(rows[1].snapshot.id == "dev-worker-1")
+        #expect(rows[2].snapshot.id == "dev-worker-2")
+    }
+
+    @Test func mixedControlPlaneRoleIsGroupedAsControlPlane() throws {
+        let cp = try makeSnapshot(
+            id: "cluster-dev",
+            role: "\(ClusterHelper.controlPlaneRoleName),worker")
+        let worker = try makeWorker("cluster-dev-worker-1")
+
+        let rows = ClusterHelper.buildClusterRows(from: [worker, cp])
+
+        #expect(rows.count == 2)
+        #expect(rows[0].snapshot.id == "cluster-dev")
+        #expect(rows[0].clusterName == "cluster-dev")
+        #expect(rows[1].snapshot.id == "cluster-dev-worker-1")
+        #expect(rows[1].clusterName == "cluster-dev")
+    }
+
+    @Test func workersGroupedUnderCorrectControlPlane() throws {
+        let cp1 = try makeControlPlane("alpha")
+        let cp2 = try makeControlPlane("beta")
+        let w1 = try makeWorker("alpha-worker-1")
+        let w2 = try makeWorker("beta-worker-1")
+        let rows = ClusterHelper.buildClusterRows(from: [w2, cp2, w1, cp1])
+        #expect(rows[0].snapshot.id == "alpha")
+        #expect(rows[1].snapshot.id == "alpha-worker-1")
+        #expect(rows[1].clusterName == "alpha")
+        #expect(rows[2].snapshot.id == "beta")
+        #expect(rows[3].snapshot.id == "beta-worker-1")
+        #expect(rows[3].clusterName == "beta")
+    }
+
+    @Test func multipleClustersAreSortedByName() throws {
+        let cpZ = try makeControlPlane("zebra")
+        let cpA = try makeControlPlane("apple")
+        let rows = ClusterHelper.buildClusterRows(from: [cpZ, cpA])
+        #expect(rows[0].snapshot.id == "apple")
+        #expect(rows[1].snapshot.id == "zebra")
+    }
+
+    @Test func orphanedWorkerAppearsAtEnd() throws {
+        let cp = try makeControlPlane("dev")
+        let orphan = try makeWorker("old-worker-1")
+        let rows = ClusterHelper.buildClusterRows(from: [orphan, cp])
+        #expect(rows.count == 2)
+        #expect(rows[0].snapshot.id == "dev")
+        #expect(rows[1].snapshot.id == "old-worker-1")
+        #expect(rows[1].clusterName == "old")
+    }
+
+    @Test func orphanedWorkerClusterNameDerivedFromID() throws {
+        let orphan = try makeWorker("mycluster-worker-3")
+        let rows = ClusterHelper.buildClusterRows(from: [orphan])
+        #expect(rows.count == 1)
+        #expect(rows[0].clusterName == "mycluster")
+    }
+
+    @Test func clusterNameWithWorkerInItIsHandledCorrectly() throws {
+        let cp = try makeControlPlane("foo-worker")
+        let w = try makeWorker("foo-worker-worker-1")
+        let rows = ClusterHelper.buildClusterRows(from: [w, cp])
+        #expect(rows.count == 2)
+        #expect(rows[0].snapshot.id == "foo-worker")
+        #expect(rows[1].snapshot.id == "foo-worker-worker-1")
+        #expect(rows[1].clusterName == "foo-worker")
+    }
+
+    @Test func workerNotAssignedToWrongCluster() throws {
+        let cp = try makeControlPlane("dev")
+        let w = try makeWorker("dev2-worker-1")
+        let rows = ClusterHelper.buildClusterRows(from: [w, cp])
+        #expect(rows[0].snapshot.id == "dev")
+        #expect(rows[1].snapshot.id == "dev2-worker-1")
+        #expect(rows[1].clusterName == "dev2")
+    }
+
+    @Test func explicitClusterLabelPreventsOverlappingNameMisattribution() throws {
+        let parent = try makeControlPlane("foo", clusterName: "foo")
+        let nested = try makeControlPlane(
+            "foo-worker-1", clusterName: "foo-worker-1")
+        let nestedWorker = try makeWorker(
+            "foo-worker-1-worker-1", clusterName: "foo-worker-1")
+
+        let rows = ClusterHelper.buildK8sRows(from: [nestedWorker, parent, nested])
+
+        #expect(rows.filter { $0.snapshot.id == nestedWorker.id }.count == 1)
+        #expect(
+            rows.first { $0.snapshot.id == nestedWorker.id }?.clusterName
+                == "foo-worker-1")
+    }
+
+    @Test func legacyWorkerUsesTheLongestMatchingControlPlanePrefix() throws {
+        let parent = try makeControlPlane("foo")
+        let nested = try makeControlPlane("foo-worker-1")
+        let nestedWorker = try makeWorker("foo-worker-1-worker-1")
+
+        let rows = ClusterHelper.buildK8sRows(from: [nestedWorker, parent, nested])
+
+        #expect(rows.filter { $0.snapshot.id == nestedWorker.id }.count == 1)
+        #expect(
+            rows.first { $0.snapshot.id == nestedWorker.id }?.clusterName
+                == "foo-worker-1")
     }
 }
 

@@ -22,6 +22,15 @@ import ContainerizationError
 import Darwin
 import Foundation
 import Logging
+import TerminalProgress
+
+private actor NodeIncarnations {
+    private var values: [String: String] = [:]
+
+    func record(_ incarnation: String, for name: String) { values[name] = incarnation }
+    func incarnation(for name: String) -> String? { values[name] }
+    func remove(_ name: String) { values.removeValue(forKey: name) }
+}
 
 /// A `NodeProvisioner` that runs a cluster node as a Linux container on the same host.
 public struct LinuxNodeProvisioner: NodeProvisioner {
@@ -38,6 +47,8 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
     private let containerSystemConfig: ContainerSystemConfig
     private let fqdn: String?
     private let sharedImageStore: Bool
+    private let progressUpdate: ProgressUpdateHandler
+    private let incarnations: NodeIncarnations
 
     /// - Parameters:
     ///   - name: Name of this node. The control plane is named after the cluster;
@@ -55,7 +66,8 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         remove: Bool = false,
         containerSystemConfig: ContainerSystemConfig,
         fqdn: String? = nil,
-        sharedImageStore: Bool = false
+        sharedImageStore: Bool = false,
+        progressUpdate: @escaping ProgressUpdateHandler = { _ in }
     ) throws {
         guard !roles.isEmpty else {
             throw ContainerizationError(.invalidArgument, message: "LinuxNode roles must not be empty")
@@ -79,6 +91,8 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         self.containerSystemConfig = containerSystemConfig
         self.fqdn = fqdn
         self.sharedImageStore = sharedImageStore
+        self.progressUpdate = progressUpdate
+        self.incarnations = NodeIncarnations()
     }
 
     public func provision(log: Logger) async throws {
@@ -117,6 +131,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             kernelArgs: [],
             labels: [
                 "\(ResourceLabelKeys.plugin)=\(ClusterHelper.pluginName)",
+                "\(ResourceLabelKeys.cluster)=\(clusterName)",
                 "\(ResourceLabelKeys.role)=\(roles.joined(separator: ","))",
             ],
             maskedPaths: [],
@@ -163,20 +178,31 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             registry: Flags.Registry(scheme: registryScheme),
             imageFetch: Flags.ImageFetch(maxConcurrentDownloads: maxConcurrentDownloads),
             containerSystemConfig: containerSystemConfig,
-            progressUpdate: { _ in },
+            progressUpdate: progressUpdate,
             log: log
         )
         config.maskedPaths = []
         config.readonlyPaths = []
 
         let client = ContainerClient()
-        try await client.create(
+        // Choose and retain the destructive identity before the request. If cancellation or
+        // disconnect happens after the server commits but before its reply arrives, cluster
+        // rollback can still target exactly the container this attempt asked it to create.
+        let requestedIncarnation = UUID().uuidString.lowercased()
+        await incarnations.record(requestedIncarnation, for: name)
+        let incarnation = try await client.create(
             configuration: config,
             options: ContainerCreateOptions(autoRemove: remove),
             kernel: kernel,
-            initImage: initfs
+            initImage: initfs,
+            incarnation: requestedIncarnation
         )
         flock(portLock, LOCK_UN)
+        guard incarnation == requestedIncarnation else {
+            throw ContainerizationError(
+                .internalError,
+                message: "container \(name) did not keep its requested incarnation")
+        }
 
         // The container exists from here on, so remove it if a later step fails; the caller
         // only tears down nodes whose `provision` succeeded.
@@ -297,9 +323,23 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             return
         }
         do {
-            try? await client.stop(id: name)
-            try await client.delete(id: name)
+            guard let incarnation = await incarnations.incarnation(for: name) else {
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "no observed incarnation exists for node \(name)")
+            }
+            let required = [ResourceLabelKeys.plugin: ClusterHelper.pluginName]
+            try? await client.stop(
+                id: name,
+                requiredLabels: required,
+                expectedIncarnation: incarnation)
+            try await client.delete(
+                id: name,
+                requiredLabels: required,
+                expectedIncarnation: incarnation)
+            await incarnations.remove(name)
         } catch let error as ContainerizationError where error.code == .notFound {
+            await incarnations.remove(name)
             log.debug("node container not found, skipping delete", metadata: ["name": "\(name)"])
         }
     }

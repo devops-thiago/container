@@ -82,7 +82,11 @@ public struct ContainersHarness: Sendable {
                 message: "id cannot be empty"
             )
         }
-        try await service.stop(id: id, options: stopOptions, requiredLabels: try message.requiredLabels())
+        try await service.stop(
+            id: id,
+            options: stopOptions,
+            requiredLabels: try message.requiredLabels(),
+            expectedIncarnation: message.string(key: .expectedIncarnation))
         return message.reply()
     }
 
@@ -216,10 +220,19 @@ public struct ContainersHarness: Sendable {
             bookmarks = try JSONDecoder().decode([Data].self, from: bdata)
         }
 
-        try await service.create(
+        let requestedIncarnation = message.string(key: .expectedIncarnation)
+        if let requestedIncarnation, UUID(uuidString: requestedIncarnation) == nil {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "container incarnation must be a UUID")
+        }
+        let incarnation = try await service.create(
             configuration: config, kernel: kernel, options: options, initImage: initImage,
-            runtimeData: runtimeData, hostDirectoryBookmarks: bookmarks)
-        return message.reply()
+            runtimeData: runtimeData, hostDirectoryBookmarks: bookmarks,
+            incarnation: requestedIncarnation)
+        let reply = message.reply()
+        reply.set(key: .expectedIncarnation, value: incarnation)
+        return reply
     }
 
     @Sendable
@@ -286,7 +299,11 @@ public struct ContainersHarness: Sendable {
             throw ContainerizationError(.invalidArgument, message: "container ID \(id) is not a valid container ID")
         }
         let forceDelete = message.bool(key: .forceDelete)
-        try await service.delete(id: id, force: forceDelete, requiredLabels: try message.requiredLabels())
+        try await service.delete(
+            id: id,
+            force: forceDelete,
+            requiredLabels: try message.requiredLabels(),
+            expectedIncarnation: message.string(key: .expectedIncarnation))
         return message.reply()
     }
 

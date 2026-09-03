@@ -36,13 +36,47 @@ public enum InstanceEndpoints {
         /// Who published it, as the token they presented; nil for an entry this process
         /// seeded for itself (a resolved endpoint cached locally).
         let owner: String?
-        /// The publisher's process, by its own account, so a label whose publisher has
-        /// exited can be published again by a successor with a new token.
+        /// The publisher process reported by libXPC for its accepted connection, so a label
+        /// whose publisher exited can be published again by a successor with a new token.
         let pid: pid_t?
     }
 
-    private static let storage = Mutex<[String: Box]>([:])
-    private static let waiters = Mutex<[String: [CheckedContinuation<Void, Never>]]>([:])
+    private final class WaitRegistration: @unchecked Sendable {
+        private struct State {
+            var continuation: CheckedContinuation<Void, Never>?
+            var resolved = false
+        }
+
+        private let state = Mutex(State())
+
+        /// Install the continuation unless cancellation, timeout, or attach already won.
+        func install(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+            state.withLock { state in
+                guard !state.resolved else { return false }
+                state.continuation = continuation
+                return true
+            }
+        }
+
+        func resolve() {
+            let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+                guard !state.resolved else { return nil }
+                state.resolved = true
+                defer { state.continuation = nil }
+                return state.continuation
+            }
+            continuation?.resume()
+        }
+    }
+
+    private struct EndpointState {
+        var endpoints: [String: Box] = [:]
+        var waiters: [String: [UUID: WaitRegistration]] = [:]
+    }
+
+    /// Endpoint publication and waiter registration share one lock, closing the attach
+    /// check-then-enqueue race. Each waiter has its own identity and terminal resolver.
+    private static let state = Mutex(EndpointState())
 
     /// A label already published under a different owner token.
     public struct OwnedByAnother: Error, CustomStringConvertible {
@@ -58,28 +92,28 @@ public enum InstanceEndpoints {
     /// broker sends to it. An entry with no owner is this process's own cache and carries
     /// no such claim.
     /// A publisher that has exited holds nothing: its label may be taken by a new token.
-    /// Every process gets a fresh token, so an app relaunched after a force quit — the
-    /// engine survives one on purpose — would otherwise find its own label refused until
-    /// the engine restarted. The liveness checked is the *recorded* publisher's, not the
-    /// caller's claim, so a same-user process cannot talk its way past a live app.
+    /// Every publisher process gets a fresh token, so an app relaunched after a force quit — the
+    /// engine survives one on purpose — would otherwise find its own label refused until the
+    /// engine restarted. The liveness checked is the *recorded* publisher's authoritative XPC
+    /// peer PID, not a message field, so a same-user process cannot talk its way past a live app.
     public static func attach(label: String, endpoint: xpc_endpoint_t, owner: String? = nil, pid: pid_t? = nil) throws {
-        try storage.withLock { table in
-            if let existing = table[label], let existingOwner = existing.owner, existingOwner != owner {
+        let pending = try state.withLock { state -> [WaitRegistration] in
+            if let existing = state.endpoints[label], let existingOwner = existing.owner, existingOwner != owner {
                 guard let previous = existing.pid, !isAlive(previous) else {
                     throw OwnedByAnother(label: label)
                 }
             }
-            table[label] = Box(endpoint: endpoint, owner: owner, pid: pid)
+            state.endpoints[label] = Box(endpoint: endpoint, owner: owner, pid: pid)
+            return state.waiters.removeValue(forKey: label).map { Array($0.values) } ?? []
         }
-        let pending = waiters.withLock { $0.removeValue(forKey: label) ?? [] }
         for waiter in pending {
-            waiter.resume()
+            waiter.resolve()
         }
     }
 
     /// The token `label` was published with, or nil when it is unpublished or unowned.
     public static func owner(label: String) -> String? {
-        storage.withLock { $0[label]?.owner }
+        state.withLock { $0.endpoints[label]?.owner }
     }
 
     static func isAlive(_ pid: pid_t) -> Bool {
@@ -89,11 +123,11 @@ public enum InstanceEndpoints {
     }
 
     public static func remove(label: String) {
-        storage.withLock { _ = $0.removeValue(forKey: label) }
+        state.withLock { _ = $0.endpoints.removeValue(forKey: label) }
     }
 
     public static func endpoint(label: String) -> xpc_endpoint_t? {
-        storage.withLock { $0[label]?.endpoint }
+        state.withLock { $0.endpoints[label]?.endpoint }
     }
 
     /// Blocking wait for `label` to attach. The spawner is synchronous and must
@@ -111,28 +145,80 @@ public enum InstanceEndpoints {
         return endpoint(label: label) != nil
     }
 
-    /// Wait for `label` to attach, up to `timeout`. Returns nil on timeout: the
-    /// spawn and the attach race, since the caller spawns the instance and then
-    /// immediately dials it.
+    /// Wait for `label` to attach, up to `timeout`. Each caller owns one waiter: another
+    /// caller's shorter deadline or cancellation cannot resume or remove it.
     public static func endpoint(label: String, timeout: Duration) async -> xpc_endpoint_t? {
+        if Task.isCancelled { return nil }
         if let existing = endpoint(label: label) { return existing }
 
-        let timeoutTask = Task {
-            try? await Task.sleep(for: timeout)
-            let pending = waiters.withLock { $0.removeValue(forKey: label) ?? [] }
-            for waiter in pending {
-                waiter.resume()
+        let id = UUID()
+        let registration = WaitRegistration()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await waitForEndpoint(label: label, id: id, registration: registration)
             }
-        }
-        defer { timeoutTask.cancel() }
-
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            if endpoint(label: label) != nil {
-                cont.resume()
-                return
+            group.addTask {
+                do {
+                    try await Task.sleep(for: timeout)
+                    resolveWaiter(label: label, id: id, registration: registration)
+                } catch {
+                    // The endpoint waiter won, or the calling task was cancelled.
+                }
             }
-            waiters.withLock { $0[label, default: []].append(cont) }
+            _ = await group.next()
+            group.cancelAll()
+            await group.waitForAll()
         }
+        guard !Task.isCancelled else { return nil }
         return endpoint(label: label)
+    }
+
+    private static func waitForEndpoint(
+        label: String,
+        id: UUID,
+        registration: WaitRegistration
+    ) async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let alreadyAttached = state.withLock { state -> Bool in
+                    if state.endpoints[label] != nil { return true }
+                    state.waiters[label, default: [:]][id] = registration
+                    return false
+                }
+                if alreadyAttached {
+                    continuation.resume()
+                    return
+                }
+                if !registration.install(continuation) {
+                    removeWaiter(label: label, id: id, registration: registration)
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            resolveWaiter(label: label, id: id, registration: registration)
+        }
+    }
+
+    private static func removeWaiter(
+        label: String,
+        id: UUID,
+        registration: WaitRegistration
+    ) {
+        state.withLock { state in
+            guard state.waiters[label]?[id] === registration else { return }
+            state.waiters[label]?[id] = nil
+            if state.waiters[label]?.isEmpty == true {
+                state.waiters[label] = nil
+            }
+        }
+    }
+
+    private static func resolveWaiter(
+        label: String,
+        id: UUID,
+        registration: WaitRegistration
+    ) {
+        removeWaiter(label: label, id: id, registration: registration)
+        registration.resolve()
     }
 }

@@ -294,6 +294,90 @@ public struct ClusterHelper {
         return formatter.string(fromByteCount: Int64(clamping: bytes))
     }
 
+    // MARK: - Container-derived rows
+
+    /// Groups plugin-owned node containers into clusters, from the containers alone. The
+    /// library's start, stop, delete and load-image act on the containers that exist,
+    /// including those of clusters created before the cluster service kept records.
+    static func buildClusterRows(from snapshots: [ContainerSnapshot]) -> [ClusterNodeResource] {
+        var controlPlanes: [ContainerSnapshot] = []
+        var workers: [ContainerSnapshot] = []
+        for snapshot in snapshots {
+            let roles = snapshot.configuration.labels[ResourceLabelKeys.role, default: ""]
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if roles.contains(controlPlaneRoleName) {
+                controlPlanes.append(snapshot)
+            } else {
+                workers.append(snapshot)
+            }
+        }
+
+        let clusterNames = controlPlanes.map { controlPlane in
+            explicitClusterName(for: controlPlane) ?? controlPlane.configuration.id
+        }
+        var rows: [ClusterNodeResource] = []
+        var assignedWorkerIDs = Set<String>()
+
+        for cp in controlPlanes.sorted(by: { $0.configuration.id < $1.configuration.id }) {
+            let clusterName = explicitClusterName(for: cp) ?? cp.configuration.id
+            rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: cp))
+            let cpWorkers =
+                workers
+                .filter { worker in
+                    guard !assignedWorkerIDs.contains(worker.configuration.id) else { return false }
+                    if let explicit = explicitClusterName(for: worker) {
+                        return explicit == clusterName
+                    }
+                    // Compatibility for clusters created before the cluster label existed.
+                    // Longest-prefix ownership prevents `foo` from also claiming a worker
+                    // belonging to a nested cluster named `foo-worker-1`.
+                    return legacyClusterName(for: worker, candidates: clusterNames) == clusterName
+                }
+                .sorted { $0.configuration.id < $1.configuration.id }
+            for worker in cpWorkers {
+                rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: worker))
+                assignedWorkerIDs.insert(worker.configuration.id)
+            }
+        }
+
+        for worker
+            in workers
+            .filter({ !assignedWorkerIDs.contains($0.configuration.id) })
+            .sorted(by: { $0.configuration.id < $1.configuration.id })
+        {
+            let clusterName =
+                explicitClusterName(for: worker)
+                ?? legacyClusterName(for: worker, candidates: clusterNames)
+                ?? clusterNameDerivedFromWorkerID(worker.configuration.id)
+            rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: worker))
+        }
+
+        return rows
+    }
+
+    private static func explicitClusterName(for snapshot: ContainerSnapshot) -> String? {
+        guard let value = snapshot.configuration.labels[ResourceLabelKeys.cluster], !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private static func legacyClusterName(
+        for worker: ContainerSnapshot,
+        candidates: [String]
+    ) -> String? {
+        candidates
+            .filter { worker.configuration.id.hasPrefix("\($0)-worker-") }
+            .max { lhs, rhs in
+                lhs.count == rhs.count ? lhs > rhs : lhs.count < rhs.count
+            }
+    }
+
+    private static func clusterNameDerivedFromWorkerID(_ id: String) -> String {
+        id.components(separatedBy: "-worker-").dropLast().joined(separator: "-worker-")
+    }
+
     static func renderTable<T: ListDisplayable>(_ items: [T]) -> String {
         var rows: [[String]] = [T.tableHeader]
         for item in items {
@@ -345,4 +429,46 @@ struct ClusterNodeRow: ListDisplayable {
     }
 
     var quietValue: String { node.name }
+}
+
+// MARK: - ClusterNodeResource
+
+/// One node container, with the cluster it belongs to, as the library's container-derived
+/// operations see it.
+struct ClusterNodeResource: ManagedResource, ListDisplayable {
+    let clusterName: String
+    let snapshot: ContainerSnapshot
+
+    // MARK: ManagedResource
+    var id: String { snapshot.configuration.id }
+    var name: String { snapshot.configuration.id }
+    var creationDate: Date { snapshot.configuration.creationDate }
+    var labels: ResourceLabels { (try? ResourceLabels(snapshot.configuration.labels)) ?? .init() }
+
+    static func nameValid(_ name: String) -> Bool { ManagedContainer.nameValid(name) }
+
+    static var tableHeader: [String] {
+        ["CLUSTER", "NODE", "ROLE", "STATE", "CPUS", "MEMORY", "ADDR", "PORTS"]
+    }
+
+    var tableRow: [String] {
+        let role = snapshot.configuration.labels[ResourceLabelKeys.role] ?? ""
+        let addr = snapshot.networks.map { $0.ipv4Address.address.description }.joined(separator: ",")
+        let memoryMB = snapshot.configuration.resources.memoryInBytes / (1024 * 1024)
+        let ports = snapshot.configuration.publishedPorts
+            .map { "\($0.hostPort)->\($0.containerPort)" }
+            .joined(separator: ",")
+        return [
+            clusterName,
+            snapshot.configuration.id,
+            role,
+            snapshot.status.rawValue,
+            "\(snapshot.configuration.resources.cpus)",
+            "\(memoryMB) MB",
+            addr,
+            ports,
+        ]
+    }
+
+    var quietValue: String { snapshot.configuration.id }
 }
