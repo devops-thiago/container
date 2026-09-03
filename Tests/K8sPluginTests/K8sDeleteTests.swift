@@ -25,7 +25,11 @@ import Testing
 
 // MARK: - Fixtures
 
-private func snapshot(id: String, labels: [String: String]) throws -> ContainerSnapshot {
+private func snapshot(
+    id: String,
+    labels: [String: String],
+    incarnation: String = "incarnation"
+) throws -> ContainerSnapshot {
     let labelsJSON = try String(decoding: JSONEncoder().encode(labels), as: UTF8.self)
     let sha = "sha256:" + String(repeating: "a", count: 64)
     let json = """
@@ -40,6 +44,7 @@ private func snapshot(id: String, labels: [String: String]) throws -> ContainerS
                 "resources": {"cpus":2,"memoryInBytes":2147483648},
                 "labels": \(labelsJSON)
             },
+            "incarnation": "\(incarnation)",
             "status": "running",
             "networks": []
         }
@@ -50,47 +55,160 @@ private func snapshot(id: String, labels: [String: String]) throws -> ContainerS
 private let nodeLabels = ["com.apple.container.plugin": "k8s", "com.apple.container.resource.role": "control-plane"]
 private let ordinaryLabels = ["app": "web"]
 
-/// Stands in for the engine. `current` is what the ID names *now*; stop and delete refuse,
-/// as the service does, when it no longer carries the labels the caller requires.
+/// Stands in for the engine. `current` is what each ID names *now*; stop and delete
+/// require both ownership labels and the exact observed incarnation.
 private final class FakeContainers: K8sClusterContainers, @unchecked Sendable {
-    struct Call: Equatable { let name: String; let labels: [String: String] }
+    struct Call: Equatable {
+        let name: String
+        let id: String
+        let labels: [String: String]
+        let incarnation: String
+    }
 
-    private let state: Mutex<(getResult: Result<ContainerSnapshot, Error>, current: ContainerSnapshot?, calls: [Call])>
+    private typealias State = (
+        getResult: Result<ContainerSnapshot, Error>,
+        listed: [ContainerSnapshot],
+        current: [String: ContainerSnapshot],
+        calls: [Call]
+    )
+    private let state: Mutex<State>
+    private let beforeMutation: (@Sendable () async -> Void)?
 
-    init(get: Result<ContainerSnapshot, Error>, current: ContainerSnapshot?) {
-        state = Mutex((get, current, []))
+    init(
+        get: Result<ContainerSnapshot, Error>,
+        current: ContainerSnapshot?,
+        listed: [ContainerSnapshot]? = nil,
+        beforeMutation: (@Sendable () async -> Void)? = nil
+    ) {
+        self.beforeMutation = beforeMutation
+        let defaultList: [ContainerSnapshot]
+        switch get {
+        case .success(let snapshot): defaultList = [snapshot]
+        case .failure: defaultList = []
+        }
+        state = Mutex(
+            (
+                get,
+                listed ?? defaultList,
+                current.map { [$0.id: $0] } ?? [:],
+                []
+            ))
+    }
+
+    init(
+        get: Result<ContainerSnapshot, Error>,
+        listed: [ContainerSnapshot],
+        current: [ContainerSnapshot]
+    ) {
+        self.beforeMutation = nil
+        state = Mutex(
+            (
+                get,
+                listed,
+                Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) }),
+                []
+            ))
+    }
+
+    init(controlPlane: ContainerSnapshot, workers: [ContainerSnapshot]) {
+        self.beforeMutation = nil
+        let all = [controlPlane] + workers
+        state = Mutex(
+            (
+                .success(controlPlane),
+                all,
+                Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }),
+                []
+            ))
     }
 
     var calls: [Call] { state.withLock { $0.calls } }
-    var current: ContainerSnapshot? { state.withLock { $0.current } }
+    var current: ContainerSnapshot? { state.withLock { $0.current.values.first } }
+    var currentIDs: Set<String> { state.withLock { Set($0.current.keys) } }
 
     /// The race under test: between the caller's lookup and its mutation, the ID comes to
     /// name something else.
-    func replace(with replacement: ContainerSnapshot) { state.withLock { $0.current = replacement } }
+    func replace(with replacement: ContainerSnapshot) {
+        state.withLock { $0.current[replacement.id] = replacement }
+    }
 
     func get(id: String) async throws -> ContainerSnapshot {
         try state.withLock { try $0.getResult.get() }
     }
 
-    func stop(id: String, requiredLabels: [String: String]) async throws {
-        try mutate("stop", id: id, requiredLabels: requiredLabels) { _ in }
+    func listNodes() async throws -> [ContainerSnapshot] {
+        state.withLock { $0.listed }
     }
 
-    func delete(id: String, requiredLabels: [String: String]) async throws {
-        try mutate("delete", id: id, requiredLabels: requiredLabels) { $0 = nil }
+    func stop(
+        id: String, requiredLabels: [String: String], expectedIncarnation: String
+    ) async throws {
+        if let beforeMutation { await beforeMutation() }
+        try mutate(
+            "stop", id: id, requiredLabels: requiredLabels,
+            expectedIncarnation: expectedIncarnation
+        ) { _ in }
     }
 
-    private func mutate(_ name: String, id: String, requiredLabels: [String: String], _ apply: (inout ContainerSnapshot?) -> Void) throws {
-        try state.withLock { s in
-            guard let current = s.current else {
+    func delete(
+        id: String, requiredLabels: [String: String], expectedIncarnation: String
+    ) async throws {
+        try mutate(
+            "delete", id: id, requiredLabels: requiredLabels,
+            expectedIncarnation: expectedIncarnation
+        ) { $0 = nil }
+    }
+
+    private func mutate(
+        _ name: String,
+        id: String,
+        requiredLabels: [String: String],
+        expectedIncarnation: String,
+        _ apply: (inout ContainerSnapshot?) -> Void
+    ) throws {
+        try state.withLock { state in
+            guard let current = state.current[id] else {
                 throw ContainerizationError(.notFound, message: "container with ID \(id) not found")
             }
             guard requiredLabels.allSatisfy({ current.configuration.labels[$0.key] == $0.value }) else {
                 throw ContainerizationError(.invalidArgument, message: "container \(id) does not carry the labels this operation requires")
             }
-            s.calls.append(Call(name: name, labels: requiredLabels))
-            apply(&s.current)
+            guard current.incarnation == expectedIncarnation else {
+                throw ContainerizationError(.invalidArgument, message: "container \(id) is not the observed incarnation")
+            }
+            state.calls.append(
+                Call(
+                    name: name,
+                    id: id,
+                    labels: requiredLabels,
+                    incarnation: expectedIncarnation))
+            var target: ContainerSnapshot? = current
+            apply(&target)
+            state.current[id] = target
         }
+    }
+}
+
+private actor MutationBarrier {
+    private var arrival: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+    private var arrived = false
+
+    func wait() async {
+        arrived = true
+        arrival?.resume()
+        arrival = nil
+        await withCheckedContinuation { release = $0 }
+    }
+
+    func waitForArrival() async {
+        if arrived { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+
+    func open() {
+        release?.resume()
+        release = nil
     }
 }
 
@@ -201,6 +319,176 @@ extension KubeconfigEnvTests {
             }
         }
 
+        @Test("surviving workers are deleted when the control plane is already gone")
+        func orphanedWorkersAreDeleted() async throws {
+            let name = "cluster-orphaned-workers"
+            let worker = try snapshot(
+                id: "\(name)-worker-1",
+                labels: [
+                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.cluster: name,
+                    ResourceLabelKeys.role: K8sHelper.workerRoleName,
+                ],
+                incarnation: "worker-token")
+            let engine = FakeContainers(
+                get: .failure(
+                    ContainerizationError(
+                        .notFound,
+                        message: "container with ID \(name) not found")),
+                listed: [worker],
+                current: [worker])
+
+            try await withScratchKubeconfig(containing: name) { file in
+                await #expect(throws: ContainerizationError.self) {
+                    try await K8sClusters.delete(
+                        name: name,
+                        expectedControlPlaneIncarnation: "selected-predecessor",
+                        containers: engine,
+                        log: log)
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.currentIDs == [worker.id])
+                #expect(try String(contentsOf: file, encoding: .utf8).contains("name: \(name)"))
+
+                try await K8sClusters.delete(name: name, containers: engine, log: log)
+                #expect(
+                    engine.calls.map { "\($0.name):\($0.id):\($0.incarnation)" } == [
+                        "stop:\(worker.id):worker-token",
+                        "delete:\(worker.id):worker-token",
+                    ])
+                #expect(engine.currentIDs.isEmpty)
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(!yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("a same-label same-ID replacement at the mutation barrier is rejected by incarnation")
+        func sameLabelReplacementSurvives() async throws {
+            let name = "cluster-token"
+            let observed = try snapshot(
+                id: name, labels: nodeLabels, incarnation: "observed")
+            let barrier = MutationBarrier()
+            let engine = FakeContainers(
+                get: .success(observed),
+                current: observed,
+                beforeMutation: { await barrier.wait() })
+
+            try await withScratchKubeconfig(containing: name) { file in
+                let deletion = Task {
+                    try await K8sClusters.delete(name: name, containers: engine, log: log)
+                }
+                await barrier.waitForArrival()
+                engine.replace(
+                    with: try snapshot(
+                        id: name, labels: nodeLabels, incarnation: "replacement"))
+                await barrier.open()
+                await #expect(throws: ContainerizationError.self) {
+                    try await deletion.value
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.current?.incarnation == "replacement")
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("a mismatched selected control-plane incarnation fails before mutation")
+        func selectedControlPlaneIncarnationMismatchFailsClosed() async throws {
+            let name = "cluster-selected-token"
+            let observed = try snapshot(
+                id: name, labels: nodeLabels, incarnation: "current")
+            let engine = FakeContainers(get: .success(observed), current: observed)
+
+            try await withScratchKubeconfig(containing: name) { file in
+                await #expect(throws: ContainerizationError.self) {
+                    try await K8sClusters.delete(
+                        name: name,
+                        expectedControlPlaneIncarnation: "selected-predecessor",
+                        containers: engine,
+                        log: log)
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.current?.incarnation == "current")
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("overlapping cluster names never claim another cluster's labeled worker")
+        func explicitClusterOwnershipPreventsCrossClusterDelete() async throws {
+            let parentName = "foo"
+            let nestedName = "foo-worker-1"
+            let parent = try snapshot(
+                id: parentName,
+                labels: [
+                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.cluster: parentName,
+                    ResourceLabelKeys.role: K8sHelper.controlPlaneRoleName,
+                ],
+                incarnation: "parent-token")
+            let nested = try snapshot(
+                id: nestedName,
+                labels: [
+                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.cluster: nestedName,
+                    ResourceLabelKeys.role: K8sHelper.controlPlaneRoleName,
+                ],
+                incarnation: "nested-token")
+            let nestedWorker = try snapshot(
+                id: "\(nestedName)-worker-1",
+                labels: [
+                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.cluster: nestedName,
+                    ResourceLabelKeys.role: K8sHelper.workerRoleName,
+                ],
+                incarnation: "nested-worker-token")
+            let engine = FakeContainers(
+                controlPlane: parent, workers: [nested, nestedWorker])
+
+            try await withScratchKubeconfig(containing: parentName) { _ in
+                try await K8sClusters.delete(
+                    name: parentName,
+                    expectedControlPlaneIncarnation: "parent-token",
+                    containers: engine,
+                    log: log)
+            }
+
+            #expect(engine.calls.map(\.id) == [parentName, parentName])
+            #expect(engine.currentIDs == [nestedName, "\(nestedName)-worker-1"])
+        }
+
+        @Test("workers are deleted before the control plane with each observed incarnation")
+        func workersAreDeletedFirst() async throws {
+            let name = "cluster-workers"
+            let controlPlane = try snapshot(
+                id: name, labels: nodeLabels, incarnation: "cp-token")
+            let workerLabels = [
+                "com.apple.container.plugin": "k8s",
+                "com.apple.container.resource.role": "worker",
+            ]
+            let worker1 = try snapshot(
+                id: "\(name)-worker-1", labels: workerLabels, incarnation: "w1-token")
+            let worker2 = try snapshot(
+                id: "\(name)-worker-2", labels: workerLabels, incarnation: "w2-token")
+            let engine = FakeContainers(
+                controlPlane: controlPlane, workers: [worker2, worker1])
+
+            try await withScratchKubeconfig(containing: name) { _ in
+                try await K8sClusters.delete(name: name, containers: engine, log: log)
+            }
+
+            #expect(
+                engine.calls.map { "\($0.name):\($0.id):\($0.incarnation)" } == [
+                    "stop:\(name)-worker-1:w1-token",
+                    "delete:\(name)-worker-1:w1-token",
+                    "stop:\(name)-worker-2:w2-token",
+                    "delete:\(name)-worker-2:w2-token",
+                    "stop:\(name):cp-token",
+                    "delete:\(name):cp-token",
+                ])
+            #expect(engine.currentIDs.isEmpty)
+        }
+
         @Test("a real node is stopped and deleted with the node labels required, and its context removed")
         func nodeIsDeletedWithTheRequirementAttached() async throws {
             let name = "cluster-c"
@@ -209,7 +497,11 @@ extension KubeconfigEnvTests {
             try await withScratchKubeconfig(containing: name) { file in
                 try await K8sClusters.delete(name: name, containers: engine, log: log)
                 let required = K8sClusters.nodeLabels
-                #expect(engine.calls == [.init(name: "stop", labels: required), .init(name: "delete", labels: required)])
+                #expect(
+                    engine.calls == [
+                        .init(name: "stop", id: name, labels: required, incarnation: node.incarnation),
+                        .init(name: "delete", id: name, labels: required, incarnation: node.incarnation),
+                    ])
                 #expect(engine.current == nil)
                 let yaml = try String(contentsOf: file, encoding: .utf8)
                 #expect(!yaml.contains("name: \(name)"))

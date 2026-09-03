@@ -31,7 +31,27 @@ extension ClientKernel {
         XPCClient(service: serviceIdentifier)
     }
 
-    public static func installKernel(kernelFilePath: String, platform: SystemPlatform, force: Bool) async throws {
+    private static func kernelInstallation(from reply: XPCMessage) throws -> KernelInstallation {
+        guard let data = reply.dataNoCopy(key: .kernelInstallation) else {
+            throw ContainerizationError(
+                .internalError,
+                message: "missing kernel installation data from XPC response")
+        }
+        do {
+            return try JSONDecoder().decode(KernelInstallation.self, from: data)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "malformed kernel installation data in XPC response: \(error)")
+        }
+    }
+
+    @discardableResult
+    public static func installKernel(
+        kernelFilePath: String,
+        platform: SystemPlatform,
+        force: Bool
+    ) async throws -> KernelInstallation {
         let client = newClient()
         let message = XPCMessage(route: .installKernel)
 
@@ -40,9 +60,11 @@ extension ClientKernel {
 
         let platformData = try JSONEncoder().encode(platform)
         message.set(key: .systemPlatform, value: platformData)
-        try await client.send(message)
+        let reply = try await client.send(message)
+        return try kernelInstallation(from: reply)
     }
 
+    @discardableResult
     public static func installKernelFromTar(
         tarFile: String,
         kernelFilePath: String,
@@ -50,7 +72,7 @@ extension ClientKernel {
         progressUpdate: ProgressUpdateHandler? = nil,
         expectedDigest: String? = nil,
         force: Bool
-    ) async throws {
+    ) async throws -> KernelInstallation {
         let client = newClient()
         let message = XPCMessage(route: .installKernel)
 
@@ -69,8 +91,9 @@ extension ClientKernel {
             progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: message)
         }
 
-        try await client.send(message)
+        let reply = try await client.send(message)
         await progressUpdateClient?.finish()
+        return try kernelInstallation(from: reply)
     }
 
     @discardableResult

@@ -23,6 +23,7 @@ import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
+import RegistryTransport
 
 extension Application {
     public struct RegistryLogin: AsyncLoggableCommand {
@@ -80,21 +81,34 @@ extension Application {
                 throw ContainerizationError(.invalidArgument, message: "invalid host \(server)")
             }
 
-            let client = RegistryClient(
-                host: host,
-                scheme: scheme.rawValue,
-                port: url.port,
-                authentication: BasicAuthentication(username: username, password: password),
-                retryOptions: .init(
-                    maxRetries: 10,
-                    retryInterval: 300_000_000,
-                    shouldRetry: ({ response in
-                        response.status.code >= 500
-                    })
-                ),
-                tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
-            )
-            try await client.ping()
+            let authentication = BasicAuthentication(username: username, password: password)
+            switch scheme {
+            case .http:
+                // HTTP is used only when the caller selected it explicitly. Send Basic auth
+                // preemptively to that exact origin and reject redirects; the general OCI
+                // client intentionally refuses credential challenges over plaintext.
+                let client = ExplicitHTTPRegistryClient(
+                    host: host,
+                    port: url.port,
+                    authentication: authentication)
+                try await client.ping()
+            case .https:
+                let client = RegistryClient(
+                    host: host,
+                    scheme: scheme.rawValue,
+                    port: url.port,
+                    authentication: authentication,
+                    retryOptions: .init(
+                        maxRetries: 10,
+                        retryInterval: 300_000_000,
+                        shouldRetry: ({ response in
+                            response.status.code >= 500
+                        })
+                    ),
+                    tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
+                )
+                try await client.ping()
+            }
             try keychain.save(hostname: server, username: username, password: password)
             log.info("Login succeeded")
         }

@@ -37,24 +37,30 @@ public struct KernelHarness: Sendable {
         let force = try message.kernelForce()
         let expectedDigest = message.kernelDigest()
 
-        guard let kernelTarUrl = try message.kernelTarURL() else {
+        let installation: KernelInstallation
+        if let kernelTarURL = try message.kernelTarURL() {
+            let progressUpdateService = ProgressUpdateService(message: message)
+            installation = try await self.service.installKernelFrom(
+                tar: kernelTarURL,
+                kernelFilePath: kernelFilePath,
+                platform: platform,
+                progressUpdate: progressUpdateService?.handler,
+                expectedDigest: expectedDigest,
+                force: force)
+        } else {
             // We have been given a path to a kernel binary on disk
             guard let kernelFile = URL(string: kernelFilePath) else {
                 throw ContainerizationError(.invalidArgument, message: "invalid kernel file path: \(kernelFilePath)")
             }
-            try await self.service.installKernel(kernelFile: kernelFile, platform: platform, force: force)
-            return message.reply()
+            installation = try await self.service.installKernel(
+                kernelFile: kernelFile,
+                platform: platform,
+                force: force)
         }
 
-        let progressUpdateService = ProgressUpdateService(message: message)
-        try await self.service.installKernelFrom(
-            tar: kernelTarUrl,
-            kernelFilePath: kernelFilePath,
-            platform: platform,
-            progressUpdate: progressUpdateService?.handler,
-            expectedDigest: expectedDigest,
-            force: force)
-        return message.reply()
+        let reply = message.reply()
+        reply.set(key: .kernelInstallation, value: try JSONEncoder().encode(installation))
+        return reply
     }
 
     @Sendable

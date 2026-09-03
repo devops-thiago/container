@@ -20,12 +20,14 @@ import ContainerizationArchive
 import ContainerizationError
 import ContainerizationExtras
 import CryptoKit
+import Darwin
 import Foundation
 import Logging
 import TerminalProgress
 
 public actor KernelService {
     private static let defaultKernelNamePrefix: String = "default.kernel-"
+    private static let transactionDirectoryPrefix = ".kernel-transaction-"
 
     private let log: Logger
     private let kernelDirectory: URL
@@ -35,15 +37,40 @@ public actor KernelService {
         let hex: String
     }
 
+    private struct KernelTransaction: Codable {
+        let destinationName: String
+        let defaultName: String
+        let destinationExisted: Bool
+        let expectedSHA256: String
+    }
+
+    private struct RollbackUncertain: Error {
+        let cause: any Error
+    }
+
+    private struct TransactionInterrupted: Error {}
+
     public init(log: Logger, appRoot: URL) throws {
         self.log = log
+        let fm = FileManager.default
+        if !Self.pathExists(appRoot) {
+            try fm.createDirectory(at: appRoot, withIntermediateDirectories: true)
+            try Self.syncDirectory(appRoot.deletingLastPathComponent())
+        }
         self.kernelDirectory = appRoot.appending(path: "kernels")
-        try FileManager.default.createDirectory(at: self.kernelDirectory, withIntermediateDirectories: true)
+        if !Self.pathExists(self.kernelDirectory) {
+            try fm.createDirectory(at: self.kernelDirectory, withIntermediateDirectories: false)
+            try Self.syncDirectory(appRoot)
+        }
+        if try Self.recoverTransactions(in: self.kernelDirectory, log: log) {
+            try Self.syncDirectory(self.kernelDirectory)
+        }
     }
 
     /// Copies a kernel binary from a local path on disk into the managed kernels directory
     /// as the default kernel for the provided platform.
-    public func installKernel(kernelFile url: URL, platform: SystemPlatform = .linuxArm, force: Bool) throws {
+    @discardableResult
+    public func installKernel(kernelFile url: URL, platform: SystemPlatform = .linuxArm, force: Bool) throws -> KernelInstallation {
         log.debug(
             "KernelService: enter",
             metadata: [
@@ -65,38 +92,112 @@ public actor KernelService {
 
         let kFile = url.resolvingSymlinksInPath()
         let name = kFile.lastPathComponent
+        guard !name.hasPrefix(Self.transactionDirectoryPrefix) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "kernel name \(name) uses the reserved transaction namespace")
+        }
         let destPath = self.kernelDirectory.appendingPathComponent(name)
         let fm = FileManager.default
+        let destinationExists = Self.pathExists(destPath)
 
-        if !force, fm.fileExists(atPath: destPath.path) {
+        if !force, destinationExists {
             throw ContainerizationError(.exists, message: "kernel \(name) is already installed")
         }
 
-        // Staged beside the destination and renamed over it, never removed first: a forced
-        // same-name replacement used to delete the working kernel and then copy, so a copy
-        // that failed left no kernel and a default symlink pointing at nothing. Everything
-        // that can fail — the copy, the size check, the sync, the rename — now happens while
-        // the old bytes are still where the symlink points.
-        let staged = self.kernelDirectory.appendingPathComponent(".\(name).staging-\(UUID().uuidString)")
-        defer { try? fm.removeItem(at: staged) }
+        let sourceDigest = try Self.sha256Hex(of: kFile)
+        let defaultAlreadySelectsDestination = self.defaultKernelSelects(name: name, platform: platform)
+        let transactionDirectory = self.kernelDirectory.appendingPathComponent(
+            "\(Self.transactionDirectoryPrefix)\(UUID().uuidString)")
+        let staged = transactionDirectory.appendingPathComponent("content")
+        var cleanupTransaction = true
+        try fm.createDirectory(at: transactionDirectory, withIntermediateDirectories: false)
+        try Self.syncDirectory(self.kernelDirectory)
+        defer {
+            if cleanupTransaction, Self.pathExists(transactionDirectory) {
+                do {
+                    try fm.removeItem(at: transactionDirectory)
+                    try Self.syncDirectory(self.kernelDirectory)
+                } catch {
+                    self.log.error("could not durably clean kernel transaction \(transactionDirectory.lastPathComponent): \(error)")
+                }
+            }
+        }
+
         try fm.copyItem(at: kFile, to: staged)
         try Task.checkCancellation()
-        try installHooks.afterStaging?()
-        try Self.verifyCopy(of: kFile, at: staged)
-        try Self.sync(staged)
-        // rename(2) replaces the destination atomically on the same volume.
-        guard rename(staged.path, destPath.path) == 0 else {
-            throw ContainerizationError(
-                .internalError,
-                message: "could not move the staged kernel into place: \(String(cString: strerror(errno)))")
+        try installHooks.afterStaging?(staged)
+        try Self.verifyCopy(expectedSHA256: sourceDigest, at: staged)
+        try Self.syncFile(staged)
+        let transaction = KernelTransaction(
+            destinationName: name,
+            defaultName: "\(Self.defaultKernelNamePrefix)\(platform.architecture)",
+            destinationExisted: destinationExists,
+            expectedSHA256: sourceDigest)
+        try Self.record(transaction, in: transactionDirectory)
+        try installHooks.beforeContentCommit?()
+
+        // When a destination already exists, swap names atomically instead of discarding the
+        // old inode. It remains at `staged` until the default-link publication and directory
+        // sync both succeed, so any later failure can swap it back.
+        if destinationExists {
+            try Self.swap(staged, destPath, operation: "replace the kernel")
+        } else {
+            try Self.rename(staged, destPath, operation: "move the staged kernel into place")
         }
-        try self.setDefaultKernel(name: name, platform: platform)
+
+        do {
+            try syncKernelDirectory()
+            if installHooks.interruptAfterContentCommit {
+                throw TransactionInterrupted()
+            }
+            // Replacing bytes under the pathname an existing default symlink already selects
+            // needs no link mutation. Avoiding it removes an otherwise separate failure point.
+            if !defaultAlreadySelectsDestination {
+                try self.setDefaultKernel(
+                    name: name,
+                    platform: platform,
+                    transactionDirectory: transactionDirectory)
+            }
+        } catch is TransactionInterrupted {
+            // Unit-level crash boundary: preserve the durable transaction exactly as a killed
+            // process would, then let a fresh service instance exercise startup recovery.
+            cleanupTransaction = false
+            throw ContainerizationError(.internalError, message: "kernel transaction interrupted after content publication")
+        } catch let uncertain as RollbackUncertain {
+            // Keep both the old transaction content and the new destination. Recovery can
+            // inspect the atomically selected default on the next service start; deleting
+            // either side while link durability is unknown could leave a dangling default.
+            cleanupTransaction = false
+            log.critical("kernel transaction rollback is uncertain; preserving recovery state: \(uncertain.cause)")
+            throw uncertain.cause
+        } catch {
+            do {
+                if destinationExists {
+                    try Self.swap(staged, destPath, operation: "roll back the kernel replacement")
+                } else if Self.pathExists(destPath) {
+                    try Self.rename(destPath, staged, operation: "roll back the kernel installation")
+                }
+                try Self.syncDirectory(self.kernelDirectory)
+            } catch {
+                cleanupTransaction = false
+                self.log.critical("kernel replacement rollback failed; preserving recovery state: \(error)")
+            }
+            throw error
+        }
+
+        // The transaction directory holds the replaced content/link after a successful swap.
+        // Deferred cleanup removes it only after both published names are durable.
+        return KernelInstallation(name: name, sha256: sourceDigest)
     }
 
-    /// Test seam: something to run once the replacement is staged and before it is moved
-    /// into place, so a failure at the worst moment can be proven harmless.
+    /// Deterministic failure seams around each unit-testable transaction boundary.
     struct InstallHooks: Sendable {
-        var afterStaging: (@Sendable () throws -> Void)?
+        var afterStaging: (@Sendable (URL) throws -> Void)?
+        var beforeContentCommit: (@Sendable () throws -> Void)?
+        var beforeDefaultCommit: (@Sendable () throws -> Void)?
+        var didSyncDirectory: (@Sendable () -> Void)?
+        var interruptAfterContentCommit = false
     }
     private var installHooks = InstallHooks()
 
@@ -104,18 +205,22 @@ public actor KernelService {
         installHooks = hooks
     }
 
-    /// A staged copy is the source, byte for byte; a short copy is the failure this guards.
-    private static func verifyCopy(of source: URL, at staged: URL) throws {
-        let expected = try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? UInt64
-        let actual = try FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? UInt64
-        guard let expected, let actual, expected == actual, actual > 0 else {
+    private func syncKernelDirectory() throws {
+        try Self.syncDirectory(kernelDirectory)
+        installHooks.didSyncDirectory?()
+    }
+
+    private static func verifyCopy(expectedSHA256: String, at staged: URL) throws {
+        let size = try FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? UInt64
+        let actual = try sha256Hex(of: staged)
+        guard let size, size > 0, actual == expectedSHA256 else {
             throw ContainerizationError(
                 .internalError,
-                message: "staged kernel is \(actual ?? 0) bytes, source is \(expected ?? 0)")
+                message: "staged kernel content does not match its source")
         }
     }
 
-    private static func sync(_ file: URL) throws {
+    private static func syncFile(_ file: URL) throws {
         let fd = open(file.path, O_RDONLY)
         guard fd >= 0 else {
             throw ContainerizationError(.internalError, message: "could not open the staged kernel to sync it")
@@ -126,9 +231,122 @@ public actor KernelService {
         }
     }
 
+    private static func syncDirectory(_ directory: URL) throws {
+        let fd = open(directory.path, O_RDONLY)
+        guard fd >= 0 else {
+            throw ContainerizationError(.internalError, message: "could not open the kernel directory to sync it")
+        }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else {
+            throw ContainerizationError(.internalError, message: "could not sync the kernel directory")
+        }
+    }
+
+    private static func record(_ transaction: KernelTransaction, in directory: URL) throws {
+        let record = directory.appendingPathComponent("transaction.json")
+        try JSONEncoder().encode(transaction).write(to: record, options: .atomic)
+        try syncFile(record)
+        try syncDirectory(directory)
+        try syncDirectory(directory.deletingLastPathComponent())
+    }
+
+    /// Recover a process/host crash at any publication boundary. A transaction with the
+    /// expected bytes and a default selecting them committed; expected bytes with the old
+    /// default roll back. A directory without a durable record never reached publication.
+    private static func recoverTransactions(in directory: URL, log: Logger) throws -> Bool {
+        let fm = FileManager.default
+        let entries = try fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey])
+        var recovered = false
+        for entry in entries where isTransactionDirectory(entry) {
+            let recordURL = entry.appendingPathComponent("transaction.json")
+            if fm.fileExists(atPath: recordURL.path) {
+                let transaction = try JSONDecoder().decode(
+                    KernelTransaction.self,
+                    from: Data(contentsOf: recordURL))
+                let destination = directory.appendingPathComponent(transaction.destinationName)
+                let staged = entry.appendingPathComponent("content")
+                let finalHasExpectedBytes: Bool
+                if Self.pathExists(destination) {
+                    finalHasExpectedBytes = try sha256Hex(of: destination) == transaction.expectedSHA256
+                } else {
+                    finalHasExpectedBytes = false
+                }
+                let defaultPath = directory.appendingPathComponent(transaction.defaultName)
+                let committed =
+                    finalHasExpectedBytes
+                    && symbolicLink(defaultPath, selects: destination, relativeTo: directory)
+
+                if finalHasExpectedBytes, !committed {
+                    if transaction.destinationExisted, Self.pathExists(staged) {
+                        try swap(staged, destination, operation: "recover the prior kernel")
+                    } else if Self.pathExists(destination) {
+                        try fm.removeItem(at: destination)
+                    }
+                    try syncDirectory(directory)
+                    log.warning("rolled back interrupted kernel transaction \(entry.lastPathComponent)")
+                } else if committed {
+                    log.notice("completed cleanup for committed kernel transaction \(entry.lastPathComponent)")
+                }
+            }
+            try fm.removeItem(at: entry)
+            recovered = true
+        }
+        return recovered
+    }
+
+    private static func isTransactionDirectory(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        guard name.hasPrefix(transactionDirectoryPrefix) else { return false }
+        let suffix = String(name.dropFirst(transactionDirectoryPrefix.count))
+        guard UUID(uuidString: suffix) != nil else { return false }
+        var info = stat()
+        return lstat(url.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+    }
+
+    private static func symbolicLink(_ link: URL, selects destination: URL, relativeTo directory: URL) -> Bool {
+        guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path) else {
+            return false
+        }
+        return URL(fileURLWithPath: target, relativeTo: directory).standardizedFileURL
+            == destination.standardizedFileURL
+    }
+
+    private static func pathExists(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0
+    }
+
+    private static func rename(_ source: URL, _ destination: URL, operation: String) throws {
+        guard Darwin.rename(source.path, destination.path) == 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "could not \(operation): \(String(cString: strerror(errno)))")
+        }
+    }
+
+    private static func swap(_ first: URL, _ second: URL, operation: String) throws {
+        guard renamex_np(first.path, second.path, UInt32(RENAME_SWAP)) == 0 else {
+            throw ContainerizationError(
+                .internalError,
+                message: "could not \(operation): \(String(cString: strerror(errno)))")
+        }
+    }
+
+    private func defaultKernelSelects(name: String, platform: SystemPlatform) -> Bool {
+        let defaultName = "\(Self.defaultKernelNamePrefix)\(platform.architecture)"
+        let defaultPath = kernelDirectory.appendingPathComponent(defaultName)
+        return Self.symbolicLink(
+            defaultPath,
+            selects: kernelDirectory.appendingPathComponent(name),
+            relativeTo: kernelDirectory)
+    }
+
     /// Copies a kernel binary from inside of tar file into the managed kernels directory
     /// as the default kernel for the provided platform.
     /// The parameter `tar` maybe a location to a local file on disk, or a remote URL.
+    @discardableResult
     public func installKernelFrom(
         tar: URL,
         kernelFilePath: String,
@@ -136,7 +354,7 @@ public actor KernelService {
         progressUpdate: ProgressUpdateHandler?,
         expectedDigest: String? = nil,
         force: Bool
-    ) async throws {
+    ) async throws -> KernelInstallation {
         log.debug(
             "KernelService: enter",
             metadata: [
@@ -213,7 +431,7 @@ public actor KernelService {
             .setDescription("Unpacking kernel")
         ])
         let kernelFile = try self.extractFile(tarFile: tarFile, at: kernelFilePath, to: tempDir)
-        try self.installKernel(kernelFile: kernelFile, platform: platform, force: force)
+        let installation = try self.installKernel(kernelFile: kernelFile, platform: platform, force: force)
         await progressUpdate?([
             .addTasks(1)
         ])
@@ -221,6 +439,7 @@ public actor KernelService {
         if !isLocalTar {
             try FileManager.default.removeItem(at: tarFile)
         }
+        return installation
     }
 
     private static func verifyDigest(of file: URL, expected: ExpectedDigest) throws {
@@ -262,7 +481,11 @@ public actor KernelService {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private func setDefaultKernel(name: String, platform: SystemPlatform) throws {
+    private func setDefaultKernel(
+        name: String,
+        platform: SystemPlatform,
+        transactionDirectory: URL
+    ) throws {
         log.debug(
             "KernelService: enter",
             metadata: [
@@ -286,17 +509,33 @@ public actor KernelService {
         guard FileManager.default.fileExists(atPath: kernelPath.path) else {
             throw ContainerizationError(.notFound, message: "kernel not found at \(kernelPath)")
         }
-        let name = "\(Self.defaultKernelNamePrefix)\(platform.architecture)"
-        let defaultKernelPath = self.kernelDirectory.appendingPathComponent(name)
-        // A fresh link renamed over the old one: the default never points at nothing, not even
-        // between a remove and a create.
-        let staged = self.kernelDirectory.appendingPathComponent(".\(name).staging-\(UUID().uuidString)")
+        let defaultName = "\(Self.defaultKernelNamePrefix)\(platform.architecture)"
+        let defaultKernelPath = self.kernelDirectory.appendingPathComponent(defaultName)
+        let staged = transactionDirectory.appendingPathComponent("default")
+        let hadDefault = Self.pathExists(defaultKernelPath)
         try FileManager.default.createSymbolicLink(at: staged, withDestinationURL: kernelPath)
-        guard rename(staged.path, defaultKernelPath.path) == 0 else {
-            try? FileManager.default.removeItem(at: staged)
-            throw ContainerizationError(
-                .internalError,
-                message: "could not switch the default kernel: \(String(cString: strerror(errno)))")
+        try Self.syncDirectory(transactionDirectory)
+        try installHooks.beforeDefaultCommit?()
+
+        if hadDefault {
+            try Self.swap(staged, defaultKernelPath, operation: "switch the default kernel")
+        } else {
+            try Self.rename(staged, defaultKernelPath, operation: "publish the default kernel")
+        }
+        do {
+            try syncKernelDirectory()
+        } catch {
+            do {
+                if hadDefault {
+                    try Self.swap(staged, defaultKernelPath, operation: "roll back the default kernel")
+                } else if Self.pathExists(defaultKernelPath) {
+                    try FileManager.default.removeItem(at: defaultKernelPath)
+                }
+                try Self.syncDirectory(kernelDirectory)
+            } catch {
+                throw RollbackUncertain(cause: error)
+            }
+            throw error
         }
     }
 
