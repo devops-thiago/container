@@ -129,6 +129,7 @@ public actor HostDirectoryGrants {
     /// command looks hung when nobody is at the keyboard. Callers reaching the engine over XPC
     /// must allow more than this, or their own timeout fires first and reports nothing useful.
     public func request(_ path: String) async -> GrantOutcome {
+        if Task.isCancelled { return .declined }
         if covers(path) { return .granted }
         guard var endpoint = InstanceEndpoints.endpoint(label: Self.vendorLabel) else {
             log?.warning(
@@ -136,21 +137,22 @@ public actor HostDirectoryGrants {
             return .noEmbedder
         }
 
-        // One retry, because the first endpoint can be a dead one. The label holds whoever
-        // announced last, and an embedder that exited — or was displaced by a second process
-        // using the same kit — leaves an entry that dials nothing. The live embedder re-announces
-        // on a heartbeat, so waiting slightly longer than one heartbeat turns what would have
-        // been a failed command into a panel a moment later.
+        let requestID = UUID().uuidString
+        // One retry, because the first endpoint can be a dead one. Both attempts remain the same
+        // identified caller request; closing either per-request connection cancels only its
+        // matching app-side route and panel.
         for attempt in 0...1 {
-            let outcome = await ask(path, at: endpoint)
-            guard case .noEmbedder = outcome, attempt == 0 else { return outcome }
+            let outcome = await ask(path, requestID: requestID, at: endpoint)
+            guard case .noEmbedder = outcome, attempt == 0, !Task.isCancelled else {
+                return outcome
+            }
             guard
                 let fresh = await InstanceEndpoints.endpoint(
                     label: Self.vendorLabel, timeout: Self.reannounceGrace)
             else {
                 log?.warning(
                     "no embedder re-announced after a dead grant endpoint",
-                    metadata: ["path": "\(path)"])
+                    metadata: ["path": "\(path)", "request": "\(requestID)"])
                 return .noEmbedder
             }
             endpoint = fresh
@@ -162,48 +164,100 @@ public actor HostDirectoryGrants {
     /// chance to take the label back before this gives up.
     private static let reannounceGrace: Duration = .seconds(45)
 
-    private func ask(_ path: String, at endpoint: xpc_endpoint_t) async -> GrantOutcome {
+    /// The small transport surface lets cancellation be tested without wall-clock waits while
+    /// production still uses one fresh XPC connection per grant request.
+    struct RequestTransport: Sendable {
+        let send: @Sendable (XPCMessage, Duration) async throws -> XPCMessage
+        let close: @Sendable () -> Void
+    }
 
-        let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
+    static func send(
+        _ message: XPCMessage,
+        timeout: Duration,
+        over transport: RequestTransport
+    ) async throws -> XPCMessage {
+        try await withTaskCancellationHandler {
+            try await transport.send(message, timeout)
+        } onCancel: {
+            // This connection belongs to exactly one request. Closing it propagates caller loss
+            // to XPCServer, which cancels the one app route presenting this request's panel.
+            transport.close()
+        }
+    }
+
+    static func requestMessage(
+        path: String,
+        requestID: String,
+        patience: Duration,
+        ownerToken: String?
+    ) -> XPCMessage {
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
         message.set(key: XPCKeys.hostDirectoryPath.rawValue, value: path)
-        // The panel outlives nobody: the embedder is told how long this side waits, so the
-        // panel comes down when the command that asked has already given up, and an approval
-        // after that is not kept for a request that no longer exists.
         message.set(
             key: XPCKeys.hostDirectoryDeadlineSeconds.rawValue,
-            value: Int64(XPCClient.hostDirectoryPanelPatience.components.seconds))
-        message.set(key: XPCKeys.hostDirectoryRequestID.rawValue, value: UUID().uuidString)
-        // The trust decision on the embedder's side of this call: its listener answers only
-        // a caller that presents the token it published its endpoint with. We hold that token
-        // because we are the broker it was published to; nobody else was given the endpoint
-        // (resolve refuses it), and nobody else knows the token.
-        if let token = InstanceEndpoints.owner(label: Self.vendorLabel) {
-            message.set(key: InstanceAttach.tokenKey, value: token)
+            value: Int64(patience.components.seconds))
+        message.set(key: XPCKeys.hostDirectoryRequestID.rawValue, value: requestID)
+        if let ownerToken {
+            message.set(key: InstanceAttach.tokenKey, value: ownerToken)
         }
+        return message
+    }
+
+    private func ask(
+        _ path: String,
+        requestID: String,
+        at endpoint: xpc_endpoint_t
+    ) async -> GrantOutcome {
+        let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
+        let transport = RequestTransport(
+            send: { message, timeout in
+                try await client.send(message, responseTimeout: timeout)
+            },
+            close: { client.close() })
+        // The timeout winner also tears down remote work; XPCClient's timeout alone only resumes
+        // its local continuation and otherwise leaves the app panel eligible to answer later.
+        defer { transport.close() }
+
+        let message = Self.requestMessage(
+            path: path,
+            requestID: requestID,
+            patience: XPCClient.hostDirectoryPanelPatience,
+            ownerToken: InstanceEndpoints.owner(label: Self.vendorLabel))
         do {
-            let reply = try await client.send(message, responseTimeout: XPCClient.hostDirectoryPanelPatience)
+            let reply = try await Self.send(
+                message, timeout: XPCClient.hostDirectoryPanelPatience, over: transport)
+            guard !Task.isCancelled else { return .declined }
             guard let bookmark = reply.dataNoCopy(key: XPCKeys.hostDirectoryBookmarks.rawValue)
             else {
-                log?.info("embedder declined host directory", metadata: ["path": "\(path)"])
+                log?.info(
+                    "embedder declined host directory",
+                    metadata: ["path": "\(path)", "request": "\(requestID)"])
                 return .declined
             }
             let opened = publish(bookmarks: [Data(bookmark)]) > 0 && covers(path)
             return opened ? .granted : .declined
         } catch {
-            // A dead endpoint and a person who never answered are different, and the endpoint
-            // table cannot tell them apart on its own: an embedder that exits, or one that is
-            // displaced by a second process announcing the same label, leaves an entry here that
-            // dials into nothing. Every later request would fail the same way, for the life of
-            // this engine, because whoever is still listening has no reason to announce again.
-            //
-            // So drop the entry and report it as nobody to ask. The caller waits out one
-            // heartbeat and tries whatever announced in the meantime, which is usually the
-            // embedder that was there the whole time.
+            // Caller cancellation is not a dead embedder and must never enter the reannounce
+            // path. The cancellation handler above has already closed the nested connection,
+            // which cancels the matching app request and makes every later panel answer inert.
+            if Task.isCancelled {
+                log?.info(
+                    "host directory request cancelled",
+                    metadata: ["path": "\(path)", "request": "\(requestID)"])
+                return .declined
+            }
+
+            // A dead endpoint and a person who never answered are different. Drop only a truly
+            // invalid endpoint and give the signed app one heartbeat to reannounce.
             let dead = "\(error)".contains("Connection invalid")
             log?.error(
                 "asking the embedder for a host directory failed",
-                metadata: ["path": "\(path)", "error": "\(error)", "endpointDropped": "\(dead)"])
+                metadata: [
+                    "path": "\(path)",
+                    "request": "\(requestID)",
+                    "error": "\(error)",
+                    "endpointDropped": "\(dead)",
+                ])
             if dead {
                 InstanceEndpoints.remove(label: Self.vendorLabel)
                 return .noEmbedder

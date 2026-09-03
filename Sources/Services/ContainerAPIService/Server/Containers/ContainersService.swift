@@ -32,6 +32,8 @@ import Foundation
 import Logging
 import SystemPackage
 
+private struct IncarnationMigrationFailure: Error {}
+
 public actor ContainersService {
     struct ContainerState {
         var snapshot: ContainerSnapshot
@@ -58,6 +60,8 @@ public actor ContainersService {
     private let containerSystemConfig: ContainerSystemConfig
 
     private static let hostDirectoryBookmarksFilename = "host-directory-bookmarks.json"
+    /// Persisted beside, but never inside, the user-supplied container configuration.
+    private static let incarnationFilename = "incarnation"
 
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
@@ -137,9 +141,22 @@ public actor ContainersService {
                 }
 
                 let exit = ContainerResource.Bundle(path: dir).exitStatus
+                let incarnation: String
+                do {
+                    incarnation = try Self.loadOrCreateIncarnation(at: dir)
+                } catch {
+                    // A legacy bundle that cannot persist its new identity is still valid
+                    // user data. Abort startup rather than letting the corruption cleanup
+                    // below erase it.
+                    log.error(
+                        "failed to persist container incarnation",
+                        metadata: ["path": "\(dir.path)", "error": "\(error)"])
+                    throw IncarnationMigrationFailure()
+                }
                 let state = ContainerState(
                     snapshot: .init(
                         configuration: config,
+                        incarnation: incarnation,
                         status: .stopped,
                         networks: [],
                         startedDate: nil,
@@ -154,6 +171,10 @@ public actor ContainersService {
                         message: "failed to find runtime plugin \(config.runtimeHandler)"
                     )
                 }
+            } catch is IncarnationMigrationFailure {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "failed to persist an immutable identity for container at \(dir.path)")
             } catch {
                 let loadError = error
                 do {
@@ -284,10 +305,11 @@ public actor ContainersService {
     /// - Parameter hostDirectoryBookmarks: grants for host directories this container
     ///   bind-mounts, made by a sandboxed embedder. Persisted with the container and resolved
     ///   only after every throwing create operation, so failed creates cannot retain access.
+    @discardableResult
     public func create(
         configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil,
-        hostDirectoryBookmarks: [Data] = []
-    ) async throws {
+        hostDirectoryBookmarks: [Data] = [], incarnation requestedIncarnation: String? = nil
+    ) async throws -> String {
         log.debug(
             "ContainersService: enter",
             metadata: [
@@ -305,7 +327,7 @@ public actor ContainersService {
             )
         }
 
-        try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(configuration.id)"]) { context in
+        return try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(configuration.id)"]) { context in
             guard await self.containers[configuration.id] == nil else {
                 throw ContainerizationError(
                     .exists,
@@ -407,10 +429,13 @@ public actor ContainersService {
 
                 try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
                 try runtimeConfig.writeRuntimeConfiguration()
+                let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
+                try Self.persistIncarnation(incarnation, at: path)
                 try Self.persistHostDirectoryBookmarks(requiredHostDirectoryBookmarks, at: path)
 
                 let snapshot = ContainerSnapshot(
                     configuration: configuration,
+                    incarnation: incarnation,
                     status: .stopped,
                     networks: [],
                     startedDate: nil
@@ -426,6 +451,7 @@ public actor ContainersService {
                     )
                 }
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
+                return incarnation
             } catch {
                 try? FileManager.default.removeItem(at: path)
                 throw error
@@ -500,9 +526,13 @@ public actor ContainersService {
                 let runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
                 try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
 
+                let incarnation = state.snapshot.incarnation
                 try await self.exitMonitor.registerProcess(
                     id: id,
-                    onExit: self.handleContainerExit
+                    onExit: { [self] exitedID, code in
+                        try await handleContainerExit(
+                            id: exitedID, code: code, expectedIncarnation: incarnation)
+                    }
                 )
 
                 state.client = runtimeClient
@@ -652,9 +682,11 @@ public actor ContainersService {
 
         // SIGKILL is guaranteed to terminate the target. When directed at the
         // container's init process, follow up with the same API-server cleanup
-        // that `stop` performs.
+        // that `stop` performs. The captured incarnation keeps an old kill completion from
+        // stopping a replacement that reused the ID.
         if processID == id, (try? Signal(signal)) == .kill {
-            try await handleContainerExit(id: id)
+            try await handleContainerExit(
+                id: id, expectedIncarnation: state.snapshot.incarnation)
         }
     }
 
@@ -664,7 +696,8 @@ public actor ContainersService {
         id: String,
         options: ContainerStopOptions,
         responseTimeout: Duration? = nil,
-        requiredLabels: [String: String]? = nil
+        requiredLabels: [String: String]? = nil,
+        expectedIncarnation: String? = nil
     ) async throws {
         log.debug(
             "ContainersService: enter",
@@ -685,10 +718,20 @@ public actor ContainersService {
 
         let clock = ContinuousClock()
         let responseDeadline = responseTimeout.map { clock.now.advanced(by: $0) }
-        let state = try self._getContainerState(id: id)
-        try Self.require(requiredLabels, on: state, id: id)
+        let state = try await self.lock.withLock(
+            logMetadata: ["acquirer": "\(#function)-precondition", "id": "\(id)"]
+        ) { context in
+            let state = try await self.getContainerState(id: id, context: context)
+            try Self.require(
+                labels: requiredLabels,
+                incarnation: expectedIncarnation,
+                on: state,
+                id: id)
+            return state
+        }
         // From here the stop goes through this state's own runtime client, not through the
-        // ID again, so what is stopped is what was just checked.
+        // ID again, so what is stopped is what was just checked. Post-stop cleanup carries
+        // this state's generated incarnation and refuses a same-ID replacement.
 
         // Stop should be idempotent.
         let client: RuntimeClient
@@ -716,7 +759,8 @@ public actor ContainersService {
         try await handleContainerExit(
             id: id,
             code: nil,
-            responseTimeout: remainingResponseTimeout
+            responseTimeout: remainingResponseTimeout,
+            expectedIncarnation: state.snapshot.incarnation
         )
     }
 
@@ -885,36 +929,60 @@ public actor ContainersService {
         return try await client.statistics()
     }
 
-    /// Whether `state` carries every label in `required`. The precondition a caller attaches
-    /// when it validated a container by ID and must not act on whatever else that ID names by
-    /// the time the action runs — a k8s node's delete, for one.
+    /// Whether `state` carries every label in `required`. Labels express ownership policy;
+    /// they deliberately do not identify one creation of an ID.
     static func labelsSatisfied(required: [String: String]?, actual: [String: String]) -> Bool {
         guard let required else { return true }
         return required.allSatisfy { actual[$0.key] == $0.value }
     }
 
-    /// The second check, under the lock and against the table as it is now: a delete that
-    /// validated the ID a moment ago must not remove whatever the ID names by the time the
-    /// lock is held.
-    private func requireStillLabelled(id: String, _ required: [String: String]?) throws {
-        try Self.require(required, on: try self._getContainerState(id: id), id: id)
+    /// Exact-object precondition used by destructive operations and exit processing.
+    static func incarnationSatisfied(expected: String?, actual: String) -> Bool {
+        guard let expected else { return true }
+        return !expected.isEmpty && expected == actual
     }
 
-    private static func require(_ required: [String: String]?, on state: ContainerState, id: String) throws {
-        guard labelsSatisfied(required: required, actual: state.snapshot.configuration.labels) else {
+    /// The second check, under the lock and against the table as it is now.
+    private func requireStillCurrent(
+        id: String,
+        labels: [String: String]?,
+        incarnation: String?
+    ) throws {
+        try Self.require(
+            labels: labels,
+            incarnation: incarnation,
+            on: try self._getContainerState(id: id),
+            id: id)
+    }
+
+    private static func require(
+        labels: [String: String]?,
+        incarnation: String?,
+        on state: ContainerState,
+        id: String
+    ) throws {
+        guard labelsSatisfied(required: labels, actual: state.snapshot.configuration.labels) else {
             throw ContainerizationError(
                 .invalidArgument,
                 message: "container \(id) does not carry the labels this operation requires")
+        }
+        guard incarnationSatisfied(expected: incarnation, actual: state.snapshot.incarnation) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "container \(id) is not the incarnation this operation observed")
         }
     }
 
     /// Delete a container and its resources.
     ///
-    /// - Parameter requiredLabels: labels the container must carry, checked once up front and
-    ///   again under the lock immediately before removal. Between a caller's own lookup and
-    ///   this call the ID can come to name a different container; the second check is what
-    ///   keeps that one alive.
-    public func delete(id: String, force: Bool, requiredLabels: [String: String]? = nil) async throws {
+    /// Ownership labels and exact incarnation are checked up front and under the lock
+    /// immediately before removal.
+    public func delete(
+        id: String,
+        force: Bool,
+        requiredLabels: [String: String]? = nil,
+        expectedIncarnation: String? = nil
+    ) async throws {
         log.info(
             "ContainersService: enter",
             metadata: [
@@ -933,8 +1001,17 @@ public actor ContainersService {
             )
         }
 
-        let state = try self._getContainerState(id: id)
-        try Self.require(requiredLabels, on: state, id: id)
+        let state = try await self.lock.withLock(
+            logMetadata: ["acquirer": "\(#function)-precondition", "id": "\(id)"]
+        ) { context in
+            let state = try await self.getContainerState(id: id, context: context)
+            try Self.require(
+                labels: requiredLabels,
+                incarnation: expectedIncarnation,
+                on: state,
+                id: id)
+            return state
+        }
         switch state.snapshot.status {
         case .running:
             if !force {
@@ -957,7 +1034,10 @@ public actor ContainersService {
                         "id": "\(id)",
                     ]
                 )
-                try await self.requireStillLabelled(id: id, requiredLabels)
+                try await self.requireStillCurrent(
+                    id: id,
+                    labels: requiredLabels,
+                    incarnation: state.snapshot.incarnation)
                 try await self.cleanUp(id: id, context: context)
                 self.log.info(
                     "ContainersService: successful cleanup",
@@ -974,7 +1054,10 @@ public actor ContainersService {
             )
         default:
             try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
-                try await self.requireStillLabelled(id: id, requiredLabels)
+                try await self.requireStillCurrent(
+                    id: id,
+                    labels: requiredLabels,
+                    incarnation: state.snapshot.incarnation)
                 try await self.cleanUp(id: id, context: context)
             }
         }
@@ -1025,20 +1108,30 @@ public actor ContainersService {
         }
     }
 
-    private func handleContainerExit(id: String, code: ExitStatus? = nil) async throws {
-        try await handleContainerExit(id: id, code: code, responseTimeout: nil)
+    private func handleContainerExit(
+        id: String,
+        code: ExitStatus? = nil,
+        expectedIncarnation: String
+    ) async throws {
+        try await handleContainerExit(
+            id: id,
+            code: code,
+            responseTimeout: nil,
+            expectedIncarnation: expectedIncarnation)
     }
 
     private func handleContainerExit(
         id: String,
         code: ExitStatus?,
-        responseTimeout: Duration?
+        responseTimeout: Duration?,
+        expectedIncarnation: String
     ) async throws {
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { [self] context in
             try await handleContainerExit(
                 id: id,
                 code: code,
                 responseTimeout: responseTimeout,
+                expectedIncarnation: expectedIncarnation,
                 context: context
             )
         }
@@ -1048,6 +1141,7 @@ public actor ContainersService {
         id: String,
         code: ExitStatus?,
         responseTimeout: Duration?,
+        expectedIncarnation: String,
         context: AsyncLock.Context
     ) async throws {
         if let code {
@@ -1062,6 +1156,10 @@ public actor ContainersService {
         var state: ContainerState
         do {
             state = try self.getContainerState(id: id, context: context)
+            // Exit callbacks and explicit stop completions are tied to the runtime they
+            // observed. A replacement can reuse the ID while either awaits, but it must not
+            // be stopped, deregistered, or auto-removed by the predecessor's completion.
+            guard state.snapshot.incarnation == expectedIncarnation else { return }
             if state.snapshot.status == .stopped {
                 return
             }
@@ -1221,6 +1319,27 @@ public actor ContainersService {
 
     private func cleanUp(id: String, context: AsyncLock.Context) async throws {
         try await self._cleanUp(id: id)
+    }
+
+    private static func persistIncarnation(_ incarnation: String, at path: URL) throws {
+        let destination = path.appendingPathComponent(Self.incarnationFilename)
+        try Data(incarnation.utf8).write(to: destination, options: .atomic)
+    }
+
+    static func loadOrCreateIncarnation(at path: URL) throws -> String {
+        let source = path.appendingPathComponent(Self.incarnationFilename)
+        if let data = try? Data(contentsOf: source),
+            let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            UUID(uuidString: value) != nil
+        {
+            return value.lowercased()
+        }
+        // Migration for bundles created before incarnation preconditions existed. The token
+        // is generated by the engine and persisted outside configuration, so labels cannot
+        // forge it and the same container keeps its identity across API-server restarts.
+        let value = UUID().uuidString.lowercased()
+        try persistIncarnation(value, at: path)
+        return value
     }
 
     private static func persistHostDirectoryBookmarks(_ bookmarks: [Data], at path: URL) throws {

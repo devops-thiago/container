@@ -42,7 +42,38 @@ public struct ContainerClient: Sendable {
         message: XPCMessage,
         timeout: Duration? = XPCClient.xpcRegistrationTimeout
     ) async throws -> XPCMessage {
-        try await xpcClient.send(message, responseTimeout: timeout)
+        guard timeout == Self.grantAwareTimeout else {
+            return try await xpcClient.send(message, responseTimeout: timeout)
+        }
+
+        // A grant-capable operation owns its connection. Local task cancellation can therefore
+        // close exactly this request without disrupting other calls on the reusable client; the
+        // API server observes that connection loss and cancels HostDirectoryGrants in turn.
+        let client = XPCClient(service: Self.serviceIdentifier)
+        let transport = GrantAwareTransport(
+            send: { message, timeout in
+                try await client.send(message, responseTimeout: timeout)
+            },
+            close: { client.close() })
+        defer { transport.close() }
+        return try await Self.sendGrantAware(message, timeout: Self.grantAwareTimeout, over: transport)
+    }
+
+    struct GrantAwareTransport: Sendable {
+        let send: @Sendable (XPCMessage, Duration) async throws -> XPCMessage
+        let close: @Sendable () -> Void
+    }
+
+    static func sendGrantAware(
+        _ message: XPCMessage,
+        timeout: Duration,
+        over transport: GrantAwareTransport
+    ) async throws -> XPCMessage {
+        try await withTaskCancellationHandler {
+            try await transport.send(message, timeout)
+        } onCancel: {
+            transport.close()
+        }
     }
 
     /// For calls that can end up waiting on a permission panel.
@@ -57,16 +88,19 @@ public struct ContainerClient: Sendable {
     /// - Parameter hostDirectoryBookmarks: bookmarks for host directories this container
     ///   will bind-mount, made by a sandboxed embedder for folders its user chose. Empty for
     ///   an unsandboxed engine, which opens paths without needing a grant.
+    @discardableResult
     public func create(
         configuration: ContainerConfiguration,
         options: ContainerCreateOptions = .default,
         kernel: Kernel,
         initImage: String? = nil,
         runtimeData: Data? = nil,
-        hostDirectoryBookmarks: [Data] = []
-    ) async throws {
+        hostDirectoryBookmarks: [Data] = [],
+        incarnation requestedIncarnation: String? = nil
+    ) async throws -> String {
         do {
             let request = XPCMessage(route: .containerCreate)
+            let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
 
             let data = try JSONEncoder().encode(configuration)
             let kdata = try JSONEncoder().encode(kernel)
@@ -92,7 +126,16 @@ public struct ContainerClient: Sendable {
                     value: try JSONEncoder().encode(hostDirectoryBookmarks))
             }
 
-            try await xpcSend(message: request, timeout: Self.grantAwareTimeout)
+            request.set(key: .expectedIncarnation, value: incarnation)
+            let response = try await xpcSend(message: request, timeout: Self.grantAwareTimeout)
+            guard let returnedIncarnation = response.string(key: .expectedIncarnation),
+                returnedIncarnation == incarnation
+            else {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "container create did not confirm its requested incarnation")
+            }
+            return incarnation
         } catch let error as ContainerizationError {
             throw error
         } catch {
@@ -217,14 +260,16 @@ public struct ContainerClient: Sendable {
     }
 
     /// Stop the container and all processes currently executing inside.
-    /// - Parameter requiredLabels: labels the container must carry, checked by the service
-    ///   against the object it is about to act on. A caller that validated a container by
-    ///   ID and then stops it by ID has otherwise no proof the ID still names the same
-    ///   thing; with this, an ordinary container that took the ID in between is refused.
+    /// - Parameters:
+    ///   - requiredLabels: labels the container must carry. This is an ownership-policy
+    ///     precondition; use `expectedIncarnation` when the exact observed object matters.
+    ///   - expectedIncarnation: opaque identity returned in `ContainerSnapshot`. The service
+    ///     checks it against the object it acts on and again during post-stop cleanup.
     public func stop(
         id: String,
         opts: ContainerStopOptions = ContainerStopOptions.default,
-        requiredLabels: [String: String]? = nil
+        requiredLabels: [String: String]? = nil,
+        expectedIncarnation: String? = nil
     ) async throws {
         do {
             let request = XPCMessage(route: .containerStop)
@@ -234,8 +279,13 @@ public struct ContainerClient: Sendable {
             if let requiredLabels {
                 request.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
             }
+            if let expectedIncarnation {
+                request.set(key: .expectedIncarnation, value: expectedIncarnation)
+            }
 
             try await xpcClient.send(request)
+        } catch let error as ContainerizationError {
+            throw error
         } catch {
             throw ContainerizationError(
                 .internalError,
@@ -246,10 +296,14 @@ public struct ContainerClient: Sendable {
     }
 
     /// Delete the container along with any resources.
-    /// - Parameter requiredLabels: see `stop(id:opts:requiredLabels:)`. The service checks
-    ///   them again under its lock right before removal, so a same-ID replacement that lost
-    ///   the labels survives.
-    public func delete(id: String, force: Bool = false, requiredLabels: [String: String]? = nil) async throws {
+    ///
+    /// Both preconditions are checked under the service lock immediately before removal.
+    public func delete(
+        id: String,
+        force: Bool = false,
+        requiredLabels: [String: String]? = nil,
+        expectedIncarnation: String? = nil
+    ) async throws {
         do {
             let request = XPCMessage(route: .containerDelete)
             request.set(key: .id, value: id)
@@ -257,7 +311,12 @@ public struct ContainerClient: Sendable {
             if let requiredLabels {
                 request.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
             }
+            if let expectedIncarnation {
+                request.set(key: .expectedIncarnation, value: expectedIncarnation)
+            }
             try await xpcClient.send(request)
+        } catch let error as ContainerizationError {
+            throw error
         } catch {
             throw ContainerizationError(
                 .internalError,

@@ -65,6 +65,17 @@ extension APIServer {
         }
 
         func run() async throws {
+            if let lifecycleGeneration,
+                try APIServerShutdownTombstoneStore.load(
+                    appRoot: URL(fileURLWithPath: appRoot.string),
+                    lifecycleGeneration: lifecycleGeneration
+                ) != nil
+            {
+                throw ValidationError(
+                    "API-server lifecycle generation \(lifecycleGeneration) has been shut down and cannot restart"
+                )
+            }
+
             let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
             let commandName = APIServer._commandName
             let logPath = logRoot.map { $0.appending(FilePath.Component("\(commandName).log") ?? "unknown") }
@@ -114,25 +125,16 @@ extension APIServer {
                 // no launchd mach name.
                 if ServiceIdentity.appGroup != nil {
                     let attachHarness = InstanceAttachHarness(log: log)
-                    routes[XPCRoute.runtimeAttach] = XPCServer.route(attachHarness.attach)
+                    routes[XPCRoute.runtimeAttach] = attachHarness.attach
                     routes[XPCRoute.runtimeResolve] = XPCServer.route(attachHarness.resolve)
 
-                    // The embedder pushing folders its user granted. Same table as the attach
-                    // routes above, because the embedder's grant listener is announced through
-                    // them: it can own no mach name either (S7a).
+                    // The listener announcement and the bulk hand-off are both authenticated
+                    // from their received XPC message's signing identity. This remains
+                    // route-local: spawned helpers still use the shared listener and inherited
+                    // owner token without pretending to be the host app.
                     await HostDirectoryGrants.shared.configure(log: log)
-                    routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route {
-                        (message: XPCMessage) async throws -> XPCMessage in
-                        guard
-                            let data = message.dataNoCopy(key: .hostDirectoryBookmarks),
-                            let bookmarks = try? JSONDecoder().decode([Data].self, from: data)
-                        else { return message.reply() }
-                        let kept = await HostDirectoryGrants.shared.publish(bookmarks: bookmarks)
-                        log.info(
-                            "embedder published host directory grants",
-                            metadata: ["sent": "\(bookmarks.count)", "kept": "\(kept)"])
-                        return message.reply()
-                    }
+                    let grantHarness = HostDirectoryGrantHarness(log: log)
+                    routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route(grantHarness.publish)
                 }
 
                 let containersService = try initializeContainersService(
@@ -189,6 +191,7 @@ extension APIServer {
                     let shutdownService = SystemShutdownService(
                         lifecycleGeneration: lifecycleGeneration,
                         processNonce: processNonce,
+                        appRoot: URL(fileURLWithPath: appRoot.string),
                         ownershipToken: ProcessInfo.processInfo.environment["CONTAINER_SILICONSHIP_OWNERSHIP_TOKEN"],
                         containersService: containersService,
                         pluginsService: pluginsService,

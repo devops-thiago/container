@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerXPC
 import ContainerizationError
 import Foundation
@@ -23,12 +24,11 @@ import XPC
 
 @testable import ContainerAPIService
 
-/// The broker's two routes, and the token that binds a label to whoever published it.
+/// The broker's routes, the authenticated fixed grant label, and helper-token compatibility.
+@Suite(.serialized)
 struct InstanceAttachHarnessTests {
     private let log = Logger(label: "attach-tests")
 
-    /// An endpoint the way every real publisher makes one: from an anonymous listener that
-    /// has a handler and is active. libxpc traps on an endpoint for a dormant connection.
     private func endpoint() -> xpc_endpoint_t {
         let listener = xpc_connection_create(nil, nil)
         xpc_connection_set_event_handler(listener) { _ in }
@@ -36,13 +36,36 @@ struct InstanceAttachHarnessTests {
         return xpc_endpoint_create(listener)
     }
 
-    /// The attach route's decision, as the route makes it once the envelope is parsed.
-    private func attach(_ label: String, token: String?, endpoint: xpc_endpoint_t? = nil, pid: pid_t = getpid()) throws {
+    private func attach(
+        _ label: String,
+        token: String?,
+        endpoint: xpc_endpoint_t? = nil,
+        peerPID: pid_t = getpid(),
+        authorizedPublisher: Bool = true
+    ) throws {
         try InstanceAttachHarness.record(
-            label: label, endpoint: endpoint ?? self.endpoint(), token: token, pid: pid, log: log)
+            label: label,
+            endpoint: endpoint ?? self.endpoint(),
+            token: token,
+            peerPID: peerPID,
+            authorizedPublisher: authorizedPublisher,
+            log: log)
     }
 
-    /// A pid that no longer exists: a child that has already exited and been reaped.
+    private func attachMessage(
+        _ label: String,
+        token: String,
+        payloadPID: pid_t,
+        endpoint: xpc_endpoint_t? = nil
+    ) -> XPCMessage {
+        let message = XPCMessage(route: InstanceAttach.route)
+        message.set(key: "id", value: label)
+        message.set(key: "endpoint", value: endpoint ?? self.endpoint())
+        message.set(key: "pid", value: Int64(payloadPID))
+        message.set(key: InstanceAttach.tokenKey, value: token)
+        return message
+    }
+
     private func deadPID() -> pid_t {
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
@@ -51,7 +74,6 @@ struct InstanceAttachHarnessTests {
         return child.processIdentifier
     }
 
-    /// The resolve route's decision.
     private func resolve(_ label: String, token: String?) throws -> xpc_endpoint_t? {
         try InstanceAttachHarness.lookup(label: label, token: token, log: log)
     }
@@ -67,94 +89,210 @@ struct InstanceAttachHarnessTests {
         #expect(InstanceEndpoints.endpoint(label: label) == nil)
     }
 
+    @Test("spawned helper labels retain inherited-token publication and reject same-user squatters")
+    func helperTokenFlowRemainsAvailable() throws {
+        let label = unique("runtime")
+        #expect(
+            InstanceAttachHarness.publisherAuthorized(
+                label: label,
+                token: "spawn-token",
+                hostAppVerified: false,
+                helperOwnerToken: "spawn-token"))
+        #expect(
+            !InstanceAttachHarness.publisherAuthorized(
+                label: label,
+                token: "attacker-token",
+                hostAppVerified: false,
+                helperOwnerToken: "spawn-token"))
+
+        let first = endpoint()
+        try attach(label, token: "spawn-token", endpoint: first)
+        #expect(try resolve(label, token: "spawn-token") != nil)
+
+        let replacement = endpoint()
+        try attach(label, token: "spawn-token", endpoint: replacement)
+        #expect(InstanceEndpoints.endpoint(label: label) === replacement)
+    }
+
     @Test("a label is owned by the token that first published it")
     func labelReplacementNeedsTheOwnersToken() throws {
         let label = unique("helper")
         let mine = endpoint()
         try attach(label, token: "owner-a", endpoint: mine)
 
-        // Same user, different process: it cannot take the label over.
         #expect(throws: ContainerizationError.self) {
             try attach(label, token: "owner-b")
         }
-        #expect(InstanceEndpoints.endpoint(label: label) === mine, "the original endpoint is still the one recorded")
+        #expect(InstanceEndpoints.endpoint(label: label) === mine)
         #expect(InstanceEndpoints.owner(label: label) == "owner-a")
 
-        // The owner re-announcing (a new listener after a restart) goes through.
         let replacement = endpoint()
         try attach(label, token: "owner-a", endpoint: replacement)
         #expect(InstanceEndpoints.endpoint(label: label) === replacement)
     }
 
+    @Test("the payload PID cannot make a live publisher look dead")
+    func payloadPIDIsNotPublisherIdentity() throws {
+        let label = unique("runtime")
+        let original = endpoint()
+        let forged = attachMessage(
+            label, token: "owner-a", payloadPID: deadPID(), endpoint: original)
+        try InstanceAttachHarness.record(
+            forged,
+            peerPID: getpid(),
+            authorizedPublisher: true,
+            log: log)
+
+        #expect(throws: ContainerizationError.self) {
+            try attach(label, token: "owner-b")
+        }
+        #expect(InstanceEndpoints.endpoint(label: label) === original)
+    }
+
     @Test("resolve hands an endpoint only to its owner")
     func resolveRequiresTheOwnersToken() throws {
         let label = unique("network")
-        let published = endpoint()
-        try attach(label, token: "boot-secret", endpoint: published)
+        try attach(label, token: "boot-secret")
 
-        #expect(throws: ContainerizationError.self, "no token") {
-            _ = try resolve(label, token: nil)
-        }
-        #expect(throws: ContainerizationError.self, "another process's token") {
+        #expect(throws: ContainerizationError.self) { _ = try resolve(label, token: nil) }
+        #expect(throws: ContainerizationError.self) {
             _ = try resolve(label, token: "not-the-secret")
         }
-        let served = try resolve(label, token: "boot-secret")
-        #expect(served != nil, "a sibling helper holding the same token is served")
+        #expect(try resolve(label, token: "boot-secret") != nil)
     }
 
-    @Test("an embedder's grant listener cannot be resolved or replaced by a same-user process")
+    @Test("a same-EUID hostile process cannot be the first grants-label publisher")
+    func hostileFirstGrantPublisherIsRefused() throws {
+        let label = HostDirectoryGrants.vendorLabel
+        InstanceEndpoints.remove(label: label)
+        defer { InstanceEndpoints.remove(label: label) }
+
+        #expect(throws: ContainerizationError.self) {
+            try attach(
+                label,
+                token: "attacker-chosen-token",
+                authorizedPublisher: false)
+        }
+        #expect(InstanceEndpoints.endpoint(label: label) == nil)
+
+        let authorized = endpoint()
+        try attach(
+            label,
+            token: "signed-app-token",
+            endpoint: authorized,
+            authorizedPublisher: true)
+        #expect(InstanceEndpoints.endpoint(label: label) === authorized)
+    }
+
+    @Test("an unauthorized process cannot replace the signed grants publisher")
+    func unauthorizedGrantReplacementIsRefused() throws {
+        let label = HostDirectoryGrants.vendorLabel
+        InstanceEndpoints.remove(label: label)
+        defer { InstanceEndpoints.remove(label: label) }
+        let original = endpoint()
+        try attach(
+            label,
+            token: "signed-app-token",
+            endpoint: original,
+            authorizedPublisher: true)
+
+        for token in ["signed-app-token", "attacker-token"] {
+            #expect(throws: ContainerizationError.self) {
+                try attach(
+                    label,
+                    token: token,
+                    authorizedPublisher: false)
+            }
+        }
+        #expect(InstanceEndpoints.endpoint(label: label) === original)
+    }
+
+    @Test("an embedder grant listener cannot be resolved by a same-user process")
     func embedderLabelIsPrivateToItsPublisher() throws {
-        // The embedder mints a token nobody else has and publishes its listener with it.
         let label = unique("grants")
         let embedderToken = UUID().uuidString
         try attach(label, token: embedderToken)
 
-        // A harness that only shares the user's EUID: neither the apiserver's own boot token
-        // nor a token of its choosing gets it the endpoint or the label.
         for token in ["apiserver-boot-token", "guess", ""] {
-            #expect(throws: ContainerizationError.self) {
-                _ = try resolve(label, token: token)
-            }
-            #expect(throws: ContainerizationError.self) {
-                try attach(label, token: token)
-            }
+            #expect(throws: ContainerizationError.self) { _ = try resolve(label, token: token) }
+            #expect(throws: ContainerizationError.self) { try attach(label, token: token) }
         }
         #expect(InstanceEndpoints.owner(label: label) == embedderToken)
     }
 
-    @Test("a label whose publisher has exited can be taken by a successor's token")
+    @Test("a label whose authenticated peer exited can be taken by a successor")
     func deadPublisherLabelIsTakenOver() throws {
         let label = unique("grants")
-        try attach(label, token: "old-app-token", pid: deadPID())
-        // The relaunched app, with the token every new process mints, publishes again.
+        try attach(label, token: "old-app-token", peerPID: deadPID())
         let successor = endpoint()
         try attach(label, token: "new-app-token", endpoint: successor)
         #expect(InstanceEndpoints.endpoint(label: label) === successor)
         #expect(InstanceEndpoints.owner(label: label) == "new-app-token")
     }
 
-    @Test("a label whose publisher is alive is not taken over by a different token")
+    @Test("a live peer's label is not taken by a different token")
     func livePublisherLabelIsKept() throws {
         let label = unique("grants")
         let mine = endpoint()
-        try attach(label, token: "live-app-token", endpoint: mine, pid: getpid())
+        try attach(label, token: "live-app-token", endpoint: mine)
         #expect(throws: ContainerizationError.self) {
-            try attach(label, token: "impostor", pid: getpid())
+            try attach(label, token: "impostor")
         }
         #expect(InstanceEndpoints.endpoint(label: label) === mine)
-        #expect(InstanceEndpoints.owner(label: label) == "live-app-token")
     }
 
-    @Test("a resolve for a label nobody published returns no endpoint rather than refusing")
+    @Test("bulk grants require both the signed app and current endpoint owner token")
+    func bulkGrantPublicationIsBoundToSignedOwner() {
+        let message = XPCMessage(route: XPCRoute.hostDirectoryGrantsPublish.rawValue)
+        message.set(key: InstanceAttach.tokenKey, value: "current-app-token")
+
+        #expect(
+            HostDirectoryGrantHarness.authorized(
+                message, peerIsHostApp: true, ownerToken: "current-app-token"))
+        #expect(
+            !HostDirectoryGrantHarness.authorized(
+                message, peerIsHostApp: false, ownerToken: "current-app-token"))
+        #expect(
+            !HostDirectoryGrantHarness.authorized(
+                message, peerIsHostApp: true, ownerToken: "replacement-token"))
+        #expect(
+            !HostDirectoryGrantHarness.authorized(
+                message, peerIsHostApp: true, ownerToken: nil))
+    }
+
+    @Test("host signing policy requires the exact bundle identifier and team")
+    func hostSigningPolicyIsExact() {
+        let expected = HostAppPeerIdentity.SigningIdentity(
+            identifier: "dev.thiagogonzaga.SiliconShip",
+            teamIdentifier: "TEAM123")
+        #expect(
+            HostAppPeerIdentity.matches(
+                expected,
+                expectedIdentifier: "dev.thiagogonzaga.SiliconShip",
+                expectedTeamIdentifier: "TEAM123"))
+        #expect(
+            !HostAppPeerIdentity.matches(
+                .init(identifier: expected.identifier, teamIdentifier: "ATTACKER"),
+                expectedIdentifier: expected.identifier,
+                expectedTeamIdentifier: expected.teamIdentifier))
+        #expect(
+            !HostAppPeerIdentity.matches(
+                .init(identifier: "dev.example.Impostor", teamIdentifier: expected.teamIdentifier),
+                expectedIdentifier: expected.identifier,
+                expectedTeamIdentifier: expected.teamIdentifier))
+    }
+
+    @Test("a resolve for an unknown label returns no endpoint")
     func unknownLabelResolvesToNothing() throws {
-        let served = try resolve(unique("nobody"), token: "any")
-        #expect(served == nil)
+        #expect(try resolve(unique("nobody"), token: "any") == nil)
     }
 
     @Test("the process token is stable, private and unguessable in shape")
     func ownerTokenShape() {
         let token = InstanceAttach.ownerToken
-        #expect(token == InstanceAttach.ownerToken, "one token per process")
-        #expect(token.count == 64 || ProcessInfo.processInfo.environment[InstanceAttach.tokenEnvironmentName] != nil)
+        #expect(token == InstanceAttach.ownerToken)
+        #expect(
+            token.count == 64
+                || ProcessInfo.processInfo.environment[InstanceAttach.tokenEnvironmentName] != nil)
     }
 }

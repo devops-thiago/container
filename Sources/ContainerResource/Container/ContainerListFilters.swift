@@ -53,22 +53,20 @@ extension ContainerListFilters {
         return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
     }
 
-    /// The plugins whose containers are infrastructure the engine manages for the user —
-    /// a machine's VM, a Kubernetes node — and which generic container operations must
-    /// neither list nor touch. One list, so every screen and every prune excludes the same
-    /// things; the plugin's own screen manages them through its own path.
-    public static let infrastructurePlugins: [String] = ["machine", "k8s"]
-
-    /// Whether a container carrying `labels` is engine-managed infrastructure.
+    /// Whether a container carrying `labels` is engine/plugin-managed infrastructure.
+    ///
+    /// The plugin metadata is the ownership boundary. Enumerating today's plugins here made
+    /// every new shipped plugin briefly visible to generic delete/prune until the app learned
+    /// its name. A user can hide their own container by setting this reserved key, but cannot
+    /// gain mutation authority over another container; exact authority is its incarnation.
     public static func isInfrastructure(labels: [String: String]) -> Bool {
         guard let plugin = labels[ResourceLabelKeys.plugin] else { return false }
-        return infrastructurePlugins.contains(plugin)
+        return !plugin.isEmpty
     }
 
-    /// Exclude every infrastructure plugin's containers, not only machines.
+    /// Exclude every plugin-owned container, including plugins added after this client ships.
     public func withoutInfrastructure() -> ContainerListFilters {
-        let pattern = "^(?!(" + Self.infrastructurePlugins.joined(separator: "|") + ")$)"
-        let labels = self.labels.merging([ResourceLabelKeys.plugin: pattern]) { _, new in new }
+        let labels = self.labels.merging([ResourceLabelKeys.plugin: "^$"]) { _, new in new }
         return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
     }
 }

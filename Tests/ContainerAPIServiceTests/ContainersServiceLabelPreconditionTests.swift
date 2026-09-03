@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import Testing
 
 @testable import ContainerAPIService
@@ -41,5 +42,26 @@ struct ContainersServiceLabelPreconditionTests {
         // The replacement scenario: the ID validated as a node now names a plain container.
         let ordinary = ["app": "web"]
         #expect(!ContainersService.labelsSatisfied(required: ["com.apple.container.plugin": "k8s"], actual: ordinary))
+    }
+
+    @Test func incarnationSelectsOneCreationEvenWhenLabelsAndIDMatch() {
+        #expect(ContainersService.incarnationSatisfied(expected: nil, actual: "current"))
+        #expect(ContainersService.incarnationSatisfied(expected: "current", actual: "current"))
+        #expect(!ContainersService.incarnationSatisfied(expected: "old", actual: "replacement"))
+        #expect(!ContainersService.incarnationSatisfied(expected: "", actual: "replacement"))
+    }
+
+    @Test func generatedIncarnationPersistsOutsideConfiguration() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("container-incarnation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let generated = try ContainersService.loadOrCreateIncarnation(at: directory)
+        #expect(UUID(uuidString: generated) != nil)
+        #expect(try ContainersService.loadOrCreateIncarnation(at: directory) == generated)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: directory.appendingPathComponent("incarnation").path))
     }
 }

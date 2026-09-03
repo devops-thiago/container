@@ -5,7 +5,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//   https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -146,6 +146,14 @@ extension Application {
         ) async throws {
             let client = XPCClient(service: Self.apiServerService)
             let session = client.openSession()
+            let expectedTombstone = APIServerShutdownTombstone(
+                lifecycleGeneration: expectedLifecycleGeneration,
+                processNonce: expectedProcessNonce,
+                pid: expectedPID,
+                processStartSeconds: expectedStartSeconds,
+                processStartMicroseconds: expectedStartMicroseconds
+            )
+            let appRoot: URL
 
             do {
                 let health = try await ClientHealthCheck.ping(session: session, timeout: .seconds(5))
@@ -171,6 +179,7 @@ extension Application {
                     expectedSeconds: expectedStartSeconds,
                     expectedMicroseconds: expectedStartMicroseconds
                 )
+                appRoot = health.appRoot
 
                 log.info(
                     "requesting generation-aware API-server shutdown",
@@ -187,6 +196,24 @@ extension Application {
                     confirmedTakeover: confirmedTakeover,
                     timeout: .seconds(60)
                 )
+
+                guard
+                    let committedTombstone = try APIServerShutdownTombstoneStore.load(
+                        appRoot: appRoot,
+                        lifecycleGeneration: expectedLifecycleGeneration
+                    )
+                else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "API-server shutdown was acknowledged without a committed shutdown tombstone"
+                    )
+                }
+                guard committedTombstone == expectedTombstone else {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message: "committed API-server shutdown tombstone does not match the expected process identity"
+                    )
+                }
             } catch {
                 session.close()
                 throw error
@@ -194,35 +221,90 @@ extension Application {
 
             session.close()
 
+            let tombstoneURL = try APIServerShutdownTombstoneStore.tombstoneURL(
+                appRoot: appRoot,
+                lifecycleGeneration: expectedLifecycleGeneration
+            )
             let clock = ContinuousClock()
             let disappearanceDeadline = clock.now.advanced(
                 by: .seconds(Int64(Self.shutdownTimeoutSeconds))
             )
-            guard let domainTimeout = Self.launchctlTimeout(until: disappearanceDeadline) else {
-                throw ContainerizationError(.invalidState, message: "API-server disappearance deadline expired")
-            }
-            let domain = try ServiceManager.getDomainString(timeout: domainTimeout)
             let jobLabel = PluginLoader.generationQualifiedLabel(
                 Self.apiServerService,
                 lifecycleGeneration: expectedLifecycleGeneration
             )
-            let fullLabel = "\(domain)/\(jobLabel)"
-            while let probeTimeout = Self.launchctlTimeout(until: disappearanceDeadline) {
-                if try !ServiceManager.isRegistered(
-                    fullServiceLabel: fullLabel,
-                    timeout: probeTimeout
-                ) {
-                    return
+            var fullLabel: String?
+            var attempt = 0
+            var lastError: (any Error)?
+            while let operationTimeout = Self.launchctlTimeout(until: disappearanceDeadline) {
+                if fullLabel == nil {
+                    do {
+                        let domain = try ServiceManager.getDomainString(timeout: operationTimeout)
+                        fullLabel = "\(domain)/\(jobLabel)"
+                    } catch {
+                        lastError = error
+                        guard let remaining = Self.remainingDuration(until: disappearanceDeadline) else {
+                            break
+                        }
+                        do {
+                            try await Task.sleep(for: min(remaining, .milliseconds(100)))
+                        } catch {
+                            lastError = error
+                            break
+                        }
+                        continue
+                    }
                 }
+                guard let fullLabel else { continue }
+
+                do {
+                    if try !ServiceManager.isRegistered(
+                        fullServiceLabel: jobLabel,
+                        timeout: operationTimeout
+                    ) {
+                        return
+                    }
+                } catch {
+                    lastError = error
+                }
+
+                guard let bootoutTimeout = Self.launchctlTimeout(until: disappearanceDeadline) else {
+                    break
+                }
+                attempt += 1
+                do {
+                    log.info(
+                        "requesting caller-side API-server bootout",
+                        metadata: [
+                            "label": "\(fullLabel)",
+                            "attempt": "\(attempt)",
+                        ]
+                    )
+                    try ServiceManager.deregister(
+                        fullServiceLabel: fullLabel,
+                        timeout: bootoutTimeout
+                    )
+                } catch {
+                    lastError = error
+                }
+
                 guard let remaining = Self.remainingDuration(until: disappearanceDeadline) else {
                     break
                 }
-                try await Task.sleep(for: min(remaining, .milliseconds(100)))
+                do {
+                    try await Task.sleep(for: min(remaining, .milliseconds(100)))
+                } catch {
+                    lastError = error
+                    break
+                }
             }
 
+            let cleanupLabel = fullLabel ?? jobLabel
+            let detail = lastError.map { ": \($0)" } ?? ""
             throw ContainerizationError(
                 .invalidState,
-                message: "timed out waiting for API-server job \(fullLabel) to disappear"
+                message: "API-server shutdown committed, but launchd registration cleanup failed for \(cleanupLabel); "
+                    + "shutdown tombstone retained at \(tombstoneURL.path)\(detail)"
             )
         }
 
