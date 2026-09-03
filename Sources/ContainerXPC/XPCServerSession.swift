@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #if os(macOS)
+import Darwin
 
 /// Represents a single client connection on the server side.
 ///
@@ -23,9 +24,15 @@
 /// tracking for automatic cleanup) receive the session as a parameter and
 /// may register disconnect handlers via `onDisconnect(_:)`.
 public actor XPCServerSession {
+    /// The process identity supplied by libXPC for this accepted peer. Route handlers must use
+    /// this instead of any PID in a message payload, which is only a caller assertion.
+    public nonisolated let peerPID: pid_t
+
     private var disconnectHandlers: [@Sendable () async -> Void] = []
 
-    public init() {}
+    public init(peerPID: pid_t) {
+        self.peerPID = peerPID
+    }
 
     /// Register a handler to be called when the client connection closes.
     public func onDisconnect(_ handler: @Sendable @escaping () async -> Void) {

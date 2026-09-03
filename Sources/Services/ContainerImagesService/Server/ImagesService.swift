@@ -24,6 +24,7 @@ import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 import Logging
+import RegistryTransport
 import TerminalProgress
 
 public actor ImagesService {
@@ -104,8 +105,17 @@ public actor ImagesService {
         }
 
         let img = try await Self.withAuthentication(ref: reference) { auth in
-            try await self.imageStore.pull(
-                reference: reference, platform: platform, insecure: insecure, auth: auth, progress: ContainerizationProgressAdapter.handler(from: progressUpdate),
+            let progress = ContainerizationProgressAdapter.handler(from: progressUpdate)
+            if insecure, let auth {
+                return try await self.pullOverExplicitHTTP(
+                    reference: reference,
+                    platform: platform,
+                    authentication: auth,
+                    progress: progress,
+                    maxConcurrentDownloads: maxConcurrentDownloads)
+            }
+            return try await self.imageStore.pull(
+                reference: reference, platform: platform, insecure: insecure, auth: auth, progress: progress,
                 maxConcurrentDownloads: maxConcurrentDownloads)
         }
         guard let img else {
@@ -130,6 +140,46 @@ public actor ImagesService {
             throw ContainerizationError(.internalError, message: "failed to read platforms of image \(reference)")
         }
         return platforms
+    /// Pull through the credential transport only when the caller explicitly selected HTTP
+    /// and a credential exists. The ordinary HTTPS/anonymous path remains on ImageStore's
+    /// upstream client, so there is no protocol probing or public-host downgrade here.
+    private func pullOverExplicitHTTP(
+        reference: String,
+        platform: Platform?,
+        authentication: any Authentication,
+        progress: ProgressHandler?,
+        maxConcurrentDownloads: Int
+    ) async throws -> Containerization.Image {
+        let parsed = try Reference.parse(reference)
+        let name = parsed.path
+        guard let tag = parsed.tag ?? parsed.digest else {
+            throw ContainerizationError(.invalidArgument, message: "invalid tag/digest for image reference \(reference)")
+        }
+        let client = try ExplicitHTTPRegistryClient(
+            reference: reference,
+            authentication: authentication)
+        let root = try await client.resolve(name: name, tag: tag)
+        let (session, directory) = try await contentStore.newIngestSession()
+        do {
+            let operation = ImageStore.ImportOperation(
+                name: name,
+                contentStore: contentStore,
+                client: client,
+                ingestDir: directory,
+                progress: progress,
+                maxConcurrentDownloads: maxConcurrentDownloads)
+            let descriptor = try await operation.import(
+                root: root,
+                matcher: createPlatformMatcher(for: platform))
+            try await contentStore.completeIngestSession(session)
+            return try await imageStore.create(
+                description: Containerization.Image.Description(
+                    reference: reference,
+                    descriptor: descriptor))
+        } catch {
+            try? await contentStore.cancelIngestSession(session)
+            throw error
+        }
     }
 
     public func push(reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?) async throws {

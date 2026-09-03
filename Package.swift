@@ -109,6 +109,25 @@ let package = Package(
             path: "Tests/IntegrationTests"
         ),
         .target(
+            name: "RegistryTransport",
+            dependencies: [
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
+        ),
+        .testTarget(
+            name: "RegistryTransportTests",
+            dependencies: [
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                "RegistryTransport",
+            ]
+        ),
+        .target(
             name: "ContainerCommands",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -133,6 +152,7 @@ let package = Package(
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerXPC",
                 "MachineAPIClient",
+                "RegistryTransport",
                 "TerminalProgress",
                 "Yams",
             ],
@@ -345,6 +365,7 @@ let package = Package(
                 "ContainerPersistence",
                 "ContainerResource",
                 "ContainerXPC",
+                "RegistryTransport",
                 "TerminalProgress",
             ],
             path: "Sources/Services/ContainerImagesService/Server"

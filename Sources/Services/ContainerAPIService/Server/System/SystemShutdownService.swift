@@ -5,7 +5,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     https://www.apache.org/licenses/LICENSE-2.0
+//   https://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -63,6 +63,7 @@ public actor SystemShutdownService {
 
     private let lifecycleGeneration: String
     private let processNonce: String
+    private let appRoot: URL
     private let ownershipToken: String?
     private let containersService: ContainersService
     private let pluginsService: PluginsService
@@ -73,6 +74,7 @@ public actor SystemShutdownService {
     public init(
         lifecycleGeneration: String,
         processNonce: String,
+        appRoot: URL,
         ownershipToken: String?,
         containersService: ContainersService,
         pluginsService: PluginsService,
@@ -81,6 +83,7 @@ public actor SystemShutdownService {
     ) {
         self.lifecycleGeneration = lifecycleGeneration
         self.processNonce = processNonce
+        self.appRoot = appRoot
         self.ownershipToken = ownershipToken
         self.containersService = containersService
         self.pluginsService = pluginsService
@@ -115,6 +118,22 @@ public actor SystemShutdownService {
             throw ContainerizationError(.invalidState, message: "API server shutdown is already in progress")
         }
 
+        let tombstone = try APIServerShutdownTombstone.currentProcess(
+            lifecycleGeneration: lifecycleGeneration,
+            processNonce: processNonce
+        )
+        do {
+            try APIServerShutdownTombstoneStore.commit(tombstone, appRoot: appRoot)
+        } catch let error as APIServerShutdownTombstoneStore.CommitError {
+            log.critical(
+                "shutdown tombstone commit outcome is indeterminate; exiting without acknowledgement",
+                metadata: ["error": "\(error)"]
+            )
+            Darwin.exit(EXIT_FAILURE)
+        } catch {
+            throw error
+        }
+
         let apiServerJobLabel = PluginLoader.generationQualifiedLabel(
             Self.apiServerLabel,
             lifecycleGeneration: lifecycleGeneration
@@ -126,20 +145,36 @@ public actor SystemShutdownService {
         let log = self.log
         let launchctlTimeout = Self.launchctlCommandTimeout
         await session.onDisconnect {
-            do {
-                let domain = try ServiceManager.getDomainString(timeout: launchctlTimeout)
-                let fullLabel = "\(domain)/\(apiServerJobLabel)"
-                log.info("stopping API server", metadata: ["label": "\(fullLabel)"])
-                try ServiceManager.deregister(fullServiceLabel: fullLabel, timeout: launchctlTimeout)
-            } catch {
-                log.error(
-                    "failed to stop API server",
-                    metadata: [
-                        "label": "\(apiServerJobLabel)",
-                        "error": "\(error)",
-                    ]
-                )
+            var lastError: (any Error)?
+            for attempt in 1...3 {
+                do {
+                    let domain = try ServiceManager.getDomainString(timeout: launchctlTimeout)
+                    let fullLabel = "\(domain)/\(apiServerJobLabel)"
+                    log.info(
+                        "stopping API server",
+                        metadata: ["label": "\(fullLabel)", "attempt": "\(attempt)"])
+                    try ServiceManager.deregister(
+                        fullServiceLabel: fullLabel,
+                        timeout: launchctlTimeout)
+                    return
+                } catch {
+                    lastError = error
+                    if attempt < 3 { usleep(100_000) }
+                }
             }
+
+            // Cleanup has permanently quiesced mutation admission and torn down workloads.
+            // A live process after failed bootout cannot safely resume, and would reject both
+            // mutations and repeated shutdown forever. Exit with the durable tombstone retained;
+            // if launchd demand-starts this generation again, startup will refuse to serve.
+            log.critical(
+                "failed to stop API server after retries; exiting",
+                metadata: [
+                    "label": "\(apiServerJobLabel)",
+                    "error": "\(String(describing: lastError))",
+                ]
+            )
+            Darwin.exit(EXIT_FAILURE)
         }
 
         let clock = ContinuousClock()

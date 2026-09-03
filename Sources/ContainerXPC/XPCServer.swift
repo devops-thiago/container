@@ -106,7 +106,6 @@ public struct XPCServer: Sendable {
 
     func handleClientConnection(connection: xpc_connection_t) async throws {
         let replySent = Mutex(false)
-        let session = XPCServerSession()
 
         let objects = AsyncStream<xpc_object_t> { cont in
             xpc_connection_set_event_handler(connection) { object in
@@ -140,6 +139,9 @@ public struct XPCServer: Sendable {
         }
 
         xpc_connection_activate(connection)
+        // Read the kernel/libXPC identity only after activating the accepted connection. It is
+        // stable for this peer and cannot be forged by putting another PID in a message payload.
+        let session = XPCServerSession(peerPID: xpc_connection_get_pid(connection))
         try await withThrowingDiscardingTaskGroup { group in
             // `connection` isn't used concurrently.
             nonisolated(unsafe) let connection = connection

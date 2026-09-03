@@ -25,13 +25,14 @@ struct ContainerListFiltersInfrastructureTests {
         value.range(of: pattern, options: .regularExpression) != nil
     }
 
-    @Test("machines and k8s nodes are infrastructure; user labels are not")
+    @Test("any plugin-owned container is infrastructure; unrelated user labels are not")
     func classification() {
         #expect(ContainerListFilters.isInfrastructure(labels: [ResourceLabelKeys.plugin: "machine"]))
         #expect(ContainerListFilters.isInfrastructure(labels: [ResourceLabelKeys.plugin: "k8s"]))
+        #expect(ContainerListFilters.isInfrastructure(labels: [ResourceLabelKeys.plugin: "future-plugin"]))
         #expect(!ContainerListFilters.isInfrastructure(labels: [:]))
         #expect(!ContainerListFilters.isInfrastructure(labels: ["app": "web"]))
-        #expect(!ContainerListFilters.isInfrastructure(labels: [ResourceLabelKeys.plugin: "k8s-tools"]))
+        #expect(!ContainerListFilters.isInfrastructure(labels: [ResourceLabelKeys.plugin: ""]))
     }
 
     @Test("the filter's pattern, as the service applies it, admits everything but infrastructure")
@@ -42,8 +43,8 @@ struct ContainerListFiltersInfrastructureTests {
         #expect(!matches(pattern, "machine"))
         #expect(!matches(pattern, "k8s"))
         #expect(matches(pattern, ""), "a container without the label — every ordinary one — passes")
-        #expect(matches(pattern, "k8s-tools"))
-        #expect(matches(pattern, "web"))
+        #expect(!matches(pattern, "k8s-tools"))
+        #expect(!matches(pattern, "web"))
     }
 
     @Test("withoutMachines still excludes only machines, for callers that mean that")
