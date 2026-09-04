@@ -53,6 +53,7 @@ public struct K8sCommand: AsyncParsableCommand {
             K8sList.self,
             K8sLoadImage.self,
             K8sStart.self,
+            K8sStop.self,
             K8sWriteConfig.self,
         ]
     )
