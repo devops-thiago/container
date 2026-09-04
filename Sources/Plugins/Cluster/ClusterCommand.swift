@@ -50,6 +50,7 @@ public struct ClusterCommand: AsyncParsableCommand {
             ClusterDelete.self,
             ClusterList.self,
             K8sStart.self,
+            K8sStop.self,
             ClusterWriteConfig.self,
         ]
     )
