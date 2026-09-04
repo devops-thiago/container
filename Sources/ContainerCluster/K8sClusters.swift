@@ -46,7 +46,7 @@ public enum K8sClusters {
         }
 
         public let clusterName: String
-        /// The node's container ID; for a single-node cluster this equals the cluster name.
+        /// The node's container ID; the control plane's equals the cluster name.
         public let id: String
         /// Opaque identity of this exact creation of the node container.
         public let incarnation: String
@@ -275,6 +275,46 @@ public enum K8sClusters {
         try await process.start()
         try io.closeAfterStart()
         try await K8sHelper.waitForNodeBooted(containerId: node.id, client: client, log: log)
+    }
+
+    /// Stop every node of a cluster, workers first and the control plane last, so no worker
+    /// loses its API server while it is still running. The nodes stay, and `start` brings
+    /// them back; the kubeconfig is untouched.
+    public static func stop(name: String = K8sClusters.defaultName, log: Logger) async throws {
+        try await stop(name: name, containers: ContainerClient(), log: log)
+    }
+
+    /// The stop, with its container access injectable. Every stop carries the plugin labels
+    /// and the incarnation observed in the listing, so a container that took a node's name in
+    /// between is refused rather than stopped.
+    static func stop(name: String, containers: any K8sClusterContainers, log: Logger) async throws {
+        let listed = try await containers.listNodes()
+        let clusterNodes = K8sHelper.buildK8sRows(from: listed)
+            .filter { $0.clusterName == name }
+            .map(\.snapshot)
+        guard let controlPlane = clusterNodes.first(where: { $0.id == name }) else {
+            throw ContainerizationError(.notFound, message: "k8s cluster \(name) not found")
+        }
+        var nodes = clusterNodes.filter { $0.id != name }
+        nodes.sort { $0.id > $1.id }
+        nodes.append(controlPlane)
+
+        for node in nodes {
+            try Task.checkCancellation()
+            guard node.status == .running else {
+                log.debug("cluster node already stopped", metadata: ["name": "\(node.id)"])
+                continue
+            }
+            var requiredLabels = nodeLabels
+            if node.configuration.labels[ResourceLabelKeys.cluster] != nil {
+                requiredLabels[ResourceLabelKeys.cluster] = name
+            }
+            try await containers.stop(
+                id: node.id,
+                requiredLabels: requiredLabels,
+                expectedIncarnation: node.incarnation)
+            log.info("stopped cluster node", metadata: ["name": "\(node.id)"])
+        }
     }
 
     /// Stop and remove a cluster, and drop its context from the default kubeconfig.
