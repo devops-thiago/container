@@ -28,6 +28,10 @@ public struct K8sCommand: AsyncParsableCommand {
                 $ container k8s create --name my-cluster
                 $ container k8s list
 
+              Drive it with the kubectl that ships alongside, no install needed:
+                $ container k8s kubectl get nodes
+                $ container k8s kubectl --name my-cluster get pods -A
+
               Switch between clusters:
                 $ container k8s create --name second-cluster
                 $ kubectl config use-context second-cluster
@@ -50,6 +54,7 @@ public struct K8sCommand: AsyncParsableCommand {
         subcommands: [
             K8sCreate.self,
             K8sDelete.self,
+            K8sKubectl.self,
             K8sList.self,
             K8sLoadImage.self,
             K8sStart.self,
