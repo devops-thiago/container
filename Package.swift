@@ -382,6 +382,7 @@ let package = Package(
                 "ContainerAPIClient",
                 "ContainerPersistence",
                 "ContainerTestSupport",
+                "ContainerXPC",
             ]
         ),
         .executableTarget(

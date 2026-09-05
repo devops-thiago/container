@@ -145,21 +145,14 @@ public struct BuildOptions: ParsableArguments {
     }
 
     public mutating func validate() throws {
-        guard FileManager.default.fileExists(atPath: contextDir) else {
-            throw ValidationError("context dir does not exist \(contextDir)")
-        }
         for name in targetImageNames {
             guard let _ = try? Reference.parse(name) else {
                 throw ValidationError("invalid reference \(name)")
             }
         }
-
-        if let filepath = file, filepath != "-" {
-            let fileURL = URL(fileURLWithPath: filepath, relativeTo: .currentDirectory())
-            guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                throw ValidationError("file does not exist \(filepath)")
-            }
-        }
+        // The context and the Dockerfile are checked in `resolveBuildFile`, after this process
+        // has been lent the folders they sit in: validation runs before anything can be
+        // borrowed, and a sandboxed CLI cannot tell "missing" from "not allowed to look" until then.
 
         // Parse --secret args
         for secret in self.secret {
