@@ -173,7 +173,7 @@ public struct BuildOptions: ParsableArguments {
                 }
                 self.secrets[key] = .data(Data(bytes: ptr, count: strlen(ptr)))
             } else if parts[1].hasPrefix("src=") {
-                let path = String(parts[1].dropFirst(4))
+                let path = HostPath.absolute(String(parts[1].dropFirst(4)))
                 self.secrets[key] = .file(path)
             } else {
                 throw ValidationError("secret bad value \(parts[1])")

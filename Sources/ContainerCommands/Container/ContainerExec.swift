@@ -60,6 +60,7 @@ extension Application {
             config.executable = executable
             config.arguments = [String](self.arguments.dropFirst())
             config.terminal = tty
+            try await ClientHostDirectory.borrow(self.processFlags.envFile, verb: "read")
             config.environment.append(
                 contentsOf: try Parser.allEnv(
                     imageEnvs: [],
