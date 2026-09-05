@@ -49,7 +49,7 @@ extension Application {
         @Option(
             name: .shortAndLong, help: "Pathname for the saved image", completion: .file(),
             transform: { str in
-                FilePathOps.absolutePath(FilePath(str))
+                FilePath(HostPath.absolute(str))
             })
         var output: FilePath?
 
@@ -62,6 +62,20 @@ extension Application {
         public var logOptions: Flags.Logging
 
         @Argument var references: [String]
+
+        /// Put the staged archive where the user asked, replacing what is there: a rename when
+        /// the two are on one volume, a copy otherwise.
+        static func deliver(_ staged: URL, to destination: URL) throws {
+            let manager = FileManager.default
+            if manager.fileExists(atPath: destination.path(percentEncoded: false)) {
+                try manager.removeItem(at: destination)
+            }
+            do {
+                try manager.moveItem(at: staged, to: destination)
+            } catch {
+                try manager.copyItem(at: staged, to: destination)
+            }
+        }
 
         public func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
@@ -110,20 +124,30 @@ extension Application {
                 }
             }
 
-            // Write to stdout; otherwise write to the output file
-            if let output {
+            // The images helper writes the archive, and sandboxed it can reach neither the
+            // user's folder nor this process's own temporary directory: it writes into the
+            // shared one, and this process, which has borrowed the user's folder, moves the
+            // result there. Unsandboxed the helper writes the destination directly, as before.
+            if let output, !ClientHostDirectory.isSandboxed {
                 try await ClientImage.save(references: references, out: output.string, platform: p, containerSystemConfig: containerSystemConfig)
+            } else if let output {
+                try await ClientHostDirectory.borrow([output.string], verb: "write")
+                let staged = try PathUtils.sharedTemporaryDirectory().appendingPathComponent("\(UUID().uuidString).tar")
+                defer { try? FileManager.default.removeItem(at: staged) }
+                try await ClientImage.save(references: references, out: staged.path(percentEncoded: false), platform: p, containerSystemConfig: containerSystemConfig)
+                try Self.deliver(staged, to: URL(fileURLWithPath: output.string))
             } else {
-                let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tar")
+                let tempFile = try PathUtils.sharedTemporaryDirectory().appendingPathComponent("\(UUID().uuidString).tar")
                 defer {
                     try? FileManager.default.removeItem(at: tempFile)
                 }
 
-                guard FileManager.default.createFile(atPath: tempFile.path(), contents: nil) else {
+                guard FileManager.default.createFile(atPath: tempFile.path(percentEncoded: false), contents: nil) else {
                     throw ContainerizationError(.internalError, message: "unable to create temporary file")
                 }
 
-                try await ClientImage.save(references: references, out: tempFile.path(), platform: p, containerSystemConfig: containerSystemConfig)
+                try await ClientImage.save(
+                    references: references, out: tempFile.path(percentEncoded: false), platform: p, containerSystemConfig: containerSystemConfig)
 
                 guard let fileHandle = try? FileHandle(forReadingFrom: tempFile) else {
                     throw ContainerizationError(.internalError, message: "unable to open temporary file for reading")

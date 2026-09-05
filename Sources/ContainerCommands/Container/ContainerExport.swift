@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerizationError
 import Foundation
 import TerminalProgress
@@ -36,7 +37,7 @@ extension Application {
         @Option(
             name: .shortAndLong, help: "Pathname for the saved container filesystem (defaults to stdout)", completion: .file(),
             transform: { str in
-                URL(fileURLWithPath: str, relativeTo: .currentDirectory()).absoluteURL.path(percentEncoded: false)
+                HostPath.absolute(str)
             })
         var output: String?
 
@@ -47,8 +48,11 @@ extension Application {
         var id: String
 
         public func run() async throws {
+            if let output {
+                try await ClientHostDirectory.borrow([output], verb: "write")
+            }
             let client = ContainerClient()
-            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            let tempDir = try PathUtils.sharedTemporaryDirectory().appendingPathComponent(UUID().uuidString)
 
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             var needsBestEffortCleanup = true
@@ -333,6 +337,14 @@ public enum ExportDestination {
                 }
             }
 
+            // Sandboxed, the walk from "/" is refused before it reaches the folder the user
+            // granted: a grant covers a folder and what is beneath it, not the path above it.
+            // Then the parent is opened directly, once `realpath` has shown it holds no
+            // symbolic link — the same property the walk establishes component by component.
+            if next < 0, errno == EPERM || errno == EACCES {
+                _ = close(directory)
+                return try openGrantedDirectory(path, output: output)
+            }
             if next < 0 {
                 let openErrno = errno
                 _ = close(directory)
@@ -343,6 +355,35 @@ public enum ExportDestination {
             _ = close(directory)
             directory = next
             isRootComponent = false
+        }
+        return directory
+    }
+
+    private static func openGrantedDirectory(_ path: String, output: String) throws -> Int32 {
+        var resolved = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(path, &resolved) != nil else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "refusing to export to \(output): its parent could not be resolved (\(String(cString: strerror(errno))))")
+        }
+        // Both without a trailing slash: `deletingLastPathComponent` leaves one, `realpath` never does.
+        func trimmed(_ value: String) -> String {
+            var result = URL(fileURLWithPath: value).standardizedFileURL.path(percentEncoded: false)
+            while result.count > 1, result.hasSuffix("/") { result.removeLast() }
+            return result
+        }
+        let real = trimmed(String(cString: resolved))
+        let standardised = trimmed(path)
+        guard real == standardised || real == "/private" + standardised else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "refusing to export to \(output): its parent contains a symbolic link")
+        }
+        let directory = Darwin.open(real, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "refusing to export to \(output): its parent could not be opened (\(String(cString: strerror(errno))))")
         }
         return directory
     }

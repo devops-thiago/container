@@ -98,6 +98,7 @@ extension Application {
             let cwd = getWorkingDirectory(snapshot, user: user)
 
             // Build environment with HOME set correctly
+            try await ClientHostDirectory.borrow(processFlags.envFile, verb: "read")
             let envVars = try Parser.allEnv(
                 imageEnvs: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
                 envFiles: processFlags.envFile,

@@ -159,7 +159,7 @@ extension Application {
             let dockerfile = try await resolveBuildFile()
             // Absolute from here on, for the same reason `resolveBuildFile` makes it so: the
             // builder reads the context through this process, whose own `.` is not the user's.
-            let contextDir = Self.absolutePath(self.contextDir)
+            let contextDir = HostPath.absolute(self.contextDir)
             do {
                 let timeout: Duration = .seconds(300)
                 let progressConfig = try ProgressConfig(
@@ -476,32 +476,16 @@ extension Application {
             }
         }
 
-        /// `path` as an absolute path, relative ones taken from where the user ran the command.
-        ///
-        /// Not from the process's working directory: sandboxed, this process starts in its own
-        /// container, so `.` there is a folder the user has never seen. The shell records the
-        /// directory it launched from in `PWD`, and that is the one a relative path means.
-        static func absolutePath(_ path: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
-            if path.hasPrefix("/") { return URL(fileURLWithPath: path).standardizedFileURL.path }
-            let base: String
-            if let pwd = environment["PWD"], pwd.hasPrefix("/") {
-                base = pwd
-            } else {
-                base = FileManager.default.currentDirectoryPath
-            }
-            return URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: base, isDirectory: true)).standardizedFileURL.path
-        }
-
         /// The folders this process must be able to read for the build: the context, and the
         /// Dockerfile's folder when `-f` points outside it. Absolute, so a lend names what the
         /// user will recognise in a panel.
         static func foldersToBorrow(
             contextDir: String, file: String?, environment: [String: String] = ProcessInfo.processInfo.environment
         ) -> [String] {
-            let context = absolutePath(contextDir, environment: environment)
+            let context = HostPath.absolute(contextDir, environment: environment)
             var folders = [context]
             if let file, file != "-" {
-                let parent = URL(fileURLWithPath: absolutePath(file, environment: environment)).deletingLastPathComponent().path
+                let parent = URL(fileURLWithPath: HostPath.absolute(file, environment: environment)).deletingLastPathComponent().path
                 if parent != context && !parent.hasPrefix(context + "/") { folders.append(parent) }
             }
             return folders
@@ -514,7 +498,7 @@ extension Application {
         /// the folder can be read does "no Dockerfile" mean what it says.
         private func resolveBuildFile() async throws -> String {
             if file == "-" { return "-" }
-            let contextDir = Self.absolutePath(self.contextDir)
+            let contextDir = HostPath.absolute(self.contextDir)
             if ClientHostDirectory.isSandboxed {
                 for folder in Self.foldersToBorrow(contextDir: contextDir, file: file) {
                     let outcome = try await ClientHostDirectory.lend(path: folder)
@@ -523,13 +507,19 @@ extension Application {
                     }
                     log.debug("borrowed a folder for the build", metadata: ["path": "\(folder)"])
                 }
+                // Secrets read from files are this process's reads as well.
+                let secretFiles = secrets.values.compactMap { secret -> String? in
+                    if case .file(let path) = secret { return path }
+                    return nil
+                }
+                try await ClientHostDirectory.borrow(secretFiles, verb: "read")
             }
 
             guard FileManager.default.fileExists(atPath: contextDir) else {
                 throw ValidationError("context dir does not exist \(contextDir)")
             }
             if let file {
-                let path = Self.absolutePath(file)
+                let path = HostPath.absolute(file)
                 guard FileManager.default.fileExists(atPath: path) else {
                     throw ValidationError("dockerfile does not exist \(file)")
                 }
@@ -582,7 +572,7 @@ extension Application {
                     }
                     self.secrets[key] = .data(Data(bytes: ptr, count: strlen(ptr)))
                 } else if parts[1].hasPrefix("src=") {
-                    let path = String(parts[1].dropFirst(4))
+                    let path = HostPath.absolute(String(parts[1].dropFirst(4)))
                     self.secrets[key] = .file(path)
                 } else {
                     throw ValidationError("secret bad value \(parts[1])")

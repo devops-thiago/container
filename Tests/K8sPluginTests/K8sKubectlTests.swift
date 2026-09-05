@@ -40,6 +40,34 @@ struct K8sKubectlTests {
         #expect(invocation.environment == ["KUBECONFIG": "/home/.kube/config"])
     }
 
+    @Test("manifests, kustomizations, kubeconfigs and the local side of cp are host files")
+    func fileReferences() {
+        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "deploy.yaml"]) == ["deploy.yaml"])
+        #expect(K8sKubectl.fileReferences(in: ["apply", "--filename=/abs/deploy.yaml", "-n", "x"]) == ["/abs/deploy.yaml"])
+        #expect(K8sKubectl.fileReferences(in: ["apply", "-k", "overlays/dev"]) == ["overlays/dev"])
+        #expect(K8sKubectl.fileReferences(in: ["--kubeconfig", "kc.yaml", "get", "pods"]) == ["kc.yaml"])
+        #expect(K8sKubectl.fileReferences(in: ["cp", "./local.txt", "web:/tmp/local.txt"]) == ["./local.txt"])
+        #expect(K8sKubectl.fileReferences(in: ["cp", "kube-system/web:/etc/hosts", "/Users/x/hosts", "-c", "main"]) == ["/Users/x/hosts"])
+        #expect(K8sKubectl.fileReferences(in: ["cp", "-n", "kube-system", "web:/etc/hosts", "./hosts"]) == ["./hosts"])
+    }
+
+    @Test("standard input, URLs and commands that name no file borrow nothing")
+    func noFiles() {
+        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "-"]).isEmpty)
+        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "https://example.com/deploy.yaml"]).isEmpty)
+        #expect(K8sKubectl.fileReferences(in: ["get", "pods", "-A", "-o", "wide"]).isEmpty)
+        #expect(K8sKubectl.fileReferences(in: ["exec", "web", "--", "cat", "/etc/hosts"]).isEmpty)
+    }
+
+    @Test("a pod reference is a colon before any slash")
+    func remoteCopyPaths() {
+        #expect(K8sKubectl.isRemoteCopyPath("web:/tmp/x"))
+        #expect(K8sKubectl.isRemoteCopyPath("kube-system/web:/tmp/x"))
+        #expect(!K8sKubectl.isRemoteCopyPath("/Users/x/file:with:colons"))
+        #expect(!K8sKubectl.isRemoteCopyPath("./dir/file"))
+        #expect(!K8sKubectl.isRemoteCopyPath("plain.txt"))
+    }
+
     @Test("a KUBECONFIG the user set is left alone")
     func userKubeconfigWins() {
         let invocation = K8sKubectl.invocation(
