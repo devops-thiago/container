@@ -58,8 +58,10 @@ public actor HostDirectoryGrants {
     private var log: Logger?
     /// Retained because releasing a URL is what ends the access. Never released: the pool is
     /// the boot's worth of grants, and there is no moment before exit at which dropping one is
-    /// correct.
-    private var granted: [String: URL] = [:]
+    /// correct. The bookmark is kept beside the URL because it is what a lend hands on: a
+    /// bookmark this process mints for a folder it only borrowed carries no access to a third
+    /// process, while the one the embedder minted does.
+    private var granted: [String: (url: URL, bookmark: Data)] = [:]
 
     /// The label the embedder announces its grant listener under. Not a mach service name — no
     /// process owns it — just the key the attach table files the endpoint under.
@@ -93,7 +95,7 @@ public actor HostDirectoryGrants {
                 log?.warning("published grant carries no access", metadata: ["path": "\(path)"])
                 continue
             }
-            granted[path] = url
+            granted[path] = (url, bookmark)
             kept += 1
             log?.info("host directory granted", metadata: ["path": "\(path)"])
         }
@@ -109,6 +111,28 @@ public actor HostDirectoryGrants {
         let target = Self.canonical(path)
         if granted.keys.contains(where: { target.isPathInside($0) }) { return true }
         return Self.readable(URL(fileURLWithPath: target))
+    }
+
+    /// Lend `path` to another process: the embedder's own bookmark for the pooled folder that
+    /// covers it. A path nothing covers is asked for first, the way a mount would be, so a
+    /// build in a folder nobody has granted puts the same panel in front of the user that a
+    /// mount of it would.
+    ///
+    /// The bookmark is the embedder's, not one minted here: this process holds the folder only
+    /// through the embedder's grant, and a bookmark it mints for it resolves elsewhere to a URL
+    /// that still cannot be read. It is for the covering root, not the path, so the borrower
+    /// reads anything in that folder, which is what a build does, and the root is exactly what
+    /// the user granted. Unsandboxed there is no pool and every readable path is its own root.
+    public func lend(_ path: String) async -> (bookmark: Data?, outcome: GrantOutcome) {
+        let outcome = await request(path)
+        guard case .granted = outcome else { return (nil, outcome) }
+        let target = Self.canonical(path)
+        if let pooled = granted.first(where: { target.isPathInside($0.key) })?.value {
+            return (pooled.bookmark, .granted)
+        }
+        let own = try? URL(fileURLWithPath: target).bookmarkData(
+            options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        return (own, own == nil ? .declined : .granted)
     }
 
     /// Why a folder still cannot be opened, so the caller can say something true about it.

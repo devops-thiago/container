@@ -135,6 +135,7 @@ extension APIServer {
                     await HostDirectoryGrants.shared.configure(log: log)
                     let grantHarness = HostDirectoryGrantHarness(log: log)
                     routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route(grantHarness.publish)
+                    routes[XPCRoute.hostDirectoryGrantLend] = XPCServer.route(grantHarness.lend)
                 }
 
                 let containersService = try initializeContainersService(

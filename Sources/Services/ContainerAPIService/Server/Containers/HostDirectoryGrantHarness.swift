@@ -58,6 +58,32 @@ public struct HostDirectoryGrantHarness: Sendable {
         return message.reply()
     }
 
+    /// A client borrowing a folder for its own process (`container build` reads its context
+    /// itself). Gated like every workload route by the owner watchdog, and no further: the
+    /// pool lends only what the user has granted, and asks the user for anything else.
+    public func lend(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let path = message.string(key: .hostDirectoryPath), !path.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "a host directory lend names no path")
+        }
+        let (bookmark, outcome) = await HostDirectoryGrants.shared.lend(path)
+        let reply = message.reply()
+        reply.set(key: .hostDirectoryOutcome, value: Self.wire(outcome).rawValue)
+        if let bookmark {
+            reply.set(key: .hostDirectoryBookmarks, value: bookmark)
+        }
+        log.info("host directory lend", metadata: ["path": "\(path)", "outcome": "\(Self.wire(outcome).rawValue)"])
+        return reply
+    }
+
+    static func wire(_ outcome: HostDirectoryGrants.GrantOutcome) -> HostDirectoryLendOutcome {
+        switch outcome {
+        case .granted: return .granted
+        case .declined: return .declined
+        case .noEmbedder: return .noEmbedder
+        case .timedOut: return .timedOut
+        }
+    }
+
     /// The authorization decision without the live Security-framework envelope.
     static func authorized(
         _ message: XPCMessage,
