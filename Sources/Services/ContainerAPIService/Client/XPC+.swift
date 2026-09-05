@@ -53,6 +53,9 @@ public enum XPCKeys: String {
     /// One request, one identity: the embedder's log names it, and a late answer is tied to
     /// the request it was for rather than to whatever asks next.
     case hostDirectoryRequestID
+    /// Why a lend came back without a bookmark: declined, nobody to ask, or nobody answered.
+    /// Named so the CLI can say which, since each one asks something different of the user.
+    case hostDirectoryOutcome
     /// Vsock port number key.
     case port
     /// Exit code for a process
@@ -234,6 +237,11 @@ public enum XPCRoute: String {
     /// Served by the *embedder*, not here: the engine asking for a folder nothing has granted.
     /// The reply carries a bookmark, or nothing if the user declined.
     case hostDirectoryGrantRequest
+    /// A client asking this process to lend it a folder: `container build` reads the build
+    /// context in the CLI's own process, which is sandboxed alongside the engine and holds no
+    /// grant of its own. The reply carries a fresh bookmark for a folder the pool covers — after
+    /// asking the embedder for it if nothing does — or the outcome that explains its absence.
+    case hostDirectoryGrantLend
 
     case installKernel
     case getDefaultKernel

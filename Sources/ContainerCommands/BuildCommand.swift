@@ -156,6 +156,10 @@ extension Application {
 
         public func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
+            let dockerfile = try await resolveBuildFile()
+            // Absolute from here on, for the same reason `resolveBuildFile` makes it so: the
+            // builder reads the context through this process, whose own `.` is not the user's.
+            let contextDir = Self.absolutePath(self.contextDir)
             do {
                 let timeout: Duration = .seconds(300)
                 let progressConfig = try ProgressConfig(
@@ -472,53 +476,92 @@ extension Application {
             }
         }
 
-        public mutating func validate() throws {
-            // NOTE: Here we check the Dockerfile exists, and set `dockerfile` to point the valid Dockerfile path or stdin
+        /// `path` as an absolute path, relative ones taken from where the user ran the command.
+        ///
+        /// Not from the process's working directory: sandboxed, this process starts in its own
+        /// container, so `.` there is a folder the user has never seen. The shell records the
+        /// directory it launched from in `PWD`, and that is the one a relative path means.
+        static func absolutePath(_ path: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+            if path.hasPrefix("/") { return URL(fileURLWithPath: path).standardizedFileURL.path }
+            let base: String
+            if let pwd = environment["PWD"], pwd.hasPrefix("/") {
+                base = pwd
+            } else {
+                base = FileManager.default.currentDirectoryPath
+            }
+            return URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: base, isDirectory: true)).standardizedFileURL.path
+        }
+
+        /// The folders this process must be able to read for the build: the context, and the
+        /// Dockerfile's folder when `-f` points outside it. Absolute, so a lend names what the
+        /// user will recognise in a panel.
+        static func foldersToBorrow(
+            contextDir: String, file: String?, environment: [String: String] = ProcessInfo.processInfo.environment
+        ) -> [String] {
+            let context = absolutePath(contextDir, environment: environment)
+            var folders = [context]
+            if let file, file != "-" {
+                let parent = URL(fileURLWithPath: absolutePath(file, environment: environment)).deletingLastPathComponent().path
+                if parent != context && !parent.hasPrefix(context + "/") { folders.append(parent) }
+            }
+            return folders
+        }
+
+        /// Borrow the build's folders when this process is sandboxed, then find the Dockerfile.
+        ///
+        /// The engine holds what the user has granted and asks the app for the rest, so a build
+        /// in a folder nobody has granted raises the same panel a mount of it would. Only once
+        /// the folder can be read does "no Dockerfile" mean what it says.
+        private func resolveBuildFile() async throws -> String {
+            if file == "-" { return "-" }
+            let contextDir = Self.absolutePath(self.contextDir)
+            if ClientHostDirectory.isSandboxed {
+                for folder in Self.foldersToBorrow(contextDir: contextDir, file: file) {
+                    let outcome = try await ClientHostDirectory.lend(path: folder)
+                    guard case .granted = outcome else {
+                        throw ValidationError(outcome.message(for: folder, verb: "read"))
+                    }
+                    log.debug("borrowed a folder for the build", metadata: ["path": "\(folder)"])
+                }
+            }
+
             guard FileManager.default.fileExists(atPath: contextDir) else {
                 throw ValidationError("context dir does not exist \(contextDir)")
             }
+            if let file {
+                let path = Self.absolutePath(file)
+                guard FileManager.default.fileExists(atPath: path) else {
+                    throw ValidationError("dockerfile does not exist \(file)")
+                }
+                return path
+            }
+            guard let found = try BuildFile.resolvePath(contextDir: contextDir) else {
+                // "Not found" and "not allowed to look" arrive here as the same answer, because
+                // `FileManager.fileExists` returns false for both. The lend above should have
+                // settled that; listing the directory tells them apart if it did not.
+                guard (try? FileManager.default.contentsOfDirectory(atPath: contextDir)) != nil else {
+                    throw ValidationError(
+                        "cannot read context dir \(contextDir): permission denied. "
+                            + "This build of the CLI is sandboxed and reads only what it has been granted.")
+                }
+                throw ValidationError("dockerfile not found in context dir")
+            }
+            guard FileManager.default.fileExists(atPath: found) else {
+                throw ValidationError("dockerfile does not exist \(found)")
+            }
+            return found
+        }
+
+        public mutating func validate() throws {
             for name in targetImageNames {
                 guard let _ = try? Reference.parse(name) else {
                     throw ValidationError("invalid reference \(name)")
                 }
             }
-
-            switch file {
-            case "-":
-                dockerfile = "-"
-                break
-            case .some(let filepath):
-                let fileURL = URL(fileURLWithPath: filepath, relativeTo: .currentDirectory())
-                guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                    throw ValidationError("dockerfile does not exist \(filepath)")
-                }
-
-                dockerfile = fileURL.path
-                break
-            case .none:
-                guard let defaultDockerfile = try BuildFile.resolvePath(contextDir: contextDir) else {
-                    // "Not found" and "not allowed to look" arrive here as the same answer,
-                    // because `FileManager.fileExists` returns false for both. Sandboxed —
-                    // which the CLI is when it ships inside an app — a build run in an
-                    // ordinary project folder reported a missing Dockerfile that was sitting
-                    // right next to it, and the message sent people to inspect their context.
-                    // Listing the directory separates the two: a denial fails, and a
-                    // directory that simply holds no Dockerfile lists fine.
-                    guard (try? FileManager.default.contentsOfDirectory(atPath: contextDir)) != nil else {
-                        throw ValidationError(
-                            "cannot read context dir \(contextDir): permission denied. "
-                                + "This build of the CLI is sandboxed and reads only what it has been granted.")
-                    }
-                    throw ValidationError("dockerfile not found in context dir")
-                }
-
-                guard FileManager.default.fileExists(atPath: defaultDockerfile) else {
-                    throw ValidationError("dockerfile does not exist \(defaultDockerfile)")
-                }
-
-                dockerfile = defaultDockerfile
-                break
-            }
+            // The Dockerfile is found in `run`, after this process has been lent the folder it
+            // sits in: validation runs before anything can be borrowed, and a sandboxed CLI
+            // cannot tell "no Dockerfile" from "not allowed to look" until then.
+            if file == "-" { dockerfile = "-" }
 
             // Parse --secret args
             for secret in self.secret {
