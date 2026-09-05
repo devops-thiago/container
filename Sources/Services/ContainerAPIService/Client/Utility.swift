@@ -168,6 +168,8 @@ public struct Utility {
 
         let imageConfig = try await img.config(for: requestedPlatform).config
         let description = img.description
+        // Env files are this process's reads; sandboxed, it borrows their folders first.
+        try await ClientHostDirectory.borrow(process.envFile, verb: "read")
         let pc = try Parser.process(
             arguments: arguments,
             processFlags: process,

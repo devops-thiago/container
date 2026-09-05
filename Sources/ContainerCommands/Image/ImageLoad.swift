@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import Containerization
 import ContainerizationError
 import ContainerizationOS
@@ -34,7 +35,7 @@ extension Application {
         @Option(
             name: .shortAndLong, help: "Path to the image tar archive", completion: .file(),
             transform: { str in
-                FilePathOps.absolutePath(FilePath(str))
+                FilePath(HostPath.absolute(str))
             })
         var input: FilePath?
 
@@ -45,21 +46,32 @@ extension Application {
         public var logOptions: Flags.Logging
 
         public func run() async throws {
-            let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).tar")
+            let tempFile = try PathUtils.sharedTemporaryDirectory().appendingPathComponent("\(UUID().uuidString).tar")
             defer {
                 try? FileManager.default.removeItem(at: tempFile)
             }
 
-            // Read from stdin; otherwise read from the input file
+            // Read from stdin; otherwise read from the input file. The images helper does the
+            // reading, and sandboxed it can reach neither the user's folder nor this process's
+            // own temporary directory, so the file is copied into the shared one first — by
+            // this process, which has borrowed the user's folder.
             let resolvedPath: FilePath
-            if let input {
+            if let input, !ClientHostDirectory.isSandboxed {
                 guard FileManager.default.fileExists(atPath: input.string) else {
                     log.error("file does not exist", metadata: ["path": "\(input)"])
                     Application.exit(withError: ArgumentParser.ExitCode(1))
                 }
                 resolvedPath = input
+            } else if let input {
+                try await ClientHostDirectory.borrow([input.string], verb: "read")
+                guard FileManager.default.fileExists(atPath: input.string) else {
+                    log.error("file does not exist", metadata: ["path": "\(input)"])
+                    Application.exit(withError: ArgumentParser.ExitCode(1))
+                }
+                try FileManager.default.copyItem(at: URL(fileURLWithPath: input.string), to: tempFile)
+                resolvedPath = FilePath(tempFile.path(percentEncoded: false))
             } else {
-                guard FileManager.default.createFile(atPath: tempFile.path(), contents: nil) else {
+                guard FileManager.default.createFile(atPath: tempFile.path(percentEncoded: false), contents: nil) else {
                     throw ContainerizationError(.internalError, message: "unable to create temporary file")
                 }
 
@@ -74,7 +86,7 @@ extension Application {
                     fileHandle.write(chunk)
                 }
                 try fileHandle.close()
-                resolvedPath = FilePath(tempFile.path())
+                resolvedPath = FilePath(tempFile.path(percentEncoded: false))
             }
 
             let progressConfig = try ProgressConfig(

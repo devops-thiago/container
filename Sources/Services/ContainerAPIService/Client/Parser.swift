@@ -151,7 +151,7 @@ public struct Parser {
         do {
             // Use FileHandle to support named pipes (FIFOs) and process substitutions
             // like --env-file <(echo "KEY=value")
-            let fileHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            let fileHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: HostPath.absolute(path)))
             defer { try? fileHandle.close() }
             data = try fileHandle.readToEnd() ?? Data()
         } catch {
