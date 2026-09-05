@@ -19,6 +19,21 @@ import Foundation
 import SystemPackage
 
 public enum PathUtils {
+    /// A temporary directory every engine process can reach.
+    ///
+    /// Sandboxed, each process has a temporary directory of its own inside its own container,
+    /// which the others cannot open: a tar the CLI stages for the images helper, or one the
+    /// helper writes for the CLI to stream, has to live somewhere both can see, and the group
+    /// container is that place. Unsandboxed there is one temporary directory for everyone.
+    public static func sharedTemporaryDirectory() throws -> URL {
+        guard let group = BaseConfigPath.groupContainer() else {
+            return FileManager.default.temporaryDirectory
+        }
+        let directory = URL(fileURLWithPath: group.appending("tmp").string, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     public enum BaseConfigPath {
         case home
         case appRoot
