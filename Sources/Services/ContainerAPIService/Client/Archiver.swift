@@ -48,10 +48,13 @@ public final class Archiver: Sendable {
         destination: URL,
         followSymlinks: Bool = false,
         writerConfiguration: ArchiveWriterConfiguration = ArchiveWriterConfiguration(format: .paxRestricted, filter: .gzip),
+        contextDirectory: ContextDirectory? = nil,
+        beforeReading: () throws -> Void = {},
         closure: (URL) -> ArchiveEntryInfo?
     ) throws -> SHA256.Digest {
         let source = source.standardizedFileURL
         let destination = destination.standardizedFileURL
+        let context = try contextDirectory ?? ContextDirectory(source.isDirectory ? source : source.deletingLastPathComponent())
 
         let fileManager = FileManager.default
         try? fileManager.removeItem(at: destination)
@@ -93,11 +96,12 @@ public final class Archiver: Sendable {
             encoder.outputFormatting = .sortedKeys
 
             for info in entryInfo {
-                guard let entry = try Self._createEntry(entryInfo: info) else {
+                let file = try context.open(context.relativePath(info.pathOnHost), followFinalSymlink: followSymlinks)
+                guard let entry = try Self._createEntry(entryInfo: info, file: file) else {
                     throw Error.failedToCreateEntry
                 }
                 hasher.update(data: try encoder.encode(entry))
-                try Self._compressFile(item: info.pathOnHost, entry: entry, archiver: archiver, hasher: &hasher)
+                try Self._compressFile(file: file, entry: entry, archiver: archiver, hasher: &hasher, beforeReading: beforeReading)
             }
             try archiver.finishEncoding()
         } catch {
@@ -109,83 +113,45 @@ public final class Archiver: Sendable {
     }
 
     // MARK: private functions
-    private static func _compressFile(item: URL, entry: WriteEntry, archiver: ArchiveWriter, hasher: inout SHA256) throws {
+    private static func _compressFile(file: ContextDirectory.File, entry: WriteEntry, archiver: ArchiveWriter, hasher: inout SHA256, beforeReading: () throws -> Void) throws {
         let writer = archiver.makeTransactionWriter()
         let bufferSize = Int(1.mib())
-        let readBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { readBuffer.deallocate() }
         try writer.writeHeader(entry: entry)
         if entry.fileType == .regular {
+            try beforeReading()
             // We need to write the data into the archive only if its a regular file
             // Symlinks and directories require us to only write the archive header
-            guard let stream = InputStream(url: item) else {
-                throw Error.failedToCreateInputStream(item)
-            }
-            stream.open()
-            defer { stream.close() }
-            while true {
-                let byteRead = stream.read(readBuffer, maxLength: bufferSize)
-                if byteRead < 0 {
-                    // stream.read returns -1 on error (e.g. TCC access denial under /Users/)
-                    let streamError = stream.streamError
-                    throw Error.failedToReadFile(item, streamError)
-                }
-                if byteRead == 0 {
-                    break
-                }
-                let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: readBuffer), count: byteRead, deallocator: .none)
+            var offset: UInt64 = 0
+            while offset < UInt64(file.metadata.st_size) {
+                let data = try file.read(offset: offset, length: bufferSize)
                 hasher.update(data: data)
                 try data.withUnsafeBytes { pointer in
                     try writer.writeChunk(data: pointer)
                 }
+                offset += UInt64(data.count)
             }
         }
         try writer.finish()
     }
 
-    private static func _createEntry(entryInfo: ArchiveEntryInfo, pathPrefix: String = "") throws -> WriteEntry? {
+    private static func _createEntry(entryInfo: ArchiveEntryInfo, file: ContextDirectory.File, pathPrefix: String = "") throws -> WriteEntry? {
         let entry = WriteEntry()
-        let fileManager = FileManager.default
-        let attributes = try fileManager.attributesOfItem(atPath: entryInfo.pathOnHost.path)
-
-        if let fileType = attributes[.type] as? FileAttributeType {
-            switch fileType {
-            case .typeBlockSpecial, .typeCharacterSpecial, .typeSocket:
-                return nil
-            case .typeDirectory:
-                entry.fileType = .directory
-            case .typeRegular:
-                entry.fileType = .regular
-            case .typeSymbolicLink:
-                entry.fileType = .symbolicLink
-                let symlinkTarget = try fileManager.destinationOfSymbolicLink(atPath: entryInfo.pathOnHost.path)
-                entry.symlinkTarget = symlinkTarget
-            default:
-                return nil
-            }
+        if let target = file.linkTarget {
+            entry.fileType = .symbolicLink
+            entry.symlinkTarget = target
+        } else if file.isDirectory {
+            entry.fileType = .directory
+        } else if file.isRegular {
+            entry.fileType = .regular
+        } else {
+            return nil
         }
-        if let posixPermissions = attributes[.posixPermissions] as? NSNumber {
-            #if os(macOS)
-            entry.permissions = posixPermissions.uint16Value
-            #else
-            entry.permissions = posixPermissions.uint32Value
-            #endif
-        }
-        if let fileSize = attributes[.size] as? UInt64 {
-            entry.size = Int64(fileSize)
-        }
-        if let uid = attributes[.ownerAccountID] as? NSNumber {
-            entry.owner = uid.uint32Value
-        }
-        if let gid = attributes[.groupOwnerAccountID] as? NSNumber {
-            entry.group = gid.uint32Value
-        }
-        if let creationDate = attributes[.creationDate] as? Date {
-            entry.creationDate = creationDate
-        }
-        if let modificationDate = attributes[.modificationDate] as? Date {
-            entry.modificationDate = modificationDate
-        }
+        entry.permissions = file.metadata.st_mode & 0o7777
+        entry.size = file.metadata.st_size
+        entry.owner = file.metadata.st_uid
+        entry.group = file.metadata.st_gid
+        entry.creationDate = Date(timeIntervalSince1970: Double(file.metadata.st_birthtimespec.tv_sec) + Double(file.metadata.st_birthtimespec.tv_nsec) / 1_000_000_000)
+        entry.modificationDate = file.modificationDate
 
         // Apply explicit overrides from ArchiveEntryInfo when provided
         if let overrideOwner = entryInfo.owner {

@@ -54,8 +54,16 @@ import GRPCCore
 /// unpacking the tar.
 actor BuildFSSync: BuildPipelineHandler {
     let contextDir: URL
+    let contextDirectory: ContextDirectory
+    // Synchronization seam for deterministic context-mutation regressions.
+    let beforeRead: @Sendable () throws -> Void
+    let beforeArchiveRead: @Sendable () throws -> Void
 
-    init(_ contextDir: URL) throws {
+    init(
+        _ contextDir: URL,
+        beforeRead: @escaping @Sendable () throws -> Void = {},
+        beforeArchiveRead: @escaping @Sendable () throws -> Void = {}
+    ) throws {
         let resolved = contextDir.resolvingSymlinksInPath()
         guard FileManager.default.fileExists(atPath: contextDir.cleanPath) else {
             throw Error.contextNotFound(contextDir.cleanPath)
@@ -65,6 +73,9 @@ actor BuildFSSync: BuildPipelineHandler {
         }
 
         self.contextDir = resolved
+        self.contextDirectory = try ContextDirectory(resolved)
+        self.beforeRead = beforeRead
+        self.beforeArchiveRead = beforeArchiveRead
     }
 
     nonisolated func accept(_ packet: ServerStream) throws -> Bool {
@@ -119,15 +130,10 @@ actor BuildFSSync: BuildPipelineHandler {
         guard self.contextDir.parentOf(resolved) else {
             throw Error.pathIsNotChild(resolved.cleanPath, self.contextDir.cleanPath)
         }
-        let data = try {
-            if try path.isDir() {
-                return Data()
-            }
-            let file = try LocalContent(path: path.standardizedFileURL)
-            return try file.data(offset: offset, length: size) ?? Data()
-        }()
-
-        let transfer = try path.buildTransfer(id: packet.id, contextDir: self.contextDir, complete: true, data: data)
+        try beforeRead()
+        let file = try contextDirectory.open(contextDirectory.relativePath(path))
+        let data = try file.read(offset: offset, length: size)
+        let transfer = try buildTransfer(file: file, path: path, id: packet.id, data: data)
         var response = ClientStream()
         response.buildID = buildID
         response.buildTransfer = transfer
@@ -155,12 +161,27 @@ actor BuildFSSync: BuildPipelineHandler {
         guard self.contextDir.parentOf(resolved) else {
             throw Error.pathIsNotChild(resolved.cleanPath, self.contextDir.cleanPath)
         }
-        let transfer = try path.buildTransfer(id: packet.id, contextDir: self.contextDir, complete: true)
+        try beforeRead()
+        let file = try contextDirectory.open(contextDirectory.relativePath(path))
+        let transfer = try buildTransfer(file: file, path: path, id: packet.id)
         var response = ClientStream()
         response.buildID = buildID
         response.buildTransfer = transfer
         response.packetType = .buildTransfer(transfer)
         sender.yield(response)
+    }
+
+    private func buildTransfer(file: ContextDirectory.File, path: URL, id: String, data: Data = Data()) throws -> BuildTransfer {
+        BuildTransfer(
+            id: id, source: try contextDirectory.relativePath(path), complete: true,
+            isDir: file.isDirectory,
+            metadata: [
+                "os": "linux", "stage": "fssync",
+                "mode": String(file.metadata.st_mode & 0o7777),
+                "size": String(file.metadata.st_size),
+                "modified_at": file.modificationDate.rfc3339(),
+                "uid": String(file.metadata.st_uid), "gid": String(file.metadata.st_gid),
+            ], data: data)
     }
 
     private struct DirEntry: Hashable {
@@ -205,25 +226,23 @@ actor BuildFSSync: BuildPipelineHandler {
         let followPaths: [String] = packet.followPaths() ?? []
 
         let followPathsWalked = try walk(root: self.contextDir, includePatterns: followPaths)
-        for url in followPathsWalked {
-            guard self.contextDir.absoluteURL.cleanPath != url.absoluteURL.cleanPath else {
-                continue
-            }
-            guard self.contextDir.parentOf(url) else {
-                continue
-            }
-
-            let relPath = try url.relativeChildPath(to: contextDir)
-            let parentPath = try url.deletingLastPathComponent().relativeChildPath(to: contextDir)
-            let entry = DirEntry(url: url, isDirectory: url.hasDirectoryPath, relativePath: relPath)
+        for candidate in followPathsWalked {
+            guard let relPath = try? contextDirectory.relativePath(candidate), !relPath.isEmpty else { continue }
+            // FileDescriptorOps may return /private/var while Foundation names the same
+            // directory /var. Use one context-relative spelling throughout the inventory.
+            let url = contextDir.appendingPathComponent(relPath)
+            let parentPath = try contextDirectory.relativePath(url.deletingLastPathComponent())
+            let file = try contextDirectory.open(relPath, followFinalSymlink: false)
+            let entry = DirEntry(url: url, isDirectory: file.isDirectory, relativePath: relPath)
             entries[parentPath, default: []].insert(entry)
 
-            if url.isSymlink {
+            if file.linkTarget != nil {
                 let target: URL = url.resolvingSymlinksInPath()
-                if self.contextDir.parentOf(target) {
-                    let relPath = try target.relativeChildPath(to: self.contextDir)
-                    let entry = DirEntry(url: target, isDirectory: target.hasDirectoryPath, relativePath: relPath)
-                    let parentPath: String = try target.deletingLastPathComponent().relativeChildPath(to: self.contextDir)
+                if let relPath = try? contextDirectory.relativePath(target), !relPath.isEmpty,
+                    let targetFile = try? contextDirectory.open(relPath, followFinalSymlink: false)
+                {
+                    let entry = DirEntry(url: target, isDirectory: targetFile.isDirectory, relativePath: relPath)
+                    let parentPath = try contextDirectory.relativePath(target.deletingLastPathComponent())
                     entries[parentPath, default: []].insert(entry)
                 }
             }
@@ -234,7 +253,7 @@ actor BuildFSSync: BuildPipelineHandler {
 
         if !wantsTar {
             let fileInfos = try fileOrder.map { rel -> FileInfo in
-                try FileInfo(path: contextDir.appendingPathComponent(rel), contextDir: contextDir)
+                try FileInfo(path: contextDir.appendingPathComponent(rel), context: contextDirectory)
             }
 
             let data = try JSONEncoder().encode(fileInfos)
@@ -270,13 +289,15 @@ actor BuildFSSync: BuildPipelineHandler {
         let tarHash = try Archiver.compress(
             source: contextDir,
             destination: tarURL,
-            writerConfiguration: writerCfg
+            writerConfiguration: writerCfg,
+            contextDirectory: contextDirectory,
+            beforeReading: beforeArchiveRead
         ) { url in
-            guard let rel = try? url.relativeChildPath(to: contextDir) else {
+            guard let rel = try? contextDirectory.relativePath(url) else {
                 return nil
             }
 
-            guard let parent = try? url.deletingLastPathComponent().relativeChildPath(to: self.contextDir) else {
+            guard let parent = try? contextDirectory.relativePath(url.deletingLastPathComponent()) else {
                 return nil
             }
 
@@ -400,17 +421,18 @@ actor BuildFSSync: BuildPipelineHandler {
         let gid: UInt32
         let target: String
 
-        init(path: URL, contextDir: URL) throws {
+        init(path: URL, context: ContextDirectory) throws {
             // Always report the literal, unresolved on-disk symlink target —
             // the same value tar mode provides via Archiver's use of
             // destinationOfSymbolicLink — rather than a host-resolved path.
-            self.target = path.isSymlink ? try FileManager.default.destinationOfSymbolicLink(atPath: path.cleanPath) : ""
-
-            self.name = try path.relativeChildPath(to: contextDir)
-            self.modTime = try path.modTime()
-            self.mode = try path.mode()
-            self.size = try path.size()
-            self.isDir = path.hasDirectoryPath
+            let name = try context.relativePath(path)
+            let file = try context.open(name, followFinalSymlink: false)
+            self.target = file.linkTarget ?? ""
+            self.name = name
+            self.modTime = file.modificationDate.rfc3339()
+            self.mode = UInt32(file.metadata.st_mode & 0o7777)
+            self.size = UInt64(file.metadata.st_size)
+            self.isDir = file.isDirectory
             self.uid = 0
             self.gid = 0
         }
@@ -494,84 +516,6 @@ extension BuildTransfer {
         if let data {
             self.data = data
         }
-    }
-}
-
-extension URL {
-    fileprivate func size() throws -> UInt64 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        if let size = attrs[FileAttributeKey.size] as? UInt64 {
-            return size
-        }
-        throw BuildFSSync.Error.couldNotDetermineFileSize(self.cleanPath)
-    }
-
-    fileprivate func modTime() throws -> String {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        if let date = attrs[FileAttributeKey.modificationDate] as? Date {
-            return date.rfc3339()
-        }
-        throw BuildFSSync.Error.couldNotDetermineModTime(self.cleanPath)
-    }
-
-    fileprivate func isDir() throws -> Bool {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        guard let t = attrs[.type] as? FileAttributeType, t == .typeDirectory else {
-            return false
-        }
-        return true
-    }
-
-    fileprivate func mode() throws -> UInt32 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        if let mode = attrs[FileAttributeKey.posixPermissions] as? NSNumber {
-            return mode.uint32Value
-        }
-        throw BuildFSSync.Error.couldNotDetermineFileMode(self.cleanPath)
-    }
-
-    fileprivate func uid() throws -> UInt32 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        if let uid = attrs[.ownerAccountID] as? UInt32 {
-            return uid
-        }
-        throw BuildFSSync.Error.couldNotDetermineUID(self.cleanPath)
-    }
-
-    fileprivate func gid() throws -> UInt32 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: self.cleanPath)
-        if let gid = attrs[.groupOwnerAccountID] as? UInt32 {
-            return gid
-        }
-        throw BuildFSSync.Error.couldNotDetermineGID(self.cleanPath)
-    }
-
-    fileprivate func buildTransfer(
-        id: String,
-        contextDir: URL? = nil,
-        complete: Bool = false,
-        data: Data = Data()
-    ) throws -> BuildTransfer {
-        let p = try {
-            if let contextDir { return try self.relativeChildPath(to: contextDir) }
-            return self.cleanPath
-        }()
-        return BuildTransfer(
-            id: id,
-            source: String(p),
-            complete: complete,
-            isDir: try self.isDir(),
-            metadata: [
-                "os": "linux",
-                "stage": "fssync",
-                "mode": String(try self.mode()),
-                "size": String(try self.size()),
-                "modified_at": try self.modTime(),
-                "uid": String(try self.uid()),
-                "gid": String(try self.gid()),
-            ],
-            data: data
-        )
     }
 }
 
