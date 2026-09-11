@@ -66,6 +66,7 @@ extension Application {
             case (.container(let id, let path), .local(let localPath)):
                 let srcPath = FilePath(path)
                 let destPath = FilePath(HostPath.absolute(localPath))
+                try await ClientHostDirectory.borrow([HostPath.folderForCopy(for: destPath.string)], verb: "write")
                 var isDirectory: ObjCBool = false
                 let exists = FileManager.default.fileExists(atPath: destPath.string, isDirectory: &isDirectory)
 
@@ -93,6 +94,7 @@ extension Application {
                 print(finalDestPath.string)
             case (.local(let localPath), .container(let id, let path)):
                 let srcPath = FilePath(HostPath.absolute(localPath))
+                try await ClientHostDirectory.borrow([HostPath.folderForCopy(for: srcPath.string)], verb: "read")
                 var isDirectory: ObjCBool = false
 
                 guard let lastComponent = srcPath.lastComponent else {
