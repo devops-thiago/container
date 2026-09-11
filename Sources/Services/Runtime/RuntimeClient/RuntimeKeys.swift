@@ -48,6 +48,8 @@ public enum RuntimeKeys: String {
     case destinationPath
     case fileMode
     case createParents
+    /// The app-issued host folder grant, consumed by the runtime for this copy.
+    case hostDirectoryBookmark
     /// Image path for snapshot operations
     case imagePath
 

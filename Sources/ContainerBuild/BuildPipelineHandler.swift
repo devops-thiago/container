@@ -44,8 +44,8 @@ protocol BuildPipelineHandler: Sendable {
 /// - Resolving and pulling base images (``BuildImageResolver``).
 /// - Relaying builder stdout/stderr to the terminal (``BuildStdio``).
 /// - Enforcing the context root boundary: directory traversal uses `openat(O_NOFOLLOW)`
-///   at every descent step, and every individual file request resolves symlinks to their
-///   canonical path before verifying containment within the context root.
+///   at every descent step. Transfer reads resolve links relative to a pinned context
+///   directory and obtain metadata and content from the same owned file descriptor.
 ///
 /// **Builder shim (`container-builder-shim`)**
 /// A Go process running inside a Linux VM that bridges the host gRPC stream

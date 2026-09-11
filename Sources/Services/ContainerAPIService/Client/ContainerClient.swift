@@ -438,7 +438,7 @@ public struct ContainerClient: Sendable {
         request.set(key: .createParents, value: createParents)
 
         do {
-            try await xpcSend(message: request, timeout: .seconds(300))
+            try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))
         } catch {
             throw ContainerizationError(
                 .internalError,
@@ -457,7 +457,7 @@ public struct ContainerClient: Sendable {
         request.set(key: .createParents, value: createParents)
 
         do {
-            try await xpcSend(message: request, timeout: .seconds(300))
+            try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))
         } catch {
             throw ContainerizationError(
                 .internalError,

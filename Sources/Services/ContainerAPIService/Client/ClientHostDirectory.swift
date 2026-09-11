@@ -70,6 +70,16 @@ public enum HostPath {
         }
         return URL(fileURLWithPath: absolute).deletingLastPathComponent().path
     }
+
+    /// Copy can create missing destination parents. Ask for the existing ancestor the user
+    /// can actually select, rather than a directory that the transfer has yet to create.
+    public static func folderForCopy(for path: String) -> String {
+        var folder = URL(fileURLWithPath: self.folder(for: path))
+        while !FileManager.default.fileExists(atPath: folder.path), folder.path != "/" {
+            folder.deleteLastPathComponent()
+        }
+        return folder.path
+    }
 }
 
 /// Borrowing a folder from the engine for this process.
