@@ -899,7 +899,8 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents)
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: source, verb: "read")
+        try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents, hostDirectoryBookmark: bookmark)
     }
 
     /// Copy a file or directory from the container to the host.
@@ -911,7 +912,30 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        try await client.copyOut(source: source, destination: destination, createParents: createParents)
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: destination, verb: "write")
+        try await client.copyOut(source: source, destination: destination, createParents: createParents, hostDirectoryBookmark: bookmark)
+    }
+
+    /// Copy runs in an existing helper, which cannot inherit access acquired after it was
+    /// spawned. Forward the app's original bookmark, not one minted from borrowed access.
+    /// This also covers SDK callers that do not go through the CLI's metadata checks.
+    static func copyHostDirectoryBookmark(
+        for path: String, verb: String,
+        sandboxed: Bool = ServiceIdentity.appGroup != nil,
+        lend: @Sendable (String) async -> (bookmark: Data?, outcome: HostDirectoryGrants.GrantOutcome) = { await HostDirectoryGrants.shared.lend($0) }
+    ) async throws -> Data? {
+        try Task.checkCancellation()
+        guard sandboxed else { return nil }
+        let folder = HostPath.folderForCopy(for: path)
+        let (bookmark, outcome) = await lend(folder)
+        try Task.checkCancellation()
+        guard case .granted = outcome, let bookmark else {
+            let reason = HostDirectoryGrantHarness.wire(outcome)
+            throw ContainerizationError(
+                .invalidArgument,
+                message: (reason == .granted ? HostDirectoryLendOutcome.declined : reason).message(for: folder, verb: verb))
+        }
+        return bookmark
     }
 
     /// Get statistics for the container.
