@@ -75,3 +75,30 @@ In macOS 15, all containers attach to the default vmnet network. The `container 
 In macOS 15, limitations in the vmnet framework mean that the container network can only be created when the first container starts. Since the network XPC helper provides IP addresses to containers, and the helper has to start before the first container, it is possible for the network helper and vmnet to disagree on the subnet address, resulting in containers that are completely cut off from the network.
 
 Normally, vmnet creates the container network using the CIDR address 192.168.64.1/24, and on macOS 15, `container` defaults to using this CIDR address in the network helper. If your containers have no network access on macOS 15, see [All networking fails on macOS 15](troubleshooting.md#all-networking-fails-on-macos-15) for diagnosis and remediation steps.
+
+### Container stdout and stderr retention
+
+The runtime bounds each container's `stdio.log` to **10 MiB total**, including its
+rollover header. This applies to detached containers and does not depend on a CLI
+attachment or an open app Logs view. Stdout and stderr share one serialized sink.
+
+When the next write would exceed the limit, the runtime truncates the file in
+place and begins a new segment with a unique `[container log rolled over: …]`
+header followed by the new output. A write larger than the segment retains only
+its newest bytes. There are no archived segments; previous segments are discarded.
+The active segment is therefore a bounded recent portion of output, not a durable
+or complete logging system. Restart still clears the segment. Attached stdout and
+stderr receive the original bytes in full, unaffected by the disk retention limit.
+
+In-place rollover preserves existing log descriptors. The changing header lets
+CLI and app readers detect rollover even when the file has already regrown to the
+same size before they run; fresh readers receive the currently retained segment.
+Readers can miss output when a producer rolls over faster than they consume it.
+Use an external logging service for durable retention.
+
+If a disk write or rollover fails, the runtime reports **“Container disk logging
+disabled until restart”** once through its service logger and permanently disables
+that sink for the run. It does not retry on each guest write or flood service logs
+with repeated errors. Attached streams continue to receive output. A subsequent
+container restart creates a fresh sink and retries logging normally. The limit
+covers guest stdout/stderr, not the separate VM boot log or service diagnostics.

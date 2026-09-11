@@ -108,9 +108,11 @@ public actor ContainersService {
         let runtimePlugins = loader.findPlugins().filter { $0.hasType(.runtime) }
         var results = [String: ContainerState]()
         for dir in directories {
+            var autoRemove = false
             do {
                 let (config, options) = try Self.getContainerConfiguration(at: dir)
-                if options?.autoRemove ?? false {
+                autoRemove = options?.autoRemove ?? false
+                if autoRemove {
                     log.info(
                         "reap auto-remove container",
                         metadata: [
@@ -140,14 +142,21 @@ public actor ContainersService {
                     continue
                 }
 
+                // A missing plugin can be restored. Validate before migrating the bundle
+                // or publishing a stopped container that cannot actually be recovered.
+                guard runtimePlugins.contains(where: { $0.name == config.runtimeHandler }) else {
+                    throw ContainerizationError(
+                        .internalError,
+                        message: "failed to find runtime plugin \(config.runtimeHandler); restore the plugin and restart the engine"
+                    )
+                }
                 let exit = ContainerResource.Bundle(path: dir).exitStatus
                 let incarnation: String
                 do {
                     incarnation = try Self.loadOrCreateIncarnation(at: dir)
                 } catch {
                     // A legacy bundle that cannot persist its new identity is still valid
-                    // user data. Abort startup rather than letting the corruption cleanup
-                    // below erase it.
+                    // user data. Fail closed rather than publishing a mutable identity.
                     log.error(
                         "failed to persist container incarnation",
                         metadata: ["path": "\(dir.path)", "error": "\(error)"])
@@ -165,33 +174,29 @@ public actor ContainersService {
                     ),
                 )
                 results[config.id] = state
-                guard runtimePlugins.first(where: { $0.name == config.runtimeHandler }) != nil else {
-                    throw ContainerizationError(
-                        .internalError,
-                        message: "failed to find runtime plugin \(config.runtimeHandler)"
-                    )
-                }
             } catch is IncarnationMigrationFailure {
                 throw ContainerizationError(
                     .internalError,
                     message: "failed to persist an immutable identity for container at \(dir.path)")
             } catch {
-                let loadError = error
-                do {
-                    try Self.removePersistedHostDirectoryBookmarks(at: dir)
-                } catch {
+                if autoRemove {
+                    // In particular, never continue auto-removal when persisted
+                    // authorization could not be removed first.
                     throw ContainerizationError(
                         .internalError,
-                        message: "failed to remove persisted host-directory authorization at \(dir.path)",
+                        message: "failed to reap auto-remove container at \(dir.path); bundle preserved",
                         cause: error
                     )
                 }
-                try? FileManager.default.removeItem(at: dir)
+                // Ordinary recovery failures are not deletion requests. Preserve all
+                // recovery material, including inert bookmarks; no state or grants for
+                // this container have been published. Only explicit removal and the
+                // auto-remove policy may discard its writable filesystem.
                 log.warning(
-                    "failed to load container",
+                    "failed to load container; bundle preserved; repair the reported cause and restart the engine",
                     metadata: [
                         "path": "\(dir.path)",
-                        "error": "\(loadError)",
+                        "error": "\(error)",
                     ])
             }
         }
@@ -328,10 +333,19 @@ public actor ContainersService {
         }
 
         return try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(configuration.id)"]) { context in
+            let path = self.containerRoot.appendingPathComponent(configuration.id)
             guard await self.containers[configuration.id] == nil else {
                 throw ContainerizationError(
                     .exists,
                     message: "container already exists: \(configuration.id)"
+                )
+            }
+            // Failed recovery deliberately leaves data outside the loaded-state map.
+            // Reusing that ID must not overwrite it or let create's rollback delete it.
+            guard !FileManager.default.fileExists(atPath: path.path) else {
+                throw ContainerizationError(
+                    .exists,
+                    message: "container recovery data already exists at \(path.path); repair or move the preserved bundle before reusing this ID"
                 )
             }
 
@@ -378,7 +392,6 @@ public actor ContainersService {
                 )
             }
 
-            let path = self.containerRoot.appendingPathComponent(configuration.id)
             // Bookmarks the caller supplied, or — for the CLI, which has none — whatever the
             // boot-wide pool already holds / can obtain from the embedder. The static file
             // exceptions that used to cover home and /Volumes are gone (QA1773), so every
@@ -400,7 +413,7 @@ public actor ContainersService {
             )
             let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
 
-            do {
+            return try await Self.withNewContainerDirectory(at: path) {
                 self.log.debug(
                     "create snapshot",
                     metadata: [
@@ -427,7 +440,6 @@ public actor ContainersService {
                     runtimeData: runtimeData
                 )
 
-                try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
                 try runtimeConfig.writeRuntimeConfiguration()
                 let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
                 try Self.persistIncarnation(incarnation, at: path)
@@ -452,9 +464,6 @@ public actor ContainersService {
                 }
                 await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
                 return incarnation
-            } catch {
-                try? FileManager.default.removeItem(at: path)
-                throw error
             }
         }
     }
@@ -890,7 +899,8 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents)
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: source, verb: "read")
+        try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents, hostDirectoryBookmark: bookmark)
     }
 
     /// Copy a file or directory from the container to the host.
@@ -902,7 +912,30 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        try await client.copyOut(source: source, destination: destination, createParents: createParents)
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: destination, verb: "write")
+        try await client.copyOut(source: source, destination: destination, createParents: createParents, hostDirectoryBookmark: bookmark)
+    }
+
+    /// Copy runs in an existing helper, which cannot inherit access acquired after it was
+    /// spawned. Forward the app's original bookmark, not one minted from borrowed access.
+    /// This also covers SDK callers that do not go through the CLI's metadata checks.
+    static func copyHostDirectoryBookmark(
+        for path: String, verb: String,
+        sandboxed: Bool = ServiceIdentity.appGroup != nil,
+        lend: @Sendable (String) async -> (bookmark: Data?, outcome: HostDirectoryGrants.GrantOutcome) = { await HostDirectoryGrants.shared.lend($0) }
+    ) async throws -> Data? {
+        try Task.checkCancellation()
+        guard sandboxed else { return nil }
+        let folder = HostPath.folderForCopy(for: path)
+        let (bookmark, outcome) = await lend(folder)
+        try Task.checkCancellation()
+        guard case .granted = outcome, let bookmark else {
+            let reason = HostDirectoryGrantHarness.wire(outcome)
+            throw ContainerizationError(
+                .invalidArgument,
+                message: (reason == .granted ? HostDirectoryLendOutcome.declined : reason).message(for: folder, verb: verb))
+        }
+        return bookmark
     }
 
     /// Get statistics for the container.
@@ -1326,6 +1359,20 @@ public actor ContainersService {
         try Data(incarnation.utf8).write(to: destination, options: .atomic)
     }
 
+    /// Reserve the directory exclusively after asynchronous preparation. A bundle
+    /// restored since create's initial existence check must never enter its rollback.
+    static func withNewContainerDirectory<T: Sendable>(
+        at path: URL, _ body: @Sendable () async throws -> T
+    ) async throws -> T {
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
+        do {
+            return try await body()
+        } catch {
+            try? FileManager.default.removeItem(at: path)
+            throw error
+        }
+    }
+
     static func loadOrCreateIncarnation(at path: URL) throws -> String {
         let source = path.appendingPathComponent(Self.incarnationFilename)
         if let data = try? Data(contentsOf: source),
@@ -1522,11 +1569,19 @@ public actor ContainersService {
         } catch {
             // Bundle doesn't exist or incomplete, try runtime configuration
             // This handles containers that were created but not started yet
-            let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: path)
-            guard let config = runtimeConfig.containerConfiguration else {
-                throw ContainerizationError(.internalError, message: "runtime configuration missing container configuration")
+            let configurationError = error
+            do {
+                let runtimeConfig = try RuntimeConfiguration.readRuntimeConfiguration(from: path)
+                guard let config = runtimeConfig.containerConfiguration else {
+                    throw ContainerizationError(.internalError, message: "runtime configuration missing container configuration")
+                }
+                return (config, runtimeConfig.options)
+            } catch {
+                throw ContainerizationError(
+                    .internalError,
+                    message: "failed to read config.json (\(configurationError)); runtime-configuration.json fallback also failed",
+                    cause: error)
             }
-            return (config, runtimeConfig.options)
         }
     }
 }

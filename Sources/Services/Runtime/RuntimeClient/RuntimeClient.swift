@@ -299,12 +299,15 @@ extension RuntimeClient {
         }
     }
 
-    public func copyIn(source: String, destination: String, mode: UInt32, createParents: Bool = true) async throws {
+    public func copyIn(source: String, destination: String, mode: UInt32, createParents: Bool = true, hostDirectoryBookmark: Data? = nil) async throws {
         let request = XPCMessage(route: RuntimeRoutes.copyIn.rawValue)
         request.set(key: RuntimeKeys.sourcePath.rawValue, value: source)
         request.set(key: RuntimeKeys.destinationPath.rawValue, value: destination)
         request.set(key: RuntimeKeys.fileMode.rawValue, value: UInt64(mode))
         request.set(key: RuntimeKeys.createParents.rawValue, value: createParents)
+        if let hostDirectoryBookmark {
+            request.set(key: RuntimeKeys.hostDirectoryBookmark.rawValue, value: hostDirectoryBookmark)
+        }
 
         do {
             try await self.client.send(request, responseTimeout: .seconds(300))
@@ -317,11 +320,14 @@ extension RuntimeClient {
         }
     }
 
-    public func copyOut(source: String, destination: String, createParents: Bool = true) async throws {
+    public func copyOut(source: String, destination: String, createParents: Bool = true, hostDirectoryBookmark: Data? = nil) async throws {
         let request = XPCMessage(route: RuntimeRoutes.copyOut.rawValue)
         request.set(key: RuntimeKeys.sourcePath.rawValue, value: source)
         request.set(key: RuntimeKeys.destinationPath.rawValue, value: destination)
         request.set(key: RuntimeKeys.createParents.rawValue, value: createParents)
+        if let hostDirectoryBookmark {
+            request.set(key: RuntimeKeys.hostDirectoryBookmark.rawValue, value: hostDirectoryBookmark)
+        }
 
         do {
             try await self.client.send(request, responseTimeout: .seconds(300))
