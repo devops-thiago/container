@@ -775,6 +775,9 @@ public actor RuntimeService {
             let mode = UInt32(message.uint64(key: RuntimeKeys.fileMode.rawValue))
             let createParents = message.bool(key: RuntimeKeys.createParents.rawValue)
 
+            let access = try Self.copyHostAccess(bookmark: message.dataNoCopy(key: RuntimeKeys.hostDirectoryBookmark.rawValue), path: source)
+            defer { access?.stopAccessingSecurityScopedResource() }
+
             let ctr = try getContainer()
             try await ctr.container.copyIn(
                 from: URL(fileURLWithPath: source),
@@ -819,6 +822,9 @@ public actor RuntimeService {
             }
 
             let createParents = message.bool(key: RuntimeKeys.createParents.rawValue)
+
+            let access = try Self.copyHostAccess(bookmark: message.dataNoCopy(key: RuntimeKeys.hostDirectoryBookmark.rawValue), path: destination)
+            defer { access?.stopAccessingSecurityScopedResource() }
 
             let ctr = try getContainer()
             try await ctr.container.copyOut(
