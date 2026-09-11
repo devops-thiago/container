@@ -277,20 +277,24 @@ public actor RuntimeService {
             }
 
             let stdio = message.stdio()
-            let containerLog = try FileHandle(forWritingTo: bundle.containerLog)
+            let containerLog = try BoundedLogWriter(
+                handle: FileHandle(forWritingTo: bundle.containerLog),
+                onFailure: { [log = self.log] error in
+                    log.error("Container disk logging disabled until restart: \(error)")
+                })
             let stdout = {
                 if let h = stdio[1] {
-                    return MultiWriter(handles: [h, containerLog])
+                    return MultiWriter(handles: [h], log: containerLog)
                 }
-                return MultiWriter(handles: [containerLog])
+                return MultiWriter(handles: [], log: containerLog)
             }()
 
             let stderr: MultiWriter? = {
                 if !config.initProcess.terminal {
                     if let h = stdio[2] {
-                        return MultiWriter(handles: [h, containerLog])
+                        return MultiWriter(handles: [h], log: containerLog)
                     }
-                    return MultiWriter(handles: [containerLog])
+                    return MultiWriter(handles: [], log: containerLog)
                 }
                 return nil
             }()
@@ -1545,26 +1549,6 @@ extension Filesystem.SyncMode {
         case .full: "full"
         case .fsync: "fsync"
         case .nosync: "none"
-        }
-    }
-}
-
-struct MultiWriter: Writer {
-    let handles: [FileHandle]
-
-    init(handles: [FileHandle]) {
-        self.handles = handles
-    }
-
-    func close() throws {
-        for handle in handles {
-            try handle.close()
-        }
-    }
-
-    func write(_ data: Data) throws {
-        for handle in handles {
-            try handle.write(contentsOf: data)
         }
     }
 }
