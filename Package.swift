@@ -581,6 +581,10 @@ let package = Package(
             ],
             path: "Sources/Services/RuntimeLinux/Server"
         ),
+        .testTarget(
+            name: "ContainerRuntimeLinuxServerTests",
+            dependencies: ["ContainerRuntimeLinuxServer", "ContainerLog"]
+        ),
         .target(
             name: "ContainerRuntimeClient",
             dependencies: [

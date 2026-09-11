@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerLog
 import ContainerizationError
 import ContainerizationOS
 import Foundation
@@ -97,19 +98,10 @@ extension Application {
                     print(line)
                 }
             } else {
-                // Fast path if all they want is the full file.
-                guard let data = try fh.readToEnd() else {
-                    // Seems you get nil if it's a zero byte read, or you
-                    // try and read from dev/null.
-                    return
-                }
-                guard let str = String(data: data, encoding: .utf8) else {
-                    throw ContainerizationError(
-                        .internalError,
-                        message: "failed to convert container logs to utf8"
-                    )
-                }
-                print(str.trimmingCharacters(in: .newlines))
+                // Preserve raw bytes: a retained segment can start mid-line or mid-scalar.
+                // Empty logs must still enter follow mode and wait for the first output.
+                let data = try fh.readToEnd() ?? Data()
+                FileHandle.standardOutput.write(data)
             }
 
             fflush(stdout)
@@ -120,32 +112,10 @@ extension Application {
         }
 
         private static func followFile(fh: FileHandle) async throws {
-            _ = try fh.seekToEnd()
-            let stream = AsyncStream<String> { cont in
-                fh.readabilityHandler = { handle in
-                    let data = handle.availableData
-                    if data.isEmpty {
-                        // Triggers on container restart - can exit here as well
-                        do {
-                            _ = try fh.seekToEnd()  // To continue streaming existing truncated log files
-                        } catch {
-                            fh.readabilityHandler = nil
-                            cont.finish()
-                            return
-                        }
-                    }
-                    if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                        var lines = str.components(separatedBy: .newlines)
-                        lines = lines.filter { !$0.isEmpty }
-                        for line in lines {
-                            cont.yield(line)
-                        }
-                    }
-                }
-            }
-
-            for await line in stream {
-                print(line)
+            try await LogFileFollow.follow(fh) { data in
+                // Preserve raw stream bytes, including partial lines and UTF-8 scalars
+                // split between reads. Converting each chunk to String loses both.
+                FileHandle.standardOutput.write(data)
             }
         }
     }
