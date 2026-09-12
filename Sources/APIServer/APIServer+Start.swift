@@ -433,7 +433,7 @@ extension APIServer {
             return service
         }
 
-        private func initializeHealthCheckService(
+        func initializeHealthCheckService(
             processNonce: String,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
@@ -448,7 +448,7 @@ extension APIServer {
                 installRoot: installRootURL,
                 logRoot: logRoot,
                 lifecycleGeneration: lifecycleGeneration,
-                processNonce: lifecycleGeneration == nil ? nil : processNonce,
+                processNonce: processNonce,
                 log: log
             )
             routes[XPCRoute.ping] = XPCServer.route(svc.ping)
