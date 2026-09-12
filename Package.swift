@@ -286,6 +286,7 @@ let package = Package(
         .testTarget(
             name: "ContainerAPIServiceTests",
             dependencies: [
+                "container-apiserver",
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
