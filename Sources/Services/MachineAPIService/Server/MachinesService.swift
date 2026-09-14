@@ -151,6 +151,7 @@ public actor MachinesService {
             let path = try self.bundlePath(id: snapshot.id)
             let bundle = MachineBundle(path: path)
             snapshot.diskSize = bundle.diskSize
+            snapshot.initialized = bundle.initialized
             snapshots.append(snapshot)
         }
         let runningIds = snapshots.compactMap { $0.status == .running ? $0.containerId : nil }
@@ -345,9 +346,17 @@ public actor MachinesService {
 
         return try await self.lock.withLock { context in
             var state = try await self._getMachineState(id: id)
+            let path = try self.bundlePath(id: id)
+            let bundle = MachineBundle(path: path)
 
             switch state.snapshot.status {
             case .running:
+                // The snapshot's `initialized` was read when this boot began, before the
+                // caller's first-time user setup ran inside the guest. Answer with the
+                // bundle's current word, or the next caller repeats the setup — and a
+                // repeat that fails stops a machine that was fine.
+                state.snapshot.initialized = bundle.initialized
+                await self.setMachineState(id, state, context: context)
                 return state.snapshot
             case .stopped:
                 break
@@ -360,8 +369,6 @@ public actor MachinesService {
                 throw ContainerizationError(.internalError, message: "container \(cid) already exists")
             }
 
-            let path = try self.bundlePath(id: id)
-            let bundle = MachineBundle(path: path)
             let rootfs = try bundle.machineRootfs
 
             let bootConfig = state.snapshot.bootConfig

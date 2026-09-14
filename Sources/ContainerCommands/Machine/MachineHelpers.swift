@@ -68,9 +68,12 @@ func bootMachine(
             )
         }
 
+        // The setup asks nothing, so it needs a terminal only to show its output, and
+        // only when there is one: raw mode on a pipe or /dev/null fails with ENODEV.
+        let onTerminal = interactive && isatty(STDIN_FILENO) == 1
         let io = try ProcessIO.create(
-            tty: interactive,
-            interactive: interactive,
+            tty: onTerminal,
+            interactive: onTerminal,
             detach: !interactive
         )
         defer {
@@ -81,7 +84,7 @@ func bootMachine(
             executable: "/\(MachineBundle.sbinDirectory)/\(MachineBundle.initFile)",
             arguments: ["-u"],
             environment: snapshot.configuration.processEnvironment,
-            terminal: interactive
+            terminal: onTerminal
         )
 
         let process = try await ContainerClient().createProcess(
@@ -98,8 +101,15 @@ func bootMachine(
             )
         }
     } catch {
+        // A machine whose user setup did not finish is stopped rather than left half made;
+        // say so, because the raw error ("Operation not supported by device") reads as a
+        // broken machine rather than a setup that never ran.
         try? await client.stop(id: snapshot.id)
-        throw error
+        throw ContainerizationError(
+            .internalError,
+            message: "container machine \(snapshot.id) was stopped because its user setup failed: \(error)",
+            cause: error
+        )
     }
 
     return snapshot
