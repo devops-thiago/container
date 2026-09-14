@@ -32,6 +32,25 @@ struct OwnerWatchdogTest {
         OwnerWatchdog(now: now, appIsRunning: { running.value }, log: log)
     }
 
+    /// The health ping is ungated and the listener is up before the watchdog's poll loop has
+    /// run once, so a client can get a healthy reply and send a gated request before the
+    /// first tick. Admission performs that first observation itself: the request is admitted
+    /// whenever the app is running, and refused only when no app has ever been seen.
+    @Test func aGatedRequestBeforeTheFirstTickIsAdmittedWhenTheAppIsRunning() async {
+        let start = ContinuousClock.now
+        let admitted = watchdog(now: start, running: Running(true))
+        // No tick: the very first thing the service is asked is whether it is owned.
+        #expect(await admitted.isOwned())
+        // And the poll loop's own first tick afterwards finds the same answer.
+        #expect(await admitted.tick(now: start.advanced(by: .seconds(1))) == false)
+        #expect(await admitted.isOwned())
+
+        let refused = watchdog(now: start, running: Running(false))
+        #expect(await refused.isOwned() == false, "no app was ever seen; the request is refused, not admitted by default")
+        // The service still waits out its grace for a first owner rather than expiring at once.
+        #expect(await refused.tick(now: start.advanced(by: .seconds(1))) == false)
+    }
+
     @Test func aRunningAppKeepsTheServiceUp() async {
         let start = ContinuousClock.now
         let subject = watchdog(now: start, running: Running(true))
