@@ -75,7 +75,7 @@ extension Application {
                     // with echo on, so the only way in is the one that needs no terminal.
                     throw ContainerizationError(
                         .unsupported,
-                        message: "cannot read the password from this terminal without echoing it (\(error)); "
+                        message: "cannot read the password from this terminal without echoing it; "
                             + "pass it on stdin instead: printf '%s' \"$TOKEN\" | container registry login \(server) --username \(username) --password-stdin",
                         cause: error
                     )
