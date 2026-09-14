@@ -98,8 +98,15 @@ func bootMachine(
             )
         }
     } catch {
+        // A machine whose user setup did not finish is stopped rather than left half made;
+        // say so, because the raw error ("Operation not supported by device") reads as a
+        // broken machine rather than a setup that never ran.
         try? await client.stop(id: snapshot.id)
-        throw error
+        throw ContainerizationError(
+            .internalError,
+            message: "container machine \(snapshot.id) was stopped because its user setup failed: \(error)",
+            cause: error
+        )
     }
 
     return snapshot
