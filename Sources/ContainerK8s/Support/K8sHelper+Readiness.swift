@@ -71,12 +71,24 @@ extension K8sHelper {
         }
     }
 
-    static func waitForReady(containerId: String, client: ContainerClient, log: Logger) async throws {
-        let nodeReadyTimeout = 180
-        let podReadyTimeout = 300
+    /// How long a start waits for the control-plane node to report Ready, and then for
+    /// CoreDNS to be Available, before it fails naming the step. Wall-clock, not probe
+    /// counts: a probe is an exec into the node and takes several seconds of its own, so
+    /// counting probes (180 and 300 of them, once) bounded nothing anyone could plan on —
+    /// a cluster whose CoreDNS never came back after a node restart kept a start busy for
+    /// three quarters of an hour.
+    static let nodeReadyBudget: Duration = .seconds(300)
+    static let podReadyBudget: Duration = .seconds(300)
+    /// After this long without CoreDNS, its deployment is restarted once. Observed after a
+    /// node stop and start: node Ready, coredns 0/1 for twenty minutes, pods restarted by
+    /// kubelet twice; a fresh rollout is what brings it back.
+    static let podRestartAfter: Duration = .seconds(120)
 
-        log.info("Waiting for control-plane node to become ready")
-        for attempt in 1...nodeReadyTimeout {
+    static func waitForReady(containerId: String, client: ContainerClient, log: Logger) async throws {
+        let clock = ContinuousClock()
+        let nodeDeadline = clock.now.advanced(by: nodeReadyBudget)
+        log.info("Waiting for control-plane node to become ready", metadata: ["budget": "\(nodeReadyBudget)"])
+        while true {
             let code: Int32
             do {
                 code = try await runProbe(
@@ -87,18 +99,23 @@ extension K8sHelper {
                     .internalError, message: "k8s cluster \(containerId) stopped unexpectedly during startup: \(error)")
             }
             if code == 0 { break }
-            if attempt == nodeReadyTimeout {
+            guard clock.now < nodeDeadline else {
                 log.info("inspect node state with 'container exec \(containerId) kubectl get nodes -o wide'")
                 throw ContainerizationError(
                     .timeout,
-                    message: "k8s cluster \(containerId) control-plane node did not become Ready within \(nodeReadyTimeout * 2)s"
+                    message:
+                        "k8s cluster \(containerId): the control-plane node did not report Ready within \(Self.describe(nodeReadyBudget)); "
+                        + "the nodes are running, so a later start may succeed — inspect with 'container exec \(containerId) kubectl get nodes -o wide'"
                 )
             }
             try await Task.sleep(for: .seconds(2))
         }
 
-        log.info("Waiting for kube-system pods to become ready")
-        for attempt in 1...podReadyTimeout {
+        let podStart = clock.now
+        let podDeadline = podStart.advanced(by: podReadyBudget)
+        var restartedCoreDNS = false
+        log.info("Waiting for kube-system pods to become ready", metadata: ["budget": "\(podReadyBudget)"])
+        while true {
             let code: Int32
             do {
                 code = try await runProbe(
@@ -109,18 +126,34 @@ extension K8sHelper {
                     .internalError, message: "k8s cluster \(containerId) stopped unexpectedly during startup: \(error)")
             }
             if code == 0 { return }
-            if attempt < podReadyTimeout {
-                try await Task.sleep(for: .seconds(2))
+            if !restartedCoreDNS, clock.now >= podStart.advanced(by: podRestartAfter) {
+                restartedCoreDNS = true
+                log.info("coredns not Available after \(Self.describe(podRestartAfter)); restarting its deployment once")
+                let restarted = try? await runProbe(
+                    client: client, containerId: containerId,
+                    arguments: ["-n", "kube-system", "rollout", "restart", "deployment/coredns"])
+                if restarted != 0 {
+                    log.warning("coredns rollout restart did not succeed", metadata: ["code": "\(restarted.map(String.init) ?? "error")"])
+                }
             }
+            guard clock.now < podDeadline else {
+                log.info("inspect pod state with 'container exec \(containerId) kubectl get pods -n kube-system'")
+                throw ContainerizationError(
+                    .timeout,
+                    message:
+                        "k8s cluster \(containerId): the node is Ready but CoreDNS did not become Available within \(Self.describe(podReadyBudget)); "
+                        + "inspect with 'container exec \(containerId) kubectl get pods -n kube-system'"
+                )
+            }
+            try await Task.sleep(for: .seconds(2))
         }
-        log.info("inspect pod state with 'container exec \(containerId) kubectl get pods -n kube-system'")
-        throw ContainerizationError(
-            .timeout,
-            message: "k8s cluster \(containerId) kube-system pods did not become available within \(podReadyTimeout * 2)s"
-        )
     }
 
-    /// Whether an error, anywhere down its cause chain, says the container is not running.
+    private static func describe(_ duration: Duration) -> String {
+        let seconds = Int(duration.components.seconds)
+        return seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds)s"
+    }
+
     static func isContainerNotRunning(_ error: any Error) -> Bool {
         var current: (any Error)? = error
         while let containerization = current as? ContainerizationError {
