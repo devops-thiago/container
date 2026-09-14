@@ -67,7 +67,19 @@ extension Application {
                 username = try keychain.userPrompt(hostname: server)
             }
             if password == "" {
-                password = try keychain.passwordPrompt()
+                do {
+                    password = try keychain.passwordPrompt()
+                } catch {
+                    // The prompt switches echo off with tcsetattr, and App Sandbox refuses
+                    // that ioctl to the CLI on every terminal. A password is never taken
+                    // with echo on, so the only way in is the one that needs no terminal.
+                    throw ContainerizationError(
+                        .unsupported,
+                        message: "cannot read the password from this terminal without echoing it (\(error)); "
+                            + "pass it on stdin instead: printf '%s' \"$TOKEN\" | container registry login \(server) --username \(username) --password-stdin",
+                        cause: error
+                    )
+                }
                 print()
             }
 
