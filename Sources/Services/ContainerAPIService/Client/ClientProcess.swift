@@ -60,11 +60,13 @@ struct ClientProcessImpl: ClientProcess, Sendable {
     public let processId: String?
 
     private let xpcClient: XPCClient
+    private let deadline: ContinuousClock.Instant?
 
-    init(containerId: String, processId: String? = nil, xpcClient: XPCClient) {
+    init(containerId: String, processId: String? = nil, xpcClient: XPCClient, deadline: ContinuousClock.Instant? = nil) {
         self.containerId = containerId
         self.processId = processId
         self.xpcClient = xpcClient
+        self.deadline = deadline
     }
 
     /// Start the process.
@@ -73,7 +75,7 @@ struct ClientProcessImpl: ClientProcess, Sendable {
         request.set(key: .id, value: containerId)
         request.set(key: .processIdentifier, value: id)
 
-        try await xpcClient.send(request)
+        try await sendProcessRequest(request, using: xpcClient, deadline: deadline)
     }
 
     /// Send a signal to the process.
@@ -103,8 +105,35 @@ struct ClientProcessImpl: ClientProcess, Sendable {
         request.set(key: .id, value: containerId)
         request.set(key: .processIdentifier, value: id)
 
-        let response = try await xpcClient.send(request)
+        let response = try await sendProcessRequest(request, using: xpcClient, deadline: deadline)
         let code = response.int64(key: .exitCode)
         return Int32(code)
+    }
+}
+
+/// Use the remaining operation budget for each XPC reply, rather than starting a new
+/// timeout for every phase. XPCClient's timer resumes the continuation even if the service
+/// never replies; a cancelled task group alone cannot provide that guarantee.
+@discardableResult
+func sendProcessRequest(_ request: XPCMessage, using client: XPCClient, deadline: ContinuousClock.Instant?) async throws -> XPCMessage {
+    guard let deadline else { return try await client.send(request) }
+    try Task.checkCancellation()
+    let remaining = ContinuousClock.now.duration(to: deadline)
+    guard remaining > .zero else {
+        throw ContainerizationError(.timeout, message: "process request deadline expired")
+    }
+    do {
+        let reply = try await client.send(request, responseTimeout: remaining, cancelOnTaskCancellation: true)
+        try Task.checkCancellation()
+        guard ContinuousClock.now < deadline else {
+            throw ContainerizationError(.timeout, message: "process reply arrived after its deadline")
+        }
+        return reply
+    } catch {
+        try Task.checkCancellation()
+        if ContinuousClock.now >= deadline {
+            throw ContainerizationError(.timeout, message: "process request deadline expired", cause: error)
+        }
+        throw error
     }
 }

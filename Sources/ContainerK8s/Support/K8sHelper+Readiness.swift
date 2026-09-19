@@ -24,7 +24,9 @@ import Logging
 extension K8sHelper {
     // MARK: - Readiness
 
-    public static func runProbe(client: ContainerClient, containerId: String, arguments: [String]) async throws -> Int32 {
+    public static func runProbe(
+        client: ContainerClient, containerId: String, arguments: [String], deadline: ContinuousClock.Instant? = nil
+    ) async throws -> Int32 {
         let devNull = FileHandle(forWritingAtPath: "/dev/null")
         defer { try? devNull?.close() }
         let probe = ProcessConfiguration(
@@ -36,7 +38,7 @@ extension K8sHelper {
             containerId: containerId,
             processId: UUID().uuidString.lowercased(),
             configuration: probe,
-            stdio: [nil, devNull, devNull])
+            stdio: [nil, devNull, devNull], deadline: deadline)
         try await proc.start()
         return try await proc.wait()
     }
@@ -84,68 +86,72 @@ extension K8sHelper {
     /// kubelet twice; a fresh rollout is what brings it back.
     static let podRestartAfter: Duration = .seconds(120)
 
+    struct ReadinessTiming: Sendable {
+        var nodeBudget = nodeReadyBudget
+        var podBudget = podReadyBudget
+        var restartAfter = podRestartAfter
+        var retry: Duration = .seconds(2)
+    }
+
     static func waitForReady(containerId: String, client: ContainerClient, log: Logger) async throws {
-        let clock = ContinuousClock()
-        let nodeDeadline = clock.now.advanced(by: nodeReadyBudget)
-        log.info("Waiting for control-plane node to become ready", metadata: ["budget": "\(nodeReadyBudget)"])
-        while true {
-            let code: Int32
-            do {
-                code = try await runProbe(
-                    client: client, containerId: containerId,
-                    arguments: ["wait", "--for=condition=Ready", "node", "--all", "--timeout=2s"])
-            } catch {
-                throw ContainerizationError(
-                    .internalError, message: "k8s cluster \(containerId) stopped unexpectedly during startup: \(error)")
-            }
-            if code == 0 { break }
-            guard clock.now < nodeDeadline else {
-                log.info("inspect node state with 'container exec \(containerId) kubectl get nodes -o wide'")
+        try await waitForReady(containerId: containerId, log: log) { arguments, deadline in
+            try await runProbe(client: client, containerId: containerId, arguments: arguments, deadline: deadline)
+        }
+    }
+
+    /// The injectable clock/probe keeps deadline and heal ordering deterministic in tests.
+    static func waitForReady(
+        containerId: String, log: Logger, timing: ReadinessTiming = .init(),
+        now: @Sendable () -> ContinuousClock.Instant = { .now },
+        sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        probe: @Sendable ([String], ContinuousClock.Instant) async throws -> Int32
+    ) async throws {
+        func checkDeadline(_ deadline: ContinuousClock.Instant, budget: Duration, pods: Bool) throws {
+            try Task.checkCancellation()
+            guard now() < deadline else {
+                let step = pods ? "the node is Ready but CoreDNS did not become Available" : "the control-plane node did not report Ready"
+                let inspect = pods ? "get pods -n kube-system" : "get nodes -o wide"
                 throw ContainerizationError(
                     .timeout,
-                    message:
-                        "k8s cluster \(containerId): the control-plane node did not report Ready within \(Self.describe(nodeReadyBudget)); "
-                        + "the nodes are running, so a later start may succeed — inspect with 'container exec \(containerId) kubectl get nodes -o wide'"
-                )
+                    message: "k8s cluster \(containerId): \(step) within \(Self.describe(budget)); "
+                        + "inspect with 'container exec \(containerId) kubectl \(inspect)'")
             }
-            try await Task.sleep(for: .seconds(2))
         }
 
-        let podStart = clock.now
-        let podDeadline = podStart.advanced(by: podReadyBudget)
-        var restartedCoreDNS = false
-        log.info("Waiting for kube-system pods to become ready", metadata: ["budget": "\(podReadyBudget)"])
-        while true {
-            let code: Int32
-            do {
-                code = try await runProbe(
-                    client: client, containerId: containerId,
-                    arguments: ["wait", "--for=condition=Available", "deployment/coredns", "-n", "kube-system", "--timeout=2s"])
-            } catch {
-                throw ContainerizationError(
-                    .internalError, message: "k8s cluster \(containerId) stopped unexpectedly during startup: \(error)")
-            }
-            if code == 0 { return }
-            if !restartedCoreDNS, clock.now >= podStart.advanced(by: podRestartAfter) {
-                restartedCoreDNS = true
-                log.info("coredns not Available after \(Self.describe(podRestartAfter)); restarting its deployment once")
-                let restarted = try? await runProbe(
-                    client: client, containerId: containerId,
-                    arguments: ["-n", "kube-system", "rollout", "restart", "deployment/coredns"])
-                if restarted != 0 {
-                    log.warning("coredns rollout restart did not succeed", metadata: ["code": "\(restarted.map(String.init) ?? "error")"])
+        for pods in [false, true] {
+            let budget = pods ? timing.podBudget : timing.nodeBudget
+            let start = now()
+            let deadline = start.advanced(by: budget)
+            var restartedCoreDNS = false
+            log.info("Waiting for readiness", metadata: ["step": "\(pods ? "CoreDNS" : "control-plane node")", "budget": "\(budget)"])
+            while true {
+                try checkDeadline(deadline, budget: budget, pods: pods)
+                let arguments =
+                    pods
+                    ? ["wait", "--for=condition=Available", "deployment/coredns", "-n", "kube-system", "--timeout=2s"]
+                    : ["wait", "--for=condition=Ready", "node", "--all", "--timeout=2s"]
+                let code: Int32
+                do {
+                    code = try await probe(arguments, deadline)
+                } catch {
+                    try checkDeadline(deadline, budget: budget, pods: pods)
+                    throw ContainerizationError(
+                        .internalError, message: "k8s cluster \(containerId) stopped unexpectedly during startup", cause: error)
                 }
+                // A late successful reply cannot turn an expired step into a success.
+                try checkDeadline(deadline, budget: budget, pods: pods)
+                if code == 0 { break }
+                if pods, !restartedCoreDNS, now() >= start.advanced(by: timing.restartAfter) {
+                    restartedCoreDNS = true
+                    log.info("coredns is not Available; restarting its deployment once")
+                    let restarted = try? await probe(["-n", "kube-system", "rollout", "restart", "deployment/coredns"], deadline)
+                    try checkDeadline(deadline, budget: budget, pods: true)
+                    if restarted != 0 {
+                        log.warning("coredns rollout restart did not succeed", metadata: ["code": "\(restarted.map(String.init) ?? "error")"])
+                    }
+                }
+                try await sleep(min(timing.retry, now().duration(to: deadline)))
             }
-            guard clock.now < podDeadline else {
-                log.info("inspect pod state with 'container exec \(containerId) kubectl get pods -n kube-system'")
-                throw ContainerizationError(
-                    .timeout,
-                    message:
-                        "k8s cluster \(containerId): the node is Ready but CoreDNS did not become Available within \(Self.describe(podReadyBudget)); "
-                        + "inspect with 'container exec \(containerId) kubectl get pods -n kube-system'"
-                )
-            }
-            try await Task.sleep(for: .seconds(2))
         }
     }
 

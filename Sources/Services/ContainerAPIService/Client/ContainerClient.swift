@@ -37,6 +37,10 @@ public struct ContainerClient: Sendable {
         self.xpcClient = XPCClient(service: Self.serviceIdentifier)
     }
 
+    init(xpcClient: XPCClient) {
+        self.xpcClient = xpcClient
+    }
+
     @discardableResult
     private func xpcSend(
         message: XPCMessage,
@@ -338,11 +342,13 @@ public struct ContainerClient: Sendable {
 
     /// Create a new process inside a running container.
     /// The process is in a created state and must still be started.
+    /// An optional deadline bounds creation and subsequent start/wait requests together.
     public func createProcess(
         containerId: String,
         processId: String,
         configuration: ProcessConfiguration,
-        stdio: [FileHandle?]
+        stdio: [FileHandle?],
+        deadline: ContinuousClock.Instant? = nil
     ) async throws -> ClientProcess {
         do {
             let request = XPCMessage(route: .containerCreateProcess)
@@ -368,8 +374,8 @@ public struct ContainerClient: Sendable {
                 }
             }
 
-            try await xpcClient.send(request)
-            return ClientProcessImpl(containerId: containerId, processId: processId, xpcClient: xpcClient)
+            try await sendProcessRequest(request, using: xpcClient, deadline: deadline)
+            return ClientProcessImpl(containerId: containerId, processId: processId, xpcClient: xpcClient, deadline: deadline)
         } catch {
             throw ContainerizationError(
                 .internalError,
