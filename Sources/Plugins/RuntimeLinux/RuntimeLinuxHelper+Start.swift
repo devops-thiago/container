@@ -25,7 +25,6 @@ import ContainerXPC
 import Foundation
 import Logging
 import NIO
-import ContainerVersion
 import SystemPackage
 
 extension RuntimeLinuxHelper {
