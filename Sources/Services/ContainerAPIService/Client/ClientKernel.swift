@@ -73,7 +73,27 @@ extension ClientKernel {
         expectedDigest: String? = nil,
         force: Bool
     ) async throws -> KernelInstallation {
-        let client = newClient()
+        try await installKernelFromTar(
+            tarFile: tarFile,
+            kernelFilePath: kernelFilePath,
+            platform: platform,
+            progressUpdate: progressUpdate,
+            expectedDigest: expectedDigest,
+            force: force,
+            client: newClient())
+    }
+
+    /// The transport is a parameter so that a test can stand in for the daemon.
+    @discardableResult
+    static func installKernelFromTar(
+        tarFile: String,
+        kernelFilePath: String,
+        platform: SystemPlatform,
+        progressUpdate: ProgressUpdateHandler? = nil,
+        expectedDigest: String? = nil,
+        force: Bool,
+        client: XPCClient
+    ) async throws -> KernelInstallation {
         let message = XPCMessage(route: .installKernel)
 
         message.set(key: .kernelTarURL, value: tarFile)
@@ -91,7 +111,21 @@ extension ClientKernel {
             progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: message)
         }
 
-        let reply = try await client.send(message)
+        let reply: XPCMessage
+        do {
+            // An install from a URL is a download of hundreds of megabytes, and the one
+            // request here that a person may reasonably give up on.
+            reply = try await client.send(message, cancelOnTaskCancellation: true)
+        } catch {
+            // Closing the connection is what tells the daemon. It cancels a request's work
+            // when the peer goes away and learns of a caller that stopped waiting in no other
+            // way, so without this the download carries on to its end for nobody. The pending
+            // reply keeps this client alive, so leaving it to `deinit` would never close it.
+            client.close()
+            // And stop listening for progress: a caller that gave up must hear no more of it.
+            await progressUpdateClient?.finish()
+            throw error
+        }
         await progressUpdateClient?.finish()
         return try kernelInstallation(from: reply)
     }
