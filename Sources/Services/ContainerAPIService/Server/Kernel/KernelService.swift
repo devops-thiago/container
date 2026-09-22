@@ -407,10 +407,12 @@ public actor KernelService {
             if let progressUpdate {
                 downloadProgressUpdate = ProgressTaskCoordinator.handler(for: downloadTask, from: progressUpdate)
             }
+            // The downloader logs its own stalls and retries, under the same rule: no URL.
             try await ContainerAPIClient.FileDownloader.downloadFile(
                 url: tar,
                 to: tarFile,
-                progressUpdate: downloadProgressUpdate)
+                progressUpdate: downloadProgressUpdate,
+                log: self.log)
             await taskManager.finish()
         }
         await progressUpdate?([
