@@ -1532,6 +1532,15 @@ struct ParserTest {
 
     // MARK: - Collection capacity hints
 
+    @Test("a hostname is one DNS label")
+    func testHostnameParse() throws {
+        #expect(try Parser.hostname("web") == "web")
+        #expect(try Parser.hostname("db-01") == "db-01")
+        for bad in ["", "-web", "web.internal", "a b", String(repeating: "x", count: 64)] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.hostname(bad) }
+        }
+    }
+
     @Test("sysctls parse key=value pairs, keeping a value's own equals signs")
     func testSysctlsParse() throws {
         let result = try Parser.sysctls(["net.ipv4.ip_forward=1", "kernel.msgmax=65536", "net.core.somaxconn==4096"])

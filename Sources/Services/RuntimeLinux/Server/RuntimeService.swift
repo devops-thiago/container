@@ -1256,7 +1256,9 @@ public actor RuntimeService {
             czConfig.sockets.append(socketConfig)
         }
 
-        let hostnameSource = config.networks.first?.options.hostname ?? config.id
+        // A hostname of the container's own beats the one its attachment carries: the guest
+        // sees the name asked for, while the network keeps resolving the container's name.
+        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
         czConfig.hostname =
             hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
             .first

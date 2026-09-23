@@ -174,6 +174,7 @@ public struct Flags {
             dns: Flags.DNS,
             dnsDisabled: Bool,
             entrypoint: String?,
+            hostname: String?,
             initImage: String?,
             kernel: String?,
             kernelArgs: [String],
@@ -207,6 +208,7 @@ public struct Flags {
             self.dns = dns
             self.dnsDisabled = dnsDisabled
             self.entrypoint = entrypoint
+            self.hostname = hostname
             self.initImage = initImage
             self.kernel = kernel
             self.kernelArgs = kernelArgs
@@ -265,6 +267,9 @@ public struct Flags {
             )
         )
         public var entrypoint: String?
+
+        @Option(name: .long, help: "Set the hostname the container sees (default: the container's name)")
+        public var hostname: String?
 
         @Flag(name: .customLong("init"), help: "Run an init process inside the container that forwards signals and reaps processes")
         public var useInit = false

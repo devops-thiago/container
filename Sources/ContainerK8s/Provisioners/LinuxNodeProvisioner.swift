@@ -105,6 +105,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             dns: .init(domain: nil, nameservers: [], options: [], searchDomains: []),
             dnsDisabled: false,
             entrypoint: nil,
+            hostname: nil,
             initImage: nil,
             kernel: nil,
             kernelArgs: [],

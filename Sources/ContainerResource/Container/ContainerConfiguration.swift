@@ -34,6 +34,11 @@ public struct ContainerConfiguration: Sendable, Codable {
     public var sysctls: [String: String] = [:]
     /// The networks the container will be added to.
     public var networks: [AttachmentConfiguration] = []
+    /// The hostname the guest sees, when it is not to be the container's own name.
+    ///
+    /// Guest-local, as Docker's `--hostname` is: the name other containers resolve stays the
+    /// container's name, which is what the network attachment carries.
+    public var hostname: String? = nil
     /// The DNS configuration for the container.
     public var dns: DNSConfiguration? = nil
     /// Whether to enable rosetta x86-64 translation for the container.
@@ -82,6 +87,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case labels
         case sysctls
         case networks
+        case hostname
         case dns
         case rosetta
         case initProcess
@@ -120,6 +126,7 @@ public struct ContainerConfiguration: Sendable, Codable {
             networks = []
         }
 
+        hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)

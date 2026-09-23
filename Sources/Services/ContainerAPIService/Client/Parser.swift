@@ -241,6 +241,16 @@ public struct Parser {
         return envVar
     }
 
+    /// The guest hostname `--hostname` asks for: one DNS label, as a container name must be.
+    public static func hostname(_ hostname: String) throws -> String {
+        guard isValidDomainNameLabel(hostname) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "invalid hostname '\(hostname)': must be a DNS label of letters, digits and hyphens, up to 63 characters")
+        }
+        return hostname
+    }
+
     /// `key=value` pairs for the guest's `/proc/sys`, as `--sysctl` gives them.
     ///
     /// Stricter than labels: a key without a value is not a request the kernel can act on,
