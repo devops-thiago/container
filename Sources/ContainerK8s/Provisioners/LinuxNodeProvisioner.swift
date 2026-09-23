@@ -128,6 +128,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             runtime: nil,
             ssh: false,
             shmSize: nil,
+            sysctls: [],
             tmpFs: [],
             useInit: false,
             virtualization: false,

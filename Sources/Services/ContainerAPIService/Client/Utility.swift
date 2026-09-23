@@ -262,6 +262,7 @@ public struct Utility {
         }
 
         config.labels = try Parser.labels(management.labels)
+        config.sysctls = try Parser.sysctls(management.sysctls)
 
         config.publishedPorts = try Parser.publishPorts(management.publishPorts)
         guard config.publishedPorts.count <= publishedPortCountLimit else {

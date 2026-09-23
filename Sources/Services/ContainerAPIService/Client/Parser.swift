@@ -241,6 +241,27 @@ public struct Parser {
         return envVar
     }
 
+    /// `key=value` pairs for the guest's `/proc/sys`, as `--sysctl` gives them.
+    ///
+    /// Stricter than labels: a key without a value is not a request the kernel can act on,
+    /// and one key given twice is a mistake to point out rather than a last-wins to guess at.
+    /// The runtime's own defaults still fill only the keys left unset here.
+    public static func sysctls(_ rawSysctls: [String]) throws -> [String: String] {
+        var result: [String: String] = Dictionary(minimumCapacity: rawSysctls.count)
+        for sysctl in rawSysctls {
+            let parts = sysctl.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "invalid sysctl '\(sysctl)': expected <key>=<value>")
+            }
+            let key = String(parts[0])
+            guard result[key] == nil else {
+                throw ContainerizationError(.invalidArgument, message: "sysctl '\(key)' is given more than once")
+            }
+            result[key] = String(parts[1])
+        }
+        return result
+    }
+
     public static func labels(_ rawLabels: [String]) throws -> [String: String] {
         var result: [String: String] = Dictionary(minimumCapacity: rawLabels.count)
         for label in rawLabels {

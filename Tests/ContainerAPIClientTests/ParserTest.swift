@@ -1532,6 +1532,41 @@ struct ParserTest {
 
     // MARK: - Collection capacity hints
 
+    @Test("sysctls parse key=value pairs, keeping a value's own equals signs")
+    func testSysctlsParse() throws {
+        let result = try Parser.sysctls(["net.ipv4.ip_forward=1", "kernel.msgmax=65536", "net.core.somaxconn==4096"])
+        #expect(result == ["net.ipv4.ip_forward": "1", "kernel.msgmax": "65536", "net.core.somaxconn": "=4096"])
+        #expect(try Parser.sysctls([]).isEmpty)
+    }
+
+    @Test("a sysctl without a value, or without a key, names the entry")
+    func testSysctlsRejectMissingValueOrKey() {
+        for entry in ["net.ipv4.ip_forward", "", "=1"] {
+            #expect(throws: ContainerizationError.self) { try Parser.sysctls([entry]) }
+            do {
+                _ = try Parser.sysctls([entry])
+            } catch let error as ContainerizationError {
+                #expect(error.code == .invalidArgument)
+                #expect(error.message == "invalid sysctl '\(entry)': expected <key>=<value>")
+            } catch {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+    }
+
+    @Test("a sysctl given twice is refused, even with the same value")
+    func testSysctlsRejectDuplicateKey() {
+        do {
+            _ = try Parser.sysctls(["net.ipv4.ip_forward=1", "kernel.msgmax=1", "net.ipv4.ip_forward=1"])
+            Issue.record("a duplicate key was accepted")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidArgument)
+            #expect(error.message == "sysctl 'net.ipv4.ip_forward' is given more than once")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
     @Test("labels with large input preserves all entries")
     func testLabelsLargeInput() throws {
         let labels = (0..<100).map { "key\($0)=value\($0)" }
