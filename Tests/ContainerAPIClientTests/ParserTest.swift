@@ -1562,6 +1562,20 @@ struct ParserTest {
         #expect(try Flags.ImageFetch.parse([]).pull == .missing)
     }
 
+    @Test("restart policies parse Docker's four spellings and a retry count")
+    func testRestartPolicyParse() throws {
+        #expect(try Parser.restartPolicy("no") == .no)
+        #expect(try Parser.restartPolicy("always") == .always)
+        #expect(try Parser.restartPolicy("unless-stopped") == .unlessStopped)
+        #expect(try Parser.restartPolicy("on-failure") == .onFailure(maxRetries: nil))
+        #expect(try Parser.restartPolicy("on-failure:3") == .onFailure(maxRetries: 3))
+        for bad in ["", "yes", "unless_stopped", "on-failure:", "on-failure:0", "on-failure:-1", "on-failure:3:4", "always:2"] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.restartPolicy(bad) }
+        }
+        #expect(try Parser.restartPolicy("on-failure:3").description == "on-failure:3")
+        #expect(try Parser.restartPolicy("unless-stopped").description == "unless-stopped")
+    }
+
     @Test("a hostname is one DNS label")
     func testHostnameParse() throws {
         #expect(try Parser.hostname("web") == "web")

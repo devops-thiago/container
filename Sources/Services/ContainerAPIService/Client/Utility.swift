@@ -288,6 +288,7 @@ public struct Utility {
         config.sysctls = try Parser.sysctls(management.sysctls)
         config.hostname = try management.hostname.map(Parser.hostname)
         config.extraHosts = try Parser.extraHosts(management.addHosts)
+        config.restartPolicy = try management.restart.map(Parser.restartPolicy)
 
         config.publishedPorts = try Parser.publishPorts(management.publishPorts)
         guard config.publishedPorts.count <= publishedPortCountLimit else {

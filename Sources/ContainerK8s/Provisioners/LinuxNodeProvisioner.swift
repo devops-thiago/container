@@ -126,6 +126,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             readOnly: false,
             readonlyPaths: [],
             remove: remove,
+            restart: nil,
             rosetta: true,
             runtime: nil,
             ssh: false,

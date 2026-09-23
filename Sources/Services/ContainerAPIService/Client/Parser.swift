@@ -265,6 +265,16 @@ public struct Parser {
         }
     }
 
+    /// `--restart` in Docker's spellings; `no` is the same as leaving the flag out.
+    public static func restartPolicy(_ text: String) throws -> ContainerConfiguration.RestartPolicy {
+        guard let policy = ContainerConfiguration.RestartPolicy(text) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "invalid restart policy '\(text)': expected no, always, unless-stopped or on-failure[:<n>]")
+        }
+        return policy
+    }
+
     /// The guest hostname `--hostname` asks for: one DNS label, as a container name must be.
     public static func hostname(_ hostname: String) throws -> String {
         guard isValidDomainNameLabel(hostname) else {

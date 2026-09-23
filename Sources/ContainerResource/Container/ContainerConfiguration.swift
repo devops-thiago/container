@@ -42,6 +42,13 @@ public struct ContainerConfiguration: Sendable, Codable {
     /// Names the guest resolves to fixed addresses, appended to its /etc/hosts after the
     /// entries for its network peers.
     public var extraHosts: [ExtraHost] = []
+    /// What should happen to the container when it exits or the engine starts.
+    ///
+    /// Kept on the container so that every client sees the same answer. Nothing in the
+    /// engine acts on it yet: the runtime does not restart a process that exited, and it is
+    /// the embedding app that starts `always` and `unlessStopped` containers with the engine.
+    /// Absent means `no`.
+    public var restartPolicy: RestartPolicy? = nil
     /// The DNS configuration for the container.
     public var dns: DNSConfiguration? = nil
     /// Whether to enable rosetta x86-64 translation for the container.
@@ -92,6 +99,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case networks
         case hostname
         case extraHosts
+        case restartPolicy
         case dns
         case rosetta
         case initProcess
@@ -132,6 +140,7 @@ public struct ContainerConfiguration: Sendable, Codable {
 
         hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
         extraHosts = try container.decodeIfPresent([ExtraHost].self, forKey: .extraHosts) ?? []
+        restartPolicy = try container.decodeIfPresent(RestartPolicy.self, forKey: .restartPolicy)
         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)
@@ -164,6 +173,73 @@ public struct ContainerConfiguration: Sendable, Codable {
         public init(name: String, address: String) {
             self.name = name
             self.address = address
+        }
+    }
+
+    /// Docker's restart policies, with Docker's spellings on the wire and on the command line.
+    public enum RestartPolicy: Sendable, Equatable, Codable, CustomStringConvertible {
+        case no
+        case always
+        case unlessStopped
+        /// Restart on a non-zero exit, at most `maxRetries` times when that is set.
+        case onFailure(maxRetries: Int?)
+
+        /// The command-line spelling: `no`, `always`, `unless-stopped`, `on-failure` or
+        /// `on-failure:<n>`.
+        public var description: String {
+            switch self {
+            case .no: "no"
+            case .always: "always"
+            case .unlessStopped: "unless-stopped"
+            case .onFailure(let maxRetries): maxRetries.map { "on-failure:\($0)" } ?? "on-failure"
+            }
+        }
+
+        /// The command-line spelling parsed back, or nil for anything else.
+        public init?(_ text: String) {
+            switch text {
+            case "no": self = .no
+            case "always": self = .always
+            case "unless-stopped": self = .unlessStopped
+            case "on-failure": self = .onFailure(maxRetries: nil)
+            default:
+                let parts = text.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2, parts[0] == "on-failure", let retries = Int(parts[1]), retries > 0 else { return nil }
+                self = .onFailure(maxRetries: retries)
+            }
+        }
+
+        // Encoded as the name and an optional count, so that `inspect` shows `"name":
+        // "on-failure", "maxRetries": 3` rather than the shape of a Swift enum.
+        private enum CodingKeys: String, CodingKey {
+            case name
+            case maxRetries
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let name = try container.decode(String.self, forKey: .name)
+            let maxRetries = try container.decodeIfPresent(Int.self, forKey: .maxRetries)
+            switch name {
+            case "no": self = .no
+            case "always": self = .always
+            case "unless-stopped": self = .unlessStopped
+            case "on-failure": self = .onFailure(maxRetries: maxRetries)
+            default:
+                throw DecodingError.dataCorruptedError(forKey: .name, in: container, debugDescription: "unknown restart policy '\(name)'")
+            }
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            switch self {
+            case .no: try container.encode("no", forKey: .name)
+            case .always: try container.encode("always", forKey: .name)
+            case .unlessStopped: try container.encode("unless-stopped", forKey: .name)
+            case .onFailure(let maxRetries):
+                try container.encode("on-failure", forKey: .name)
+                try container.encodeIfPresent(maxRetries, forKey: .maxRetries)
+            }
         }
     }
 

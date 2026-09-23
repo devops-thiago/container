@@ -191,6 +191,7 @@ public struct Flags {
             readOnly: Bool,
             readonlyPaths: [String],
             remove: Bool,
+            restart: String?,
             rosetta: Bool,
             runtime: String?,
             ssh: Bool,
@@ -226,6 +227,7 @@ public struct Flags {
             self.readOnly = readOnly
             self.readonlyPaths = readonlyPaths
             self.remove = remove
+            self.restart = restart
             self.rosetta = rosetta
             self.runtime = runtime
             self.ssh = ssh
@@ -374,6 +376,15 @@ public struct Flags {
 
         @Flag(name: [.customLong("rm"), .long], help: "Remove the container after it stops")
         public var remove = false
+
+        @Option(
+            name: .long,
+            help: .init(
+                "Restart policy kept on the container: no, always, unless-stopped or on-failure[:<n>]. Applied when the engine starts; exit-driven restarts arrive in a later release",
+                valueName: "policy"
+            )
+        )
+        public var restart: String?
 
         @Flag(name: .long, help: "Enable Rosetta in the container")
         public var rosetta = false

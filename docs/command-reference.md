@@ -71,6 +71,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
+*   `--restart <policy>`: Restart policy kept on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Applied when the engine starts; exit-driven restarts arrive in a later release
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)
 *   `--ssh`: Forward SSH agent socket to container
@@ -251,6 +252,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
+*   `--restart <policy>`: Restart policy kept on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Applied when the engine starts; exit-driven restarts arrive in a later release
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)  
 *   `--ssh`: Forward SSH agent socket to container
