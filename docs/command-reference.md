@@ -103,6 +103,7 @@ container run [<options>] <image> [<arguments> ...]
 **Image Fetch Options**
 
 *   `--max-concurrent-downloads <max-concurrent-downloads>`: Maximum number of concurrent downloads (default: 3)
+*   `--pull <pull>`: When to fetch the image from its registry: `always`, `missing` (default) or `never`
 
 **Examples**
 
@@ -266,6 +267,7 @@ container create [<options>] <image> [<arguments> ...]
 **Image Fetch Options**
 
 *   `--max-concurrent-downloads <max-concurrent-downloads>`: Maximum number of concurrent downloads (default: 3)
+*   `--pull <pull>`: When to fetch the image from its registry: `always`, `missing` (default) or `never`
 
 ### `container start`
 

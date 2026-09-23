@@ -1551,6 +1551,17 @@ struct ParserTest {
         }
     }
 
+    @Test("the pull policy has Docker's three spellings and defaults to missing")
+    func testPullPolicyFlag() throws {
+        #expect(Flags.ImageFetch.PullPolicy(argument: "always") == .always)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "missing") == .missing)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "never") == .never)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "if-missing") == nil)
+        #expect(Flags.ImageFetch(maxConcurrentDownloads: 3).pull == .missing)
+        #expect(try Flags.ImageFetch.parse(["--pull", "never"]).pull == .never)
+        #expect(try Flags.ImageFetch.parse([]).pull == .missing)
+    }
+
     @Test("a hostname is one DNS label")
     func testHostnameParse() throws {
         #expect(try Parser.hostname("web") == "web")

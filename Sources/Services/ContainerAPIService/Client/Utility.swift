@@ -116,14 +116,37 @@ public struct Utility {
         ])
         let taskManager = ProgressTaskCoordinator()
         let fetchTask = await taskManager.startTask()
-        let img = try await ClientImage.fetch(
-            reference: image,
-            platform: requestedPlatform,
-            scheme: scheme,
-            containerSystemConfig: containerSystemConfig,
-            progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
-            maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
-        )
+        let img: ClientImage
+        switch imageFetch.pull {
+        case .always:
+            // The registry every time, so a tag that moved is followed; the scheme rule
+            // for the registry is the same one a plain fetch obeys.
+            img = try await ClientImage.pull(
+                reference: image,
+                platform: requestedPlatform,
+                scheme: scheme,
+                containerSystemConfig: containerSystemConfig,
+                progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
+            )
+        case .missing:
+            img = try await ClientImage.fetch(
+                reference: image,
+                platform: requestedPlatform,
+                scheme: scheme,
+                containerSystemConfig: containerSystemConfig,
+                progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads
+            )
+        case .never:
+            do {
+                img = try await ClientImage.get(reference: image, containerSystemConfig: containerSystemConfig)
+            } catch let error as ContainerizationError where error.isCode(.notFound) {
+                throw ContainerizationError(
+                    .notFound,
+                    message: "image \(image) is not available locally and --pull never forbids fetching it")
+            }
+        }
 
         // Unpack a fetched image before use
         await progressUpdate([

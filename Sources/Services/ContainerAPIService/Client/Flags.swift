@@ -445,13 +445,27 @@ public struct Flags {
     }
 
     public struct ImageFetch: ParsableArguments {
+        /// When the image is fetched from its registry, and when what is local is enough.
+        public enum PullPolicy: String, ExpressibleByArgument, CaseIterable, Sendable {
+            /// Fetch from the registry every time, so a moving tag is followed.
+            case always
+            /// Fetch only when there is no local image for the reference and platform.
+            case missing
+            /// Never fetch; fail when the image is not local.
+            case never
+        }
+
         public init() {}
 
-        public init(maxConcurrentDownloads: Int) {
+        public init(maxConcurrentDownloads: Int, pull: PullPolicy = .missing) {
             self.maxConcurrentDownloads = maxConcurrentDownloads
+            self.pull = pull
         }
 
         @Option(name: .long, help: "Maximum number of concurrent downloads")
         public var maxConcurrentDownloads: Int = 3
+
+        @Option(name: .long, help: "When to fetch the image from its registry: always, missing or never")
+        public var pull: PullPolicy = .missing
     }
 }
