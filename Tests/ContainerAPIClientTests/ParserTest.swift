@@ -1594,7 +1594,7 @@ struct ParserTest {
 
     @Test("a sysctl without a value, or without a key, names the entry")
     func testSysctlsRejectMissingValueOrKey() {
-        for entry in ["net.ipv4.ip_forward", "", "=1"] {
+        for entry in ["net.ipv4.ip_forward", "net.ipv4.ip_forward=", "", "=1"] {
             #expect(throws: ContainerizationError.self) { try Parser.sysctls([entry]) }
             do {
                 _ = try Parser.sysctls([entry])

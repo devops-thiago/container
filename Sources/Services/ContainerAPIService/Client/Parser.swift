@@ -294,7 +294,7 @@ public struct Parser {
         var result: [String: String] = Dictionary(minimumCapacity: rawSysctls.count)
         for sysctl in rawSysctls {
             let parts = sysctl.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, !parts[0].isEmpty else {
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
                 throw ContainerizationError(.invalidArgument, message: "invalid sysctl '\(sysctl)': expected <key>=<value>")
             }
             let key = String(parts[0])
