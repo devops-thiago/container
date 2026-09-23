@@ -261,6 +261,7 @@ public actor ImagesService {
             try? FileManager.default.removeItem(at: tempDir)
         }
         try await self.imageStore.save(references: references, out: tempDir, platform: platform)
+        try DockerImageArchive(log: self.log).writeCompatibilityFiles(in: tempDir)
         let writer = try ArchiveWriter(format: .pax, filter: .none, file: out)
         try writer.archiveDirectory(tempDir)
         try writer.finishEncoding()
@@ -290,9 +291,17 @@ public actor ImagesService {
         defer {
             try? FileManager.default.removeItem(at: tempDir)
         }
-        let rejectedMembers = try reader.extractContents(to: tempDir)
+        var rejectedMembers = try reader.extractContents(to: tempDir)
         guard rejectedMembers.isEmpty || force else {
             throw ContainerizationError(.invalidArgument, message: "cannot load tar image with rejected paths: \(rejectedMembers)")
+        }
+
+        if DockerImageArchive.needsConversion(at: tempDir) {
+            rejectedMembers += try DockerImageArchive(log: self.log).convertToOCILayout(at: tempDir)
+        } else if !DockerImageArchive.isOCILayout(at: tempDir) {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "not an image archive: expected an OCI layout (oci-layout + index.json) or a `docker save` archive (manifest.json)")
         }
 
         let loaded = try await self.imageStore.load(from: tempDir)

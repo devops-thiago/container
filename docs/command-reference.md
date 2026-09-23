@@ -622,7 +622,7 @@ container image push [--scheme <scheme>] [--progress <type>] [--arch <arch>] [--
 
 ### `container image save`
 
-Saves an image to a tar archive on disk. Useful for exporting images for offline transport.
+Saves an image to a tar archive on disk. Useful for exporting images for offline transport. The archive is an OCI layout with a `manifest.json` beside it, so `docker load` accepts it too.
 
 **Usage**
 
@@ -643,7 +643,7 @@ container image save [--arch <arch>] [--os <os>] --output <output> [--platform <
 
 ### `container image load`
 
-Loads images from a tar archive created by `image save`. Specify the tar file with `--input`.
+Loads images from a tar archive created by `image save` or by `docker save`: either an OCI layout or a Docker archive with a `manifest.json`. Specify the tar file with `--input`.
 
 **Usage**
 
