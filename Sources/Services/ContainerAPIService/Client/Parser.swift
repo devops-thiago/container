@@ -241,6 +241,30 @@ public struct Parser {
         return envVar
     }
 
+    /// `--add-host` entries: `<name>:<address>`, the address an IPv4 or IPv6 literal or
+    /// `host-gateway`. The split is at the first colon so that an IPv6 address keeps its own.
+    public static func extraHosts(_ rawHosts: [String]) throws -> [ContainerConfiguration.ExtraHost] {
+        try rawHosts.map { raw in
+            let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "invalid host '\(raw)': expected <name>:<address>")
+            }
+            let name = String(parts[0])
+            let address = String(parts[1])
+            guard isValidDomainName(name) else {
+                throw ContainerizationError(.invalidArgument, message: "invalid host name '\(name)' in '\(raw)'")
+            }
+            if address != ContainerConfiguration.ExtraHost.hostGateway {
+                guard (try? IPv4Address(address)) != nil || (try? IPv6Address(address)) != nil else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "invalid address '\(address)' in '\(raw)': expected an IPv4 or IPv6 address, or host-gateway")
+                }
+            }
+            return ContainerConfiguration.ExtraHost(name: name, address: address)
+        }
+    }
+
     /// The guest hostname `--hostname` asks for: one DNS label, as a container name must be.
     public static func hostname(_ hostname: String) throws -> String {
         guard isValidDomainNameLabel(hostname) else {

@@ -60,6 +60,23 @@ struct ContainerConfigurationHostnameTests {
         #expect(decoded.hostname == "web")
     }
 
+    @Test func roundTripsExtraHosts() throws {
+        var config = makeTestConfiguration()
+        config.extraHosts = [.init(name: "host.docker.internal", address: "host-gateway"), .init(name: "db", address: "10.0.0.5")]
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+        #expect(decoded.extraHosts == config.extraHosts)
+    }
+
+    @Test func bundlesWithoutExtraHostsDecodeAsNone() throws {
+        let data = try JSONEncoder().encode(makeTestConfiguration())
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "extraHosts")
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: stripped)
+        #expect(decoded.extraHosts.isEmpty)
+    }
+
     @Test func bundlesWithoutAHostnameDecodeAsNone() throws {
         let data = try JSONEncoder().encode(makeTestConfiguration())
         var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])

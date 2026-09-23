@@ -39,6 +39,9 @@ public struct ContainerConfiguration: Sendable, Codable {
     /// Guest-local, as Docker's `--hostname` is: the name other containers resolve stays the
     /// container's name, which is what the network attachment carries.
     public var hostname: String? = nil
+    /// Names the guest resolves to fixed addresses, appended to its /etc/hosts after the
+    /// entries for its network peers.
+    public var extraHosts: [ExtraHost] = []
     /// The DNS configuration for the container.
     public var dns: DNSConfiguration? = nil
     /// Whether to enable rosetta x86-64 translation for the container.
@@ -88,6 +91,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case sysctls
         case networks
         case hostname
+        case extraHosts
         case dns
         case rosetta
         case initProcess
@@ -127,6 +131,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         }
 
         hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
+        extraHosts = try container.decodeIfPresent([ExtraHost].self, forKey: .extraHosts) ?? []
         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)
@@ -144,6 +149,22 @@ public struct ContainerConfiguration: Sendable, Codable {
         maskedPaths = try container.decodeIfPresent([String].self, forKey: .maskedPaths)
         readonlyPaths = try container.decodeIfPresent([String].self, forKey: .readonlyPaths)
         creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate) ?? Date(timeIntervalSince1970: 0)
+    }
+
+    /// One `--add-host` entry: a name and the address it resolves to in the guest.
+    public struct ExtraHost: Sendable, Codable, Equatable {
+        /// The address that stands for the host's side of the container's first network:
+        /// its gateway, which is where services bound on every interface of the host answer.
+        public static let hostGateway = "host-gateway"
+
+        public var name: String
+        /// An IPv4 or IPv6 literal, or `hostGateway`.
+        public var address: String
+
+        public init(name: String, address: String) {
+            self.name = name
+            self.address = address
+        }
     }
 
     public struct DNSConfiguration: Sendable, Codable {

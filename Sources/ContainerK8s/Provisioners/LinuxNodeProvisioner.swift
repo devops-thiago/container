@@ -97,6 +97,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         let publishPorts = isControlPlane && fqdn == nil ? [try await K8sHelper.clusterPort()] : []
 
         let management = Flags.Management(
+            addHosts: [],
             arch: Arch.hostArchitecture().rawValue,
             capAdd: ["ALL"],
             capDrop: [],

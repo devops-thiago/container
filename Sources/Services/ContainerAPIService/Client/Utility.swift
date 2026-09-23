@@ -264,6 +264,7 @@ public struct Utility {
         config.labels = try Parser.labels(management.labels)
         config.sysctls = try Parser.sysctls(management.sysctls)
         config.hostname = try management.hostname.map(Parser.hostname)
+        config.extraHosts = try Parser.extraHosts(management.addHosts)
 
         config.publishedPorts = try Parser.publishPorts(management.publishPorts)
         guard config.publishedPorts.count <= publishedPortCountLimit else {

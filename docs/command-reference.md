@@ -43,6 +43,7 @@ container run [<options>] <image> [<arguments> ...]
 
 **Management Options**
 
+*   `--add-host <host>`: Add a name the container resolves to a fixed address (format: `<name>:<ip>`, or `<name>:host-gateway` for this Mac)
 *   `-a, --arch <arch>`: Set arch if image can target multiple architectures (default: arm64)
 *   `--cap-add <cap>`: Add a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
 *   `--cap-drop <cap>`: Drop a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
@@ -221,6 +222,7 @@ container create [<options>] <image> [<arguments> ...]
 
 **Management Options**
 
+*   `--add-host <host>`: Add a name the container resolves to a fixed address (format: `<name>:<ip>`, or `<name>:host-gateway` for this Mac)
 *   `-a, --arch <arch>`: Set arch if image can target multiple architectures (default: arm64)
 *   `--cap-add <cap>`: Add a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
 *   `--cap-drop <cap>`: Drop a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)

@@ -166,6 +166,7 @@ public struct Flags {
         public init() {}
 
         public init(
+            addHosts: [String],
             arch: String,
             capAdd: [String],
             capDrop: [String],
@@ -200,6 +201,7 @@ public struct Flags {
             virtualization: Bool,
             volumes: [String]
         ) {
+            self.addHosts = addHosts
             self.arch = arch
             self.capAdd = capAdd
             self.capDrop = capDrop
@@ -234,6 +236,15 @@ public struct Flags {
             self.virtualization = virtualization
             self.volumes = volumes
         }
+
+        @Option(
+            name: .customLong("add-host"),
+            help: .init(
+                "Add a name the container resolves to a fixed address (format: <name>:<ip>, or <name>:host-gateway for this Mac)",
+                valueName: "host"
+            )
+        )
+        public var addHosts: [String] = []
 
         @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
         public var arch: String = Arch.hostArchitecture().rawValue

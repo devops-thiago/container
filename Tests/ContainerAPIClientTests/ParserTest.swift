@@ -1532,6 +1532,25 @@ struct ParserTest {
 
     // MARK: - Collection capacity hints
 
+    @Test("extra hosts parse name:address, with IPv6 keeping its colons and host-gateway allowed")
+    func testExtraHostsParse() throws {
+        let hosts = try Parser.extraHosts(["db:10.0.0.5", "v6:2001:db8::1", "host.docker.internal:host-gateway"])
+        #expect(
+            hosts == [
+                .init(name: "db", address: "10.0.0.5"),
+                .init(name: "v6", address: "2001:db8::1"),
+                .init(name: "host.docker.internal", address: "host-gateway"),
+            ])
+        #expect(try Parser.extraHosts([]).isEmpty)
+    }
+
+    @Test("an extra host without a name, an address, or with a bad one, names the entry")
+    func testExtraHostsReject() {
+        for bad in ["db", "db:", ":10.0.0.5", "-db:10.0.0.5", "db:10.0.0", "db:gateway", "db:host-gateway:1"] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.extraHosts([bad]) }
+        }
+    }
+
     @Test("a hostname is one DNS label")
     func testHostnameParse() throws {
         #expect(try Parser.hostname("web") == "web")
