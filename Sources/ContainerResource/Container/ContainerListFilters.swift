@@ -32,6 +32,9 @@ public struct ContainerListFilters: Sendable, Codable {
     /// exclude containers without the label, while a negation pattern (e.g. ``^(?!b$)``) will
     /// include them.
     public var labels: [String: String]
+    /// Filter by container ID with a regular expression. Unlike ``ids`` it is searched for in
+    /// the ID, so ``web`` matches every container whose ID mentions it and ``^web$`` one.
+    public var name: String?
 
     /// No filters applied. Will return all containers.
     public static let all = ContainerListFilters()
@@ -39,11 +42,13 @@ public struct ContainerListFilters: Sendable, Codable {
     public init(
         ids: [String] = [],
         status: RuntimeStatus? = nil,
-        labels: [String: String] = [:]
+        labels: [String: String] = [:],
+        name: String? = nil
     ) {
         self.ids = ids
         self.status = status
         self.labels = labels
+        self.name = name
     }
 }
 
@@ -51,9 +56,9 @@ extension ContainerListFilters {
     /// Restricts results to containers owned by the named plugin (see ``ResourcePluginValues``).
     /// Replaces any existing filter on the plugin label.
     public func withPlugin(_ name: String) -> ContainerListFilters {
-        let pattern = "^\(NSRegularExpression.escapedPattern(for: name))$"
-        let labels = self.labels.merging([ResourceLabelKeys.plugin: pattern]) { _, new in new }
-        return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
+        var filters = self
+        filters.labels[ResourceLabelKeys.plugin] = "^\(NSRegularExpression.escapedPattern(for: name))$"
+        return filters
     }
 
     /// Excludes containers owned by any of the named plugins (see ``ResourcePluginValues``).
@@ -63,8 +68,13 @@ extension ContainerListFilters {
             return self
         }
         let alternatives = names.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
-        let labels = self.labels.merging([ResourceLabelKeys.plugin: Self.exclude("(?:\(alternatives))")]) { _, new in new }
-        return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
+        var filters = self
+        filters.labels[ResourceLabelKeys.plugin] = Self.exclude("(?:\(alternatives))")
+        return filters
+    }
+
+    public func withoutMachines() -> ContainerListFilters {
+        withoutPlugins([ResourcePluginValues.machine])
     }
 
     /// Whether a container carrying `labels` is engine/plugin-managed infrastructure.
@@ -80,7 +90,8 @@ extension ContainerListFilters {
 
     /// Exclude every plugin-owned container, including plugins added after this client ships.
     public func withoutInfrastructure() -> ContainerListFilters {
-        let labels = self.labels.merging([ResourceLabelKeys.plugin: "^$"]) { _, new in new }
-        return ContainerListFilters(ids: self.ids, status: self.status, labels: labels)
+        var filters = self
+        filters.labels[ResourceLabelKeys.plugin] = "^$"
+        return filters
     }
 }
