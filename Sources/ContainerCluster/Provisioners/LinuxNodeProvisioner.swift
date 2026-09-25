@@ -118,6 +118,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         let publishPorts = isControlPlane && fqdn == nil ? [try await ClusterHelper.clusterPort()] : []
 
         let management = Flags.Management(
+            addHosts: [],
             arch: Arch.hostArchitecture().rawValue,
             capAdd: ["ALL"],
             capDrop: [],
@@ -126,6 +127,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             dns: .init(domain: nil, nameservers: [], options: [], searchDomains: []),
             dnsDisabled: false,
             entrypoint: "/bin/sh",
+            hostname: nil,
             initImage: nil,
             kernel: nil,
             kernelArgs: [],
@@ -145,10 +147,12 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             readOnly: false,
             readonlyPaths: [],
             remove: remove,
+            restart: nil,
             rosetta: true,
             runtime: nil,
             ssh: false,
             shmSize: nil,
+            sysctls: [],
             tmpFs: [],
             useInit: false,
             virtualization: false,
