@@ -1532,6 +1532,94 @@ struct ParserTest {
 
     // MARK: - Collection capacity hints
 
+    @Test("extra hosts parse name:address, with IPv6 keeping its colons and host-gateway allowed")
+    func testExtraHostsParse() throws {
+        let hosts = try Parser.extraHosts(["db:10.0.0.5", "v6:2001:db8::1", "host.docker.internal:host-gateway"])
+        #expect(
+            hosts == [
+                .init(name: "db", address: "10.0.0.5"),
+                .init(name: "v6", address: "2001:db8::1"),
+                .init(name: "host.docker.internal", address: "host-gateway"),
+            ])
+        #expect(try Parser.extraHosts([]).isEmpty)
+    }
+
+    @Test("an extra host without a name, an address, or with a bad one, names the entry")
+    func testExtraHostsReject() {
+        for bad in ["db", "db:", ":10.0.0.5", "-db:10.0.0.5", "db:10.0.0", "db:gateway", "db:host-gateway:1"] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.extraHosts([bad]) }
+        }
+    }
+
+    @Test("the pull policy has Docker's three spellings and defaults to missing")
+    func testPullPolicyFlag() throws {
+        #expect(Flags.ImageFetch.PullPolicy(argument: "always") == .always)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "missing") == .missing)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "never") == .never)
+        #expect(Flags.ImageFetch.PullPolicy(argument: "if-missing") == nil)
+        #expect(Flags.ImageFetch(maxConcurrentDownloads: 3).pull == .missing)
+        #expect(try Flags.ImageFetch.parse(["--pull", "never"]).pull == .never)
+        #expect(try Flags.ImageFetch.parse([]).pull == .missing)
+    }
+
+    @Test("restart policies parse Docker's four spellings and a retry count")
+    func testRestartPolicyParse() throws {
+        #expect(try Parser.restartPolicy("no") == .no)
+        #expect(try Parser.restartPolicy("always") == .always)
+        #expect(try Parser.restartPolicy("unless-stopped") == .unlessStopped)
+        #expect(try Parser.restartPolicy("on-failure") == .onFailure(maxRetries: nil))
+        #expect(try Parser.restartPolicy("on-failure:3") == .onFailure(maxRetries: 3))
+        for bad in ["", "yes", "unless_stopped", "on-failure:", "on-failure:0", "on-failure:-1", "on-failure:3:4", "always:2"] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.restartPolicy(bad) }
+        }
+        #expect(try Parser.restartPolicy("on-failure:3").description == "on-failure:3")
+        #expect(try Parser.restartPolicy("unless-stopped").description == "unless-stopped")
+    }
+
+    @Test("a hostname is one DNS label")
+    func testHostnameParse() throws {
+        #expect(try Parser.hostname("web") == "web")
+        #expect(try Parser.hostname("db-01") == "db-01")
+        for bad in ["", "-web", "web.internal", "a b", String(repeating: "x", count: 64)] {
+            #expect(throws: ContainerizationError.self, "\(bad)") { try Parser.hostname(bad) }
+        }
+    }
+
+    @Test("sysctls parse key=value pairs, keeping a value's own equals signs")
+    func testSysctlsParse() throws {
+        let result = try Parser.sysctls(["net.ipv4.ip_forward=1", "kernel.msgmax=65536", "net.core.somaxconn==4096"])
+        #expect(result == ["net.ipv4.ip_forward": "1", "kernel.msgmax": "65536", "net.core.somaxconn": "=4096"])
+        #expect(try Parser.sysctls([]).isEmpty)
+    }
+
+    @Test("a sysctl without a value, or without a key, names the entry")
+    func testSysctlsRejectMissingValueOrKey() {
+        for entry in ["net.ipv4.ip_forward", "net.ipv4.ip_forward=", "", "=1"] {
+            #expect(throws: ContainerizationError.self) { try Parser.sysctls([entry]) }
+            do {
+                _ = try Parser.sysctls([entry])
+            } catch let error as ContainerizationError {
+                #expect(error.code == .invalidArgument)
+                #expect(error.message == "invalid sysctl '\(entry)': expected <key>=<value>")
+            } catch {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+    }
+
+    @Test("a sysctl given twice is refused, even with the same value")
+    func testSysctlsRejectDuplicateKey() {
+        do {
+            _ = try Parser.sysctls(["net.ipv4.ip_forward=1", "kernel.msgmax=1", "net.ipv4.ip_forward=1"])
+            Issue.record("a duplicate key was accepted")
+        } catch let error as ContainerizationError {
+            #expect(error.code == .invalidArgument)
+            #expect(error.message == "sysctl 'net.ipv4.ip_forward' is given more than once")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
     @Test("labels with large input preserves all entries")
     func testLabelsLargeInput() throws {
         let labels = (0..<100).map { "key\($0)=value\($0)" }

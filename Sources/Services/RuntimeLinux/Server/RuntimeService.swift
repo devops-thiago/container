@@ -334,6 +334,24 @@ public actor RuntimeService {
                             hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"],
                         ))
                 }
+                // What --add-host asked for, after the peers so that a name given here wins
+                // over a peer of the same name: getaddrinfo takes the last entry for a name.
+                // host-gateway is the first network's gateway, where the host's services that
+                // listen on every interface answer; there is no such address without a network.
+                for extraHost in config.extraHosts {
+                    let address: String
+                    if extraHost.address == ContainerConfiguration.ExtraHost.hostGateway {
+                        guard let gateway = attachments.first?.ipv4Gateway else {
+                            throw ContainerizationError(
+                                .invalidArgument,
+                                message: "host '\(extraHost.name)' asks for host-gateway, but the container has no network to reach the host through")
+                        }
+                        address = gateway.description
+                    } else {
+                        address = extraHost.address
+                    }
+                    hostsEntries.append(Hosts.Entry(ipAddress: address, hostnames: [extraHost.name]))
+                }
                 czConfig.hosts = Hosts(entries: hostsEntries)
                 czConfig.bootLog = BootLog.file(path: bundle.bootlog, append: true)
             }
@@ -1256,7 +1274,9 @@ public actor RuntimeService {
             czConfig.sockets.append(socketConfig)
         }
 
-        let hostnameSource = config.networks.first?.options.hostname ?? config.id
+        // A hostname of the container's own beats the one its attachment carries: the guest
+        // sees the name asked for, while the network keeps resolving the container's name.
+        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
         czConfig.hostname =
             hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
             .first

@@ -51,6 +51,67 @@ func makeTestConfiguration(
     return config
 }
 
+struct ContainerConfigurationHostnameTests {
+    @Test func roundTripsHostname() throws {
+        var config = makeTestConfiguration()
+        config.hostname = "web"
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+        #expect(decoded.hostname == "web")
+    }
+
+    @Test func roundTripsExtraHosts() throws {
+        var config = makeTestConfiguration()
+        config.extraHosts = [.init(name: "host.docker.internal", address: "host-gateway"), .init(name: "db", address: "10.0.0.5")]
+        let data = try JSONEncoder().encode(config)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+        #expect(decoded.extraHosts == config.extraHosts)
+    }
+
+    @Test func bundlesWithoutExtraHostsDecodeAsNone() throws {
+        let data = try JSONEncoder().encode(makeTestConfiguration())
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "extraHosts")
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: stripped)
+        #expect(decoded.extraHosts.isEmpty)
+    }
+
+    @Test func roundTripsRestartPolicyInDockerSpelling() throws {
+        for policy in [ContainerConfiguration.RestartPolicy.no, .always, .unlessStopped, .onFailure(maxRetries: nil), .onFailure(maxRetries: 3)] {
+            var config = makeTestConfiguration()
+            config.restartPolicy = policy
+            let data = try JSONEncoder().encode(config)
+            let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: data)
+            #expect(decoded.restartPolicy == policy)
+        }
+        var config = makeTestConfiguration()
+        config.restartPolicy = .onFailure(maxRetries: 3)
+        let object = try #require(JSONSerialization.jsonObject(with: try JSONEncoder().encode(config)) as? [String: Any])
+        let encoded = try #require(object["restartPolicy"] as? [String: Any])
+        #expect(encoded["name"] as? String == "on-failure")
+        #expect(encoded["maxRetries"] as? Int == 3)
+    }
+
+    @Test func bundlesWithoutARestartPolicyDecodeAsNone() throws {
+        let data = try JSONEncoder().encode(makeTestConfiguration())
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "restartPolicy")
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: stripped)
+        #expect(decoded.restartPolicy == nil)
+    }
+
+    @Test func bundlesWithoutAHostnameDecodeAsNone() throws {
+        let data = try JSONEncoder().encode(makeTestConfiguration())
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "hostname")
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: stripped)
+        #expect(decoded.hostname == nil)
+    }
+}
+
 struct ContainerConfigurationResourcesTests {
     @Test func roundTripsCpuOverhead() throws {
         var config = makeTestConfiguration()

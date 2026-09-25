@@ -43,6 +43,7 @@ container run [<options>] <image> [<arguments> ...]
 
 **Management Options**
 
+*   `--add-host <host>`: Add a name the container resolves to a fixed address (format: `<name>:<ip>`, or `<name>:host-gateway` for this Mac)
 *   `-a, --arch <arch>`: Set arch if image can target multiple architectures (default: arm64)
 *   `--cap-add <cap>`: Add a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
 *   `--cap-drop <cap>`: Drop a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
@@ -53,6 +54,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `--dns-option <option>`: DNS options
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
+*   `--hostname <hostname>`: Set the hostname the container sees (default: the container's name)
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.
 *   `-k, --kernel <path>`: Set a custom kernel path
@@ -69,10 +71,12 @@ container run [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
+*   `--restart <policy>`: Restart policy kept on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Applied when the engine starts; exit-driven restarts arrive in a later release
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)
 *   `--ssh`: Forward SSH agent socket to container
 *   `--shm-size <shm-size>`: Size of `/dev/shm` (e.g. 64M, 1G)
+*   `--sysctl <sysctl>`: Set a kernel parameter in the container (format: `<key>=<value>`)
 *   `--tmpfs <tmpfs>`: Add a tmpfs mount to the container at the given path
 *   `-v, --volume <volume>`: Bind mount a volume into the container
 *   `--virtualization`: Expose virtualization capabilities to the container (requires host and guest support)
@@ -100,6 +104,7 @@ container run [<options>] <image> [<arguments> ...]
 **Image Fetch Options**
 
 *   `--max-concurrent-downloads <max-concurrent-downloads>`: Maximum number of concurrent downloads (default: 3)
+*   `--pull <pull>`: When to fetch the image from its registry: `always`, `missing` (default) or `never`
 
 **Examples**
 
@@ -219,6 +224,7 @@ container create [<options>] <image> [<arguments> ...]
 
 **Management Options**
 
+*   `--add-host <host>`: Add a name the container resolves to a fixed address (format: `<name>:<ip>`, or `<name>:host-gateway` for this Mac)
 *   `-a, --arch <arch>`: Set arch if image can target multiple architectures (default: arm64)
 *   `--cap-add <cap>`: Add a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
 *   `--cap-drop <cap>`: Drop a Linux capability (e.g. `CAP_NET_RAW`, `NET_RAW`, or `ALL`)
@@ -229,6 +235,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `--dns-option <option>`: DNS options
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
+*   `--hostname <hostname>`: Set the hostname the container sees (default: the container's name)
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.
 *   `-k, --kernel <path>`: Set a custom kernel path
@@ -245,10 +252,12 @@ container create [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
+*   `--restart <policy>`: Restart policy kept on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Applied when the engine starts; exit-driven restarts arrive in a later release
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)  
 *   `--ssh`: Forward SSH agent socket to container
 *   `--shm-size <shm-size>`: Size of `/dev/shm` (e.g. 64M, 1G)
+*   `--sysctl <sysctl>`: Set a kernel parameter in the container (format: `<key>=<value>`)
 *   `--tmpfs <tmpfs>`: Add a tmpfs mount to the container at the given path
 *   `-v, --volume <volume>`: Bind mount a volume into the container
 *   `--virtualization`: Expose virtualization capabilities to the container (requires host and guest support)
@@ -260,6 +269,7 @@ container create [<options>] <image> [<arguments> ...]
 **Image Fetch Options**
 
 *   `--max-concurrent-downloads <max-concurrent-downloads>`: Maximum number of concurrent downloads (default: 3)
+*   `--pull <pull>`: When to fetch the image from its registry: `always`, `missing` (default) or `never`
 
 ### `container start`
 
