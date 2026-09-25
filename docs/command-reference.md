@@ -345,14 +345,37 @@ Lists containers. By default only running containers are shown. Output can be fo
 **Usage**
 
 ```bash
-container list [--all] [--format <format>] [--quiet] [--debug]
+container list [--all] [--filter <filter> ...] [--format <format>] [--quiet] [--debug]
 ```
 
 **Options**
 
 *   `-a, --all`: Include containers that are not running
+*   `--filter <filter>`: Only list containers matching a condition; repeat to require several (format: `label=<key>`, `label=<key>=<value>`, `name=<regex>` or `status=<status>`)
 *   `--format <format>`: Format of the output (values: json, table, yaml, toml; default: table)
 *   `-q, --quiet`: Only output the container ID
+
+**Filters**
+
+A label key, `name` and `status` can each be given once.
+
+*   `label=<key>`: containers that have the label, with any non-empty value
+*   `label=<key>=<value>`: containers whose label has exactly that value, which may itself contain `=`
+*   `name=<regex>`: containers whose name contains a match for the regular expression; anchor it (`^web$`) to name one container
+*   `status=<status>`: containers in that state (`running`, `stopped`, `stopping` or `unknown`). A status condition replaces the default of showing only running containers, so it needs no `--all`
+
+**Examples**
+
+```bash
+# running containers labelled app=web
+container list --filter label=app=web
+
+# every stopped container, whatever its labels
+container list --filter status=stopped
+
+# the IDs of the running containers whose name starts with "web"
+container list --quiet --filter name=^web
+```
 
 ### `container exec`
 
