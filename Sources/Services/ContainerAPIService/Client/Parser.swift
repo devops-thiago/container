@@ -241,6 +241,71 @@ public struct Parser {
         return envVar
     }
 
+    /// `--add-host` entries: `<name>:<address>`, the address an IPv4 or IPv6 literal or
+    /// `host-gateway`. The split is at the first colon so that an IPv6 address keeps its own.
+    public static func extraHosts(_ rawHosts: [String]) throws -> [ContainerConfiguration.ExtraHost] {
+        try rawHosts.map { raw in
+            let parts = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "invalid host '\(raw)': expected <name>:<address>")
+            }
+            let name = String(parts[0])
+            let address = String(parts[1])
+            guard isValidDomainName(name) else {
+                throw ContainerizationError(.invalidArgument, message: "invalid host name '\(name)' in '\(raw)'")
+            }
+            if address != ContainerConfiguration.ExtraHost.hostGateway {
+                guard (try? IPv4Address(address)) != nil || (try? IPv6Address(address)) != nil else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "invalid address '\(address)' in '\(raw)': expected an IPv4 or IPv6 address, or host-gateway")
+                }
+            }
+            return ContainerConfiguration.ExtraHost(name: name, address: address)
+        }
+    }
+
+    /// `--restart` in Docker's spellings; `no` is the same as leaving the flag out.
+    public static func restartPolicy(_ text: String) throws -> ContainerConfiguration.RestartPolicy {
+        guard let policy = ContainerConfiguration.RestartPolicy(text) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "invalid restart policy '\(text)': expected no, always, unless-stopped or on-failure[:<n>]")
+        }
+        return policy
+    }
+
+    /// The guest hostname `--hostname` asks for: one DNS label, as a container name must be.
+    public static func hostname(_ hostname: String) throws -> String {
+        guard isValidDomainNameLabel(hostname) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "invalid hostname '\(hostname)': must be a DNS label of letters, digits and hyphens, up to 63 characters")
+        }
+        return hostname
+    }
+
+    /// `key=value` pairs for the guest's `/proc/sys`, as `--sysctl` gives them.
+    ///
+    /// Stricter than labels: a key without a value is not a request the kernel can act on,
+    /// and one key given twice is a mistake to point out rather than a last-wins to guess at.
+    /// The runtime's own defaults still fill only the keys left unset here.
+    public static func sysctls(_ rawSysctls: [String]) throws -> [String: String] {
+        var result: [String: String] = Dictionary(minimumCapacity: rawSysctls.count)
+        for sysctl in rawSysctls {
+            let parts = sysctl.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
+                throw ContainerizationError(.invalidArgument, message: "invalid sysctl '\(sysctl)': expected <key>=<value>")
+            }
+            let key = String(parts[0])
+            guard result[key] == nil else {
+                throw ContainerizationError(.invalidArgument, message: "sysctl '\(key)' is given more than once")
+            }
+            result[key] = String(parts[1])
+        }
+        return result
+    }
+
     public static func labels(_ rawLabels: [String]) throws -> [String: String] {
         var result: [String: String] = Dictionary(minimumCapacity: rawLabels.count)
         for label in rawLabels {

@@ -166,6 +166,7 @@ public struct Flags {
         public init() {}
 
         public init(
+            addHosts: [String],
             arch: String,
             capAdd: [String],
             capDrop: [String],
@@ -174,6 +175,7 @@ public struct Flags {
             dns: Flags.DNS,
             dnsDisabled: Bool,
             entrypoint: String?,
+            hostname: String?,
             initImage: String?,
             kernel: String?,
             kernelArgs: [String],
@@ -189,15 +191,18 @@ public struct Flags {
             readOnly: Bool,
             readonlyPaths: [String],
             remove: Bool,
+            restart: String?,
             rosetta: Bool,
             runtime: String?,
             ssh: Bool,
             shmSize: String?,
+            sysctls: [String],
             tmpFs: [String],
             useInit: Bool,
             virtualization: Bool,
             volumes: [String]
         ) {
+            self.addHosts = addHosts
             self.arch = arch
             self.capAdd = capAdd
             self.capDrop = capDrop
@@ -206,6 +211,7 @@ public struct Flags {
             self.dns = dns
             self.dnsDisabled = dnsDisabled
             self.entrypoint = entrypoint
+            self.hostname = hostname
             self.initImage = initImage
             self.kernel = kernel
             self.kernelArgs = kernelArgs
@@ -221,15 +227,26 @@ public struct Flags {
             self.readOnly = readOnly
             self.readonlyPaths = readonlyPaths
             self.remove = remove
+            self.restart = restart
             self.rosetta = rosetta
             self.runtime = runtime
             self.ssh = ssh
             self.shmSize = shmSize
+            self.sysctls = sysctls
             self.tmpFs = tmpFs
             self.useInit = useInit
             self.virtualization = virtualization
             self.volumes = volumes
         }
+
+        @Option(
+            name: .customLong("add-host"),
+            help: .init(
+                "Add a name the container resolves to a fixed address (format: <name>:<ip>, or <name>:host-gateway for this Mac)",
+                valueName: "host"
+            )
+        )
+        public var addHosts: [String] = []
 
         @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
         public var arch: String = Arch.hostArchitecture().rawValue
@@ -263,6 +280,9 @@ public struct Flags {
             )
         )
         public var entrypoint: String?
+
+        @Option(name: .long, help: "Set the hostname the container sees (default: the container's name)")
+        public var hostname: String?
 
         @Flag(name: .customLong("init"), help: "Run an init process inside the container that forwards signals and reaps processes")
         public var useInit = false
@@ -357,6 +377,15 @@ public struct Flags {
         @Flag(name: [.customLong("rm"), .long], help: "Remove the container after it stops")
         public var remove = false
 
+        @Option(
+            name: .long,
+            help: .init(
+                "Restart policy kept on the container: no, always, unless-stopped or on-failure[:<n>]. Applied when the engine starts; exit-driven restarts arrive in a later release",
+                valueName: "policy"
+            )
+        )
+        public var restart: String?
+
         @Flag(name: .long, help: "Enable Rosetta in the container")
         public var rosetta = false
 
@@ -368,6 +397,15 @@ public struct Flags {
 
         @Option(name: .customLong("shm-size"), help: "Size of /dev/shm (e.g. 64M, 1G)")
         public var shmSize: String?
+
+        @Option(
+            name: .customLong("sysctl"),
+            help: .init(
+                "Set a kernel parameter in the container (format: <key>=<value>)",
+                valueName: "sysctl"
+            )
+        )
+        public var sysctls: [String] = []
 
         @Option(name: .customLong("tmpfs"), help: "Add a tmpfs mount to the container at the given path")
         public var tmpFs: [String] = []
@@ -418,13 +456,27 @@ public struct Flags {
     }
 
     public struct ImageFetch: ParsableArguments {
+        /// When the image is fetched from its registry, and when what is local is enough.
+        public enum PullPolicy: String, ExpressibleByArgument, CaseIterable, Sendable {
+            /// Fetch from the registry every time, so a moving tag is followed.
+            case always
+            /// Fetch only when there is no local image for the reference and platform.
+            case missing
+            /// Never fetch; fail when the image is not local.
+            case never
+        }
+
         public init() {}
 
-        public init(maxConcurrentDownloads: Int) {
+        public init(maxConcurrentDownloads: Int, pull: PullPolicy = .missing) {
             self.maxConcurrentDownloads = maxConcurrentDownloads
+            self.pull = pull
         }
 
         @Option(name: .long, help: "Maximum number of concurrent downloads")
         public var maxConcurrentDownloads: Int = 3
+
+        @Option(name: .long, help: "When to fetch the image from its registry: always, missing or never")
+        public var pull: PullPolicy = .missing
     }
 }

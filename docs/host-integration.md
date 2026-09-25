@@ -51,6 +51,22 @@ Cloning into 'some-private-repo'...
 
 ## Access a host service from a container
 
+The simplest way is a hosts entry that points a name at this Mac:
+
+```bash
+container run -it --rm --add-host host.docker.internal:host-gateway alpine/curl curl http://host.docker.internal:8000
+```
+
+`host-gateway` becomes the gateway address of the container's first network, which is where
+the host answers. A host service reaches the container only if it listens on every interface
+(`0.0.0.0`, or `::`); one bound to `127.0.0.1` alone does not, the same as Docker on Linux. A
+container created with `--network none` cannot use `host-gateway` and is refused at start.
+
+The DNS route below reaches services bound to `127.0.0.1` as well, at the cost of a
+`sudo` and the constraints it lists.
+
+### With a DNS domain
+
 > [!IMPORTANT]
 > Due to macOS security constraints around packet filter rules, this feature has limited functionality:
 > - Creating a localhost domain disables Private Relay.
