@@ -220,40 +220,9 @@ public actor ContainersService {
             )
         }
 
-        let labelPatterns: [(key: String, regex: Regex<AnyRegexOutput>)] = try filters.labels.map { key, pattern in
-            do {
-                return (key: key, regex: try Regex(pattern))
-            } catch {
-                throw ContainerizationError(
-                    .invalidArgument, message: "failed to compile regex '\(pattern)' for \(key)",
-                    cause: error)
-            }
-        }
-
-        return self.containers.values.compactMap { state -> ContainerSnapshot? in
-            let snapshot = state.snapshot
-
-            if !filters.ids.isEmpty {
-                guard filters.ids.contains(snapshot.id) else {
-                    return nil
-                }
-            }
-
-            if let status = filters.status {
-                guard snapshot.status == status else {
-                    return nil
-                }
-            }
-
-            for (key, regex) in labelPatterns {
-                let label = snapshot.configuration.labels[key] ?? ""
-
-                guard label.contains(regex) else {
-                    return nil
-                }
-            }
-
-            return snapshot
+        let matcher = try ContainerListMatcher(filters)
+        return self.containers.values.compactMap { state in
+            matcher.admits(state.snapshot) ? state.snapshot : nil
         }
     }
 
