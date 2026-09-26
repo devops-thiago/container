@@ -64,13 +64,9 @@ extension Application.ContainerList {
     /// the pattern that matches exactly it, so what the user typed is never read as a
     /// regular expression; a name is one, and is passed on as typed.
     enum Filter: Equatable {
-        case label(key: String, pattern: String)
+        case label(key: String, pattern: String?)
         case name(String)
         case status(RuntimeStatus)
-
-        /// The engine reads a label a container lacks as an empty value, so asking for a
-        /// label's presence is asking for any character at all.
-        private static let anyValue = "[\\s\\S]"
 
         init(parsing argument: String) throws {
             let parts = argument.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
@@ -105,14 +101,9 @@ extension Application.ContainerList {
                 throw ValidationError("label needs a key, as in label=app or label=app=web")
             }
             guard parts.count == 2 else {
-                return .label(key: key, pattern: anyValue)
+                return .label(key: key, pattern: nil)
             }
             let value = String(parts[1])
-            // An empty value would also match the containers without the label, which
-            // nobody who typed a value asked for.
-            guard !value.isEmpty else {
-                throw ValidationError("label \(key) needs a value after its '='; label=\(key) matches it with any value")
-            }
             return .label(key: key, pattern: "^\(NSRegularExpression.escapedPattern(for: value))$")
         }
     }
@@ -122,15 +113,19 @@ extension Application.ContainerList {
     /// so `status=stopped` lists them without `--all`.
     static func filters(for conditions: [Filter], all: Bool) throws -> ContainerListFilters {
         var labels: [String: String] = [:]
+        var labelConditions: [ContainerListFilters.LabelCondition] = []
         var name: String?
         var status: RuntimeStatus?
         for condition in conditions {
             switch condition {
             case .label(let key, let pattern):
-                // A container has one value per label, so a second condition on the same
-                // key could only contradict the first.
-                guard labels.updateValue(pattern, forKey: key) == nil else {
-                    throw ValidationError("label \(key) is filtered more than once")
+                labelConditions.append(.init(key: key))
+                if let pattern {
+                    if labels[key] == nil {
+                        labels[key] = pattern
+                    } else {
+                        labelConditions.append(.init(key: key, pattern: pattern))
+                    }
                 }
             case .name(let pattern):
                 guard name == nil else {
@@ -144,6 +139,6 @@ extension Application.ContainerList {
                 status = value
             }
         }
-        return ContainerListFilters(status: status ?? (all ? nil : .running), labels: labels, name: name)
+        return ContainerListFilters(status: status ?? (all ? nil : .running), labels: labels, name: name, labelConditions: labelConditions.isEmpty ? nil : labelConditions)
     }
 }

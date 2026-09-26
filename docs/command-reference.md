@@ -367,10 +367,11 @@ container list [--all] [--filter <filter> ...] [--format <format>] [--quiet] [--
 
 **Filters**
 
-A label key, `name` and `status` can each be given once.
+Label conditions combine with AND, including repeated conditions on the same key.
+`name` and `status` can each be given once.
 
-*   `label=<key>`: containers that have the label, with any non-empty value
-*   `label=<key>=<value>`: containers whose label has exactly that value, which may itself contain `=`
+*   `label=<key>`: containers that have the label, including an empty value
+*   `label=<key>=<value>`: containers whose label has exactly that value, which may itself contain `=`; `label=key=` selects an explicitly empty value, not an absent key
 *   `name=<regex>`: containers whose name contains a match for the regular expression; anchor it (`^web$`) to name one container
 *   `status=<status>`: containers in that state (`running`, `stopped`, `stopping` or `unknown`). A status condition replaces the default of showing only running containers, so it needs no `--all`
 
