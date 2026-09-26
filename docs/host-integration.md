@@ -58,9 +58,11 @@ container run -it --rm --add-host host.docker.internal:host-gateway alpine/curl 
 ```
 
 `host-gateway` becomes the gateway address of the container's first network, which is where
-the host answers. A host service reaches the container only if it listens on every interface
+the host answers. The container reaches a host service only if it listens on every interface
 (`0.0.0.0`, or `::`); one bound to `127.0.0.1` alone does not, the same as Docker on Linux. A
-container created with `--network none` cannot use `host-gateway` and is refused at start.
+container created with `--network none` cannot use `host-gateway` and is refused during create,
+before a stopped container is saved. Explicit `--add-host` names override matching peer aliases;
+the peer's other aliases remain available.
 
 The DNS route below reaches services bound to `127.0.0.1` as well, at the cost of a
 `sudo` and the constraints it lists.

@@ -121,6 +121,57 @@ public actor RuntimeService {
     /// `.internal` is reserved for private use, so it can never collide with a real zone.
     static let defaultSearchDomain = "container.internal"
 
+    /// Build the guest's hosts entries without requiring a VM or real network.
+    static func hostsEntries(
+        hostname: String, primaryAddress: String?, peers: [Attachment], searchDomain: String,
+        extraHosts: [ContainerConfiguration.ExtraHost], gateway: String?
+    ) throws -> [Hosts.Entry] {
+        var hostsEntries = [Hosts.Entry.localHostIPV4()]
+        if let primaryAddress {
+            hostsEntries.append(
+                Hosts.Entry(
+                    ipAddress: primaryAddress,
+                    hostnames: [hostname],
+                ))
+        }
+        // The containers already on this network, by bare name and qualified with the
+        // search domain, so both `web` and `web.container.internal` resolve. getaddrinfo
+        // reads hosts before DNS, which is what makes this work with no resolver in the
+        // path at all.
+        for peer in peers {
+            hostsEntries.append(
+                Hosts.Entry(
+                    ipAddress: peer.ipv4Address.address.description,
+                    hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"],
+                ))
+        }
+        // Resolvers can return every matching hosts entry, in file order. Remove
+        // colliding aliases before appending explicit hosts so stale peer addresses
+        // cannot win, while keeping each peer's remaining aliases intact.
+        let explicitNames = Set(extraHosts.map { $0.name.lowercased() })
+        hostsEntries = hostsEntries.compactMap { entry in
+            var entry = entry
+            entry.hostnames.removeAll { explicitNames.contains($0.lowercased()) }
+            return entry.hostnames.isEmpty ? nil : entry
+        }
+        // host-gateway is the first network's gateway; no network means no host route.
+        for extraHost in extraHosts {
+            let address: String
+            if extraHost.address == ContainerConfiguration.ExtraHost.hostGateway {
+                guard let gateway else {
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "host '\(extraHost.name)' asks for host-gateway, but the container has no network to reach the host through")
+                }
+                address = gateway
+            } else {
+                address = extraHost.address
+            }
+            hostsEntries.append(Hosts.Entry(ipAddress: address, hostnames: [extraHost.name]))
+        }
+        return hostsEntries
+    }
+
     @Sendable
     public func createEndpoint(_ message: XPCMessage) async throws -> XPCMessage {
         self.log.debug("enter", metadata: ["func": "\(#function)"])
@@ -311,48 +362,11 @@ public actor RuntimeService {
                 czConfig.process.stdout = stdout
                 czConfig.process.stderr = stderr
                 czConfig.process.stdin = stdin
-                // NOTE: We can support a user providing new entries eventually, but for now craft
-                // a default /etc/hosts.
-                var hostsEntries = [Hosts.Entry.localHostIPV4()]
-                if !interfaces.isEmpty {
-                    let primaryIfaceAddr = interfaces[0].ipv4Address
-                    hostsEntries.append(
-                        Hosts.Entry(
-                            ipAddress: primaryIfaceAddr.address.description,
-                            hostnames: [czConfig.hostname ?? id],
-                        ))
-                }
-                // The containers already on this network, by bare name and qualified with the
-                // search domain, so both `web` and `web.container.internal` resolve. getaddrinfo
-                // reads hosts before DNS, which is what makes this work with no resolver in the
-                // path at all.
-                let searchDomain = config.dns?.searchDomains.first ?? Self.defaultSearchDomain
-                for peer in peerAttachments {
-                    hostsEntries.append(
-                        Hosts.Entry(
-                            ipAddress: peer.ipv4Address.address.description,
-                            hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"],
-                        ))
-                }
-                // What --add-host asked for, after the peers so that a name given here wins
-                // over a peer of the same name: getaddrinfo takes the last entry for a name.
-                // host-gateway is the first network's gateway, where the host's services that
-                // listen on every interface answer; there is no such address without a network.
-                for extraHost in config.extraHosts {
-                    let address: String
-                    if extraHost.address == ContainerConfiguration.ExtraHost.hostGateway {
-                        guard let gateway = attachments.first?.ipv4Gateway else {
-                            throw ContainerizationError(
-                                .invalidArgument,
-                                message: "host '\(extraHost.name)' asks for host-gateway, but the container has no network to reach the host through")
-                        }
-                        address = gateway.description
-                    } else {
-                        address = extraHost.address
-                    }
-                    hostsEntries.append(Hosts.Entry(ipAddress: address, hostnames: [extraHost.name]))
-                }
-                czConfig.hosts = Hosts(entries: hostsEntries)
+                czConfig.hosts = Hosts(
+                    entries: try Self.hostsEntries(
+                        hostname: czConfig.hostname ?? id, primaryAddress: interfaces.first?.ipv4Address.address.description,
+                        peers: peerAttachments, searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
+                        extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description))
                 czConfig.bootLog = BootLog.file(path: bundle.bootlog, append: true)
             }
 
