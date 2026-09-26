@@ -14,9 +14,12 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPersistence
 import ContainerResource
 import ContainerizationError
+import ContainerizationOCI
 import Foundation
+import TerminalProgress
 import Testing
 
 @testable import ContainerAPIClient
@@ -131,4 +134,102 @@ struct UtilityTests {
         #expect(ports[1].proto == .udp)
         #expect(ports[1].count == 100)
     }
+    private actor ImageStub {
+        var calls: [String] = []
+        var requests: [Utility.ImageRequest] = []
+        var localError: ContainerizationError?
+        var localConfig: ContainerSystemConfig?
+        var progressCount = 0
+
+        init(localError: ContainerizationError? = nil) { self.localError = localError }
+
+        nonisolated static func image(_ digest: String) -> ClientImage {
+            ClientImage(
+                description: .init(reference: "localhost:5000/app:latest", descriptor: .init(mediaType: "application/vnd.oci.image.manifest.v1+json", digest: digest, size: 0)))
+        }
+
+        func remote(_ operation: String, _ request: Utility.ImageRequest) async -> ClientImage {
+            calls.append(operation)
+            requests.append(request)
+            await request.progress([.setDescription("pulling fresh manifest")])
+            return Self.image(operation == "pull" ? "sha256:fresh" : "sha256:cached")
+        }
+
+        func local(_ reference: String, _ config: ContainerSystemConfig) throws -> ClientImage {
+            calls.append("get:" + reference)
+            localConfig = config
+            if let localError { throw localError }
+            return Self.image("sha256:cached")
+        }
+
+        func progress() { progressCount += 1 }
+
+        nonisolated var client: Utility.ImageClient {
+            .init(pull: { await self.remote("pull", $0) }, fetch: { await self.remote("fetch", $0) }, get: { try await self.local($0, $1) })
+        }
+    }
+
+    private func imageRequest(_ stub: ImageStub, config: ContainerSystemConfig = .init()) -> Utility.ImageRequest {
+        .init(
+            reference: "localhost:5000/app:latest", platform: .init(arch: "arm64", os: "linux"), scheme: .http,
+            config: config, progress: { _ in await stub.progress() }, maxConcurrentDownloads: 7)
+    }
+
+    @Test("always repulls a present tag and missing uses the cache-aware fetch")
+    func imagePullPolicies() async throws {
+        for (policy, operation, digest) in [(Flags.ImageFetch.PullPolicy.always, "pull", "sha256:fresh"), (.missing, "fetch", "sha256:cached")] {
+            let stub = ImageStub()
+            let config = ContainerSystemConfig()
+            let image = try await Utility.imageForCreate(policy: policy, request: imageRequest(stub, config: config), client: stub.client)
+            #expect(image.digest == digest)
+            #expect(await stub.calls == [operation])
+            let request = try #require(await stub.requests.first)
+            #expect(request.reference == "localhost:5000/app:latest")
+            #expect(request.platform == .init(arch: "arm64", os: "linux"))
+            #expect(request.scheme == .http)
+            #expect(request.config === config)
+            #expect(request.maxConcurrentDownloads == 7)
+            #expect(await stub.progressCount == 1)
+        }
+    }
+
+    @Test("never returns the local image without a registry operation")
+    func imagePullNeverPresent() async throws {
+        let stub = ImageStub()
+        let config = ContainerSystemConfig()
+        let image = try await Utility.imageForCreate(policy: .never, request: imageRequest(stub, config: config), client: stub.client)
+        #expect(image.digest == "sha256:cached")
+        #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+        #expect(await stub.localConfig === config)
+        #expect(await stub.progressCount == 0)
+    }
+
+    @Test("never reports a missing local image without trying a registry")
+    func imagePullNeverMissing() async {
+        let stub = ImageStub(localError: .init(.notFound, message: "absent fixture"))
+        do {
+            _ = try await Utility.imageForCreate(policy: .never, request: imageRequest(stub), client: stub.client)
+            Issue.record("an absent image must fail under --pull never")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.notFound))
+            #expect(error.message.contains("localhost:5000/app:latest"))
+            #expect(error.message.contains("--pull never"))
+        } catch { Issue.record("unexpected error: \(error)") }
+        #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+        #expect(await stub.progressCount == 0)
+    }
+
+    @Test("never preserves local store errors other than notFound")
+    func imagePullNeverStoreFailure() async {
+        let stub = ImageStub(localError: .init(.internalError, message: "store unavailable"))
+        do {
+            _ = try await Utility.imageForCreate(policy: .never, request: imageRequest(stub), client: stub.client)
+            Issue.record("the local store error must propagate")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.internalError))
+            #expect(error.message == "store unavailable")
+        } catch { Issue.record("unexpected error: \(error)") }
+        #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+    }
+
 }
