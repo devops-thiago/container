@@ -228,6 +228,29 @@ struct ContainersServiceRecoveryTests {
         #expect(try fixture.contents() == before)
     }
 
+    @Test("Create rejects host-gateway without a network before any resource preparation")
+    func createRejectsHostGatewayWithoutNetwork() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let before = try fixture.contents()
+        let service = try ContainersService(
+            appRoot: fixture.root, pluginLoader: fixture.loader(),
+            containerSystemConfig: ContainerSystemConfig(), log: fixture.log)
+        var configuration = fixture.configuration
+        configuration.id = "no-network"
+        configuration.extraHosts = [.init(name: "host.docker.internal", address: "host-gateway")]
+        let error = await #expect(throws: ContainerizationError.self) {
+            try await service.create(
+                configuration: configuration,
+                kernel: .init(path: fixture.bundle.appendingPathComponent("kernel.bin"), platform: .linuxArm), options: .default)
+        }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("host-gateway") == true)
+        #expect(!FileManager.default.fileExists(atPath: fixture.containers.appendingPathComponent(configuration.id).path))
+        #expect(try await service.list().isEmpty)
+        #expect(try fixture.contents() == before)
+    }
+
     @Test("Creating a container cannot reuse an ID with preserved recovery data")
     func createRejectsPreservedBundle() async throws {
         let fixture = try Fixture()
