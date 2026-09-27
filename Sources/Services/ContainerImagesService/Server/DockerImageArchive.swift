@@ -67,6 +67,11 @@ struct DockerImageArchive {
             && fm.fileExists(atPath: directory.appendingPathComponent(Self.manifestFileName).path)
     }
 
+    struct ConversionResult {
+        let rejectedMembers: [String]
+        let hasImages: Bool
+    }
+
     // MARK: Loading
 
     /// Rewrite a Docker archive, extracted into `directory`, as an OCI layout in
@@ -75,11 +80,14 @@ struct DockerImageArchive {
     /// Each config and layer is hashed where it lies and hard-linked under
     /// `blobs/sha256` by its digest, so nothing is copied and nothing is written
     /// anywhere else; `ImageStore.load` then verifies every blob against its
-    /// manifest as it does for any layout. Returns the entries that were left
+    /// manifest as it does for any layout. Reports the entries that were left
     /// out: an image without `RepoTags` has no name the store could keep it under.
-    func convertToOCILayout(at directory: URL) throws -> [String] {
+    func convertToOCILayout(at directory: URL) throws -> ConversionResult {
         let root = directory.standardizedFileURL.resolvingSymlinksInPath()
         let entries: [ManifestEntry] = try Self.decode(controlFile: root.appendingPathComponent(Self.manifestFileName))
+        guard !entries.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "\(Self.manifestFileName) contains no images")
+        }
         let blobs = try Self.blobsDirectory(in: root)
 
         var manifests: [Descriptor] = []
@@ -102,9 +110,6 @@ struct DockerImageArchive {
                 manifests.append(named)
             }
         }
-        guard !manifests.isEmpty else {
-            throw ContainerizationError(.invalidArgument, message: "no image in \(Self.manifestFileName) has RepoTags")
-        }
 
         // The archive may have put a member at either name, and a symlink member can
         // point outside the directory: an atomic write replaces the entry rather than
@@ -113,7 +118,7 @@ struct DockerImageArchive {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(Index(manifests: manifests)).write(to: root.appendingPathComponent(Self.indexFileName), options: .atomic)
         try encoder.encode(["imageLayoutVersion": "1.0.0"]).write(to: root.appendingPathComponent(Self.layoutFileName), options: .atomic)
-        return rejected
+        return ConversionResult(rejectedMembers: rejected, hasImages: !manifests.isEmpty)
     }
 
     /// Link one image's config and layers into the layout and write its manifest.
@@ -214,10 +219,24 @@ struct DockerImageArchive {
     /// symlink: the layout has to stay inside the directory that is deleted after
     /// the load.
     private static func blobsDirectory(in root: URL) throws -> URL {
-        let blobs = root.appendingPathComponent(Self.blobsDirectoryName)
-        try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: true)
-        guard blobs.resolvingSymlinksInPath().path == blobs.path else {
-            throw ContainerizationError(.invalidArgument, message: "\(Self.blobsDirectoryName) in the archive is a symbolic link")
+        // Check each component before creating anything beneath it. Checking the
+        // resolved final path after recursive mkdir is too late: mkdir follows a
+        // supplied `blobs` symlink and can create sha256 outside the extraction root.
+        var blobs = root
+        for component in ["blobs", "sha256"] {
+            blobs.appendPathComponent(component)
+            var metadata = stat()
+            if lstat(blobs.path, &metadata) == 0 {
+                guard (metadata.st_mode & S_IFMT) == S_IFDIR else {
+                    throw ContainerizationError(.invalidArgument, message: "\(Self.blobsDirectoryName) in the archive contains a non-directory or symbolic link")
+                }
+            } else {
+                let error = errno
+                guard error == ENOENT else {
+                    throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+                }
+                try FileManager.default.createDirectory(at: blobs, withIntermediateDirectories: false)
+            }
         }
         return blobs
     }
