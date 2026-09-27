@@ -38,6 +38,7 @@ struct ContainerListFiltersTests {
         let request = Data(#"{"ids":[],"status":"running","labels":{}}"#.utf8)
         let filters = try JSONDecoder().decode(ContainerListFilters.self, from: request)
         #expect(filters.name == nil)
+        #expect(filters.labelConditions == nil)
         #expect(filters.status == .running)
     }
 
@@ -46,7 +47,15 @@ struct ContainerListFiltersTests {
         let encoded = try JSONEncoder().encode(ContainerListFilters(status: .running))
         let object = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         #expect(object["name"] == nil)
+        #expect(object["labelConditions"] == nil)
         let named = try JSONEncoder().encode(ContainerListFilters(name: "^web$"))
         #expect(try JSONDecoder().decode(ContainerListFilters.self, from: named).name == "^web$")
     }
+    @Test("label conditions round-trip without losing presence or repeated predicates")
+    func labelConditionsRoundTrip() throws {
+        let original = ContainerListFilters(labelConditions: [.init(key: "app"), .init(key: "app", pattern: "^$"), .init(key: "app", pattern: "web")])
+        let decoded = try JSONDecoder().decode(ContainerListFilters.self, from: JSONEncoder().encode(original))
+        #expect(decoded.labelConditions == original.labelConditions)
+    }
+
 }

@@ -24,15 +24,19 @@ struct ContainerListMatcher {
     private let ids: [String]
     private let status: RuntimeStatus?
     private let name: Regex<AnyRegexOutput>?
-    private let labels: [(key: String, regex: Regex<AnyRegexOutput>)]
+    private let labels: [(key: String, regex: Regex<AnyRegexOutput>?)]
 
     init(_ filters: ContainerListFilters) throws {
         ids = filters.ids
         status = filters.status
         name = try filters.name.map { try Self.compile($0, for: "name") }
-        labels = try filters.labels.map { key, pattern in
-            (key: key, regex: try Self.compile(pattern, for: key))
+        let legacy = try filters.labels.map { key, pattern in
+            (key: key, regex: Optional(try Self.compile(pattern, for: key)))
         }
+        let additional = try (filters.labelConditions ?? []).map { condition in
+            (key: condition.key, regex: try condition.pattern.map { try Self.compile($0, for: condition.key) })
+        }
+        labels = legacy + additional
     }
 
     /// Whether `snapshot` satisfies every filter. A label the container does not carry is
@@ -49,7 +53,8 @@ struct ContainerListMatcher {
             return false
         }
         return labels.allSatisfy { key, regex in
-            (snapshot.configuration.labels[key] ?? "").contains(regex)
+            guard let regex else { return snapshot.configuration.labels[key] != nil }
+            return (snapshot.configuration.labels[key] ?? "").contains(regex)
         }
     }
 

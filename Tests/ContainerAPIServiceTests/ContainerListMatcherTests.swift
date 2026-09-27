@@ -98,4 +98,45 @@ struct ContainerListMatcherTests {
         }
         #expect(label?.message.contains("for app") == true)
     }
+    @Test("label presence distinguishes an empty value from a missing key")
+    func emptyLabelPresence() throws {
+        // Exercise the request wire too: pre-fix servers ignore this condition and
+        // incorrectly admit the container without the key.
+        let request = Data(#"{"ids":[],"labels":{},"labelConditions":[{"key":"app"}]}"#.utf8)
+        let filters = try JSONDecoder().decode(ContainerListFilters.self, from: request)
+        let values = [container("empty", labels: ["app": ""]), container("valued", labels: ["app": "web"]), container("absent")]
+        #expect(try admitted(by: filters, of: values) == ["empty", "valued"])
+    }
+
+    @Test("machine exclusion does not replace an explicit plugin predicate")
+    func pluginPredicateSurvivesExclusion() throws {
+        let key = ResourceLabelKeys.plugin
+        let values = [container("pod", labels: [key: "k8s"]), container("vm", labels: [key: "machine"]), container("other", labels: [key: "future"]), container("plain")]
+        let filters = ContainerListFilters(labels: [key: "^k8s$"]).withoutMachines()
+        #expect(try admitted(by: filters, of: values) == ["pod"])
+        #expect(try admitted(by: ContainerListFilters(labels: [key: "^machine$"]).withoutMachines(), of: values).isEmpty)
+        #expect(try admitted(by: ContainerListFilters(labels: [key: "^k8s$"]).withoutInfrastructure(), of: values).isEmpty)
+    }
+
+    @Test("repeated label conditions are ANDed and explicit empty values require the key")
+    func repeatedLabelConditions() throws {
+        let values = [container("empty", labels: ["app": ""]), container("web", labels: ["app": "web"]), container("absent")]
+        for (patterns, expected) in [
+            ("[{\"key\":\"app\"},{\"key\":\"app\",\"pattern\":\"^$\"}]", ["empty"]), ("[{\"key\":\"app\",\"pattern\":\"^web$\"},{\"key\":\"app\",\"pattern\":\"^db$\"}]", []),
+        ] {
+            let request = Data(("{\"ids\":[],\"labels\":{},\"labelConditions\":" + patterns + "}").utf8)
+            let filters = try JSONDecoder().decode(ContainerListFilters.self, from: request)
+            #expect(try admitted(by: filters, of: values) == expected)
+        }
+    }
+
+    @Test("invalid additional label patterns are refused before scanning")
+    func badAdditionalPattern() {
+        let error = #expect(throws: ContainerizationError.self) {
+            try ContainerListMatcher(.init(labelConditions: [.init(key: "app", pattern: "[")]))
+        }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("for app") == true)
+    }
+
 }
