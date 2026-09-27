@@ -63,12 +63,15 @@ struct ContainerListFilterFlagTests {
         #expect(try !matches(url, "http://a/b?c=d"))
     }
 
-    @Test("a label alone asks for its presence, which the engine can only see as a non-empty value")
+    @Test("a label alone requires its key, including when its value is empty")
     func labelPresence() throws {
-        let app = try #require(try filters(["--filter", "label=app"]).labels["app"])
-        #expect(try matches(app, "web"))
-        #expect(try matches(app, "\n"))
-        #expect(try !matches(app, ""))
+        let value = try filters(["--filter", "label=app"])
+        #expect(value.labels.isEmpty)
+        #expect(value.labelConditions == [.init(key: "app")])
+        let empty = try filters(["--filter", "label=app="])
+        #expect(empty.labelConditions == [.init(key: "app")])
+        #expect(try matches(try #require(empty.labels["app"]), ""))
+        #expect(try !matches(try #require(empty.labels["app"]), "web"))
     }
 
     @Test("every condition is sent, and a label's value may itself contain '='")
@@ -112,7 +115,6 @@ struct ContainerListFilterFlagTests {
     func malformed() {
         #expect(refusal(["--filter", "running"]).contains("<key>=<value>"))
         #expect(refusal(["--filter", "label="]).contains("needs a key"))
-        #expect(refusal(["--filter", "label=app="]).contains("label=app matches"))
         #expect(refusal(["--filter", "name="]).contains("regular expression"))
         let status = refusal(["--filter", "status=paused"])
         #expect(status.contains("paused"))
@@ -120,10 +122,14 @@ struct ContainerListFilterFlagTests {
         #expect(status.contains("stopped"))
     }
 
-    @Test("a label, the name and the status are each filtered once; different labels combine")
+    @Test("repeated labels combine with AND; name and status remain single conditions")
     func repeats() throws {
-        #expect(refusal(["--filter", "label=app=web", "--filter", "label=app=db"]).contains("label app"))
-        #expect(refusal(["--filter", "label=app=web", "--filter", "label=app"]).contains("more than once"))
+        let repeated = try filters(["--filter", "label=app=web", "--filter", "label=app=db"])
+        #expect(repeated.labels["app"] == "^web$")
+        #expect(repeated.labelConditions == [.init(key: "app"), .init(key: "app"), .init(key: "app", pattern: "^db$")])
+        let present = try filters(["--filter", "label=app=web", "--filter", "label=app"])
+        #expect(present.labels["app"] == "^web$")
+        #expect(present.labelConditions == [.init(key: "app"), .init(key: "app")])
         #expect(refusal(["--filter", "name=web", "--filter", "name=db"]).contains("(web|db)"))
         #expect(refusal(["--filter", "status=running", "--filter", "status=stopped"]).contains("status"))
         #expect(try filters(["--filter", "label=app=web", "--filter", "label=tier=front"]).labels.count == 2)
