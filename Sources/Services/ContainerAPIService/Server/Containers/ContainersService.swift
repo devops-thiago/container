@@ -301,6 +301,16 @@ public actor ContainersService {
             )
         }
 
+        // Validate before allocating snapshots, starting a runtime, or persisting a
+        // stopped container that can never boot. This also covers non-CLI clients.
+        if configuration.networks.isEmpty,
+            let host = configuration.extraHosts.first(where: { $0.address == ContainerConfiguration.ExtraHost.hostGateway })
+        {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "host '\(host.name)' asks for host-gateway, but the container has no network to reach the host through")
+        }
+
         return try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(configuration.id)"]) { context in
             let path = self.containerRoot.appendingPathComponent(configuration.id)
             guard await self.containers[configuration.id] == nil else {

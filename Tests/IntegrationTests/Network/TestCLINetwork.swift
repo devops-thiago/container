@@ -25,6 +25,44 @@ struct TestCLINetwork {
 
     // MARK: - Tests
 
+    @Test func testHostGatewayReachesHostHTTPAndOverridesPeer() async throws {
+        try await ContainerFixture.with { f in
+            let payload = "host-response-\(f.testID)"
+            // Bind to every host interface: the gateway does not forward host loopback.
+            let server = try LoopbackFileServer(serving: Data(payload.utf8), bindHost: "0.0.0.0")
+            defer { server.shutdown() }
+            let port = try #require(server.url.port)
+            let peer = "\(f.testID)-peer"
+            let client = "\(f.testID)-client"
+            f.addCleanup { try? f.doRemove(client, force: true) }
+            f.addCleanup { try? f.doRemove(peer, force: true) }
+            try await f.doLongRun(name: peer, autoRemove: false, waitUntilRunning: true)
+            let result = try f.run([
+                "run", "--rm", "--name", client,
+                "--add-host", "host.docker.internal:host-gateway", "--add-host", "\(peer):host-gateway",
+                WarmupImage.alpine320.rawValue,
+                "sh", "-ec", "wget -T 10 -qO- \"$1\"; wget -T 10 -qO- \"$2\"", "--",
+                "http://host.docker.internal:\(port)/payload", "http://\(peer):\(port)/payload",
+            ]).check()
+            #expect(result.output == payload + payload)
+        }
+    }
+
+    @Test func testCreateRejectsHostGatewayWithoutNetwork() async throws {
+        try await ContainerFixture.with { f in
+            let name = "\(f.testID)-none"
+            f.addCleanup { try? f.doRemove(name, force: true) }
+            let result = try f.run([
+                "create", "--name", name, "--network", "none", "--add-host", "host.docker.internal:host-gateway",
+                WarmupImage.alpine320.rawValue, "true",
+            ])
+            #expect(result.status != 0)
+            #expect(result.error.contains("host-gateway"))
+            let inspected = try f.run(["inspect", name])
+            #expect(inspected.status != 0, "invalid create must not leave a stopped container")
+        }
+    }
+
     @available(macOS 26, *)
     @Test func testNetworkCreateAndUse() async throws {
         try await ContainerFixture.with { f in

@@ -19,7 +19,7 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 
-/// Minimal loopback-only HTTP/1.1 server that serves a single fixed byte
+/// Minimal HTTP/1.1 server, bound to loopback by default, that serves a single fixed byte
 /// payload for any GET request. Used by integration tests that need to
 /// exercise a "fetch this over a URL" code path without depending on a real
 /// network peer.
@@ -30,7 +30,7 @@ public final class LoopbackFileServer: Sendable {
     private let group: MultiThreadedEventLoopGroup
     private let channel: any Channel
 
-    public init(serving data: Data) throws {
+    public init(serving data: Data, bindHost: String = "127.0.0.1") throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
             .childChannelInitializer { channel in
@@ -41,7 +41,7 @@ public final class LoopbackFileServer: Sendable {
 
         let channel: any Channel
         do {
-            channel = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
+            channel = try bootstrap.bind(host: bindHost, port: 0).wait()
         } catch {
             try? group.syncShutdownGracefully()
             throw error
