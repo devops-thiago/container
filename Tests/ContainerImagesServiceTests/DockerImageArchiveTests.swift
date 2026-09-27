@@ -179,7 +179,7 @@ struct DockerImageArchiveTests {
             let archive = try makeDirectory(root.appendingPathComponent("archive"))
             let fixture = try DockerArchiveFixture.write(in: archive)
 
-            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: archive)
+            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: archive).rejectedMembers
             #expect(rejected.isEmpty)
 
             let layout = try decode([String: String].self, at: archive.appendingPathComponent("oci-layout"))
@@ -221,7 +221,7 @@ struct DockerImageArchiveTests {
         try await withTemporaryDirectory { root in
             try DockerArchiveFixture.write(in: root, repoTags: ["example/app:1", "example/app", "nginx:latest", "localhost:5000/app:2"])
 
-            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root)
+            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root).rejectedMembers
             #expect(rejected.isEmpty)
 
             let index = try decode(Index.self, at: root.appendingPathComponent("index.json"))
@@ -238,7 +238,7 @@ struct DockerImageArchiveTests {
             let untagged = DockerImageArchive.ManifestEntry(config: fixture.configFileName, repoTags: nil, layers: [fixture.layerMember])
             try DockerArchiveFixture.writeManifest([untagged, tagged], in: root)
 
-            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root)
+            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root).rejectedMembers
             #expect(rejected.count == 1)
             #expect(rejected.first?.contains("manifest.json[0]") == true)
             #expect(rejected.first?.contains(fixture.configFileName) == true)
@@ -248,12 +248,107 @@ struct DockerImageArchiveTests {
         }
     }
 
-    @Test func refusesAnArchiveWithNoTaggedImage() async throws {
+    @Test(arguments: [false, true])
+    func reportsAnArchiveWithNoTaggedImage(force: Bool) async throws {
         try await withTemporaryDirectory { root in
-            try DockerArchiveFixture.write(in: root, repoTags: [])
+            let archive = try makeDirectory(root.appendingPathComponent("archive"))
+            let image = try DockerArchiveFixture.write(in: archive, repoTags: [])
+            let tar = root.appendingPathComponent("untagged.tar")
+            try pack(archive, to: tar)
+            let fixture = try ServiceFixture(root: root.appendingPathComponent("store"), log: log)
+            let (images, rejected) = try await fixture.service.load(from: tar, force: force)
+            #expect(images.isEmpty)
+            #expect(rejected == ["manifest.json[0] (\(image.configFileName)): no RepoTags"])
+        }
+    }
+
+    @Test(arguments: ["blobs", "blobs/sha256"], [false, true])
+    func serviceRejectsSymlinkBlobDirectoriesBeforeAnyOutsideWrite(member: String, force: Bool) async throws {
+        try await withTemporaryDirectory { root in
+            let archive = try makeDirectory(root.appendingPathComponent("archive"))
+            try DockerArchiveFixture.write(in: archive)
+            let outside = try makeDirectory(root.appendingPathComponent("outside"))
+            let sentinel = outside.appendingPathComponent("sentinel")
+            let original = Data("untouched".utf8)
+            try original.write(to: sentinel)
+            let link = archive.appendingPathComponent(member)
+            try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+            let tar = root.appendingPathComponent("malicious.tar")
+            try pack(archive, to: tar)
+            let fixture = try ServiceFixture(root: root.appendingPathComponent("store"), log: log)
+            await #expect(throws: ContainerizationError.self) {
+                try await fixture.service.load(from: tar, force: force)
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path) == ["sentinel"])
+            #expect(try Data(contentsOf: sentinel) == original)
+        }
+    }
+
+    @Test(arguments: ["blobs", "blobs/sha256"])
+    func rejectsDanglingBlobDirectorySymlinks(member: String) async throws {
+        try await withTemporaryDirectory { root in
+            let archive = try makeDirectory(root.appendingPathComponent("archive"))
+            try DockerArchiveFixture.write(in: archive)
+            let outside = root.appendingPathComponent("missing")
+            let link = archive.appendingPathComponent(member)
+            try FileManager.default.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+            #expect(throws: ContainerizationError.self) {
+                try DockerImageArchive(log: log).convertToOCILayout(at: archive)
+            }
+            #expect(!FileManager.default.fileExists(atPath: outside.path))
+        }
+    }
+
+    @Test func replacesControlFileSymlinkWithoutModifyingItsTarget() async throws {
+        try await withTemporaryDirectory { root in
+            let archive = try makeDirectory(root.appendingPathComponent("archive"))
+            try DockerArchiveFixture.write(in: archive)
+            let outside = root.appendingPathComponent("outside.json")
+            let original = Data("untouched".utf8)
+            try original.write(to: outside)
+            try FileManager.default.createSymbolicLink(at: archive.appendingPathComponent("index.json"), withDestinationURL: outside)
+            _ = try DockerImageArchive(log: log).convertToOCILayout(at: archive)
+            #expect(try Data(contentsOf: outside) == original)
+            #expect(try decode(Index.self, at: archive.appendingPathComponent("index.json")).manifests.count == 1)
+        }
+    }
+
+    @Test func refusesAnEmptyManifest() async throws {
+        try await withTemporaryDirectory { root in
+            try DockerArchiveFixture.writeManifest([], in: root)
             #expect(throws: ContainerizationError.self) {
                 try DockerImageArchive(log: log).convertToOCILayout(at: root)
             }
+        }
+    }
+
+    @Test(arguments: ["blobs", "blobs/sha256"])
+    func rejectsRegularFilesInBlobDirectoryComponents(member: String) async throws {
+        try await withTemporaryDirectory { root in
+            try DockerArchiveFixture.write(in: root)
+            let file = root.appendingPathComponent(member)
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bytes = Data("preserved".utf8)
+            try bytes.write(to: file)
+            #expect(throws: ContainerizationError.self) {
+                try DockerImageArchive(log: log).convertToOCILayout(at: root)
+            }
+            #expect(try Data(contentsOf: file) == bytes)
+        }
+    }
+
+    @Test func preservesBlobDirectoryPermissionErrors() async throws {
+        try await withTemporaryDirectory { root in
+            try DockerArchiveFixture.write(in: root)
+            let blobs = try makeDirectory(root.appendingPathComponent("blobs"))
+            try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: blobs.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: blobs.path) }
+            let error = #expect(throws: POSIXError.self) {
+                try DockerImageArchive(log: log).convertToOCILayout(at: root)
+            }
+            #expect(error?.code == .EACCES)
         }
     }
 
@@ -283,7 +378,7 @@ struct DockerImageArchiveTests {
         try await withTemporaryDirectory { root in
             let fixture = try DockerArchiveFixture.write(in: root, layerFilter: .gzip)
 
-            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root)
+            let rejected = try DockerImageArchive(log: log).convertToOCILayout(at: root).rejectedMembers
             #expect(rejected.isEmpty)
 
             let index = try decode(Index.self, at: root.appendingPathComponent("index.json"))
