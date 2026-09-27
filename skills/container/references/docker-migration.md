@@ -29,8 +29,14 @@ spelling.
 | `docker commit` | — | build an image from a Dockerfile instead |
 | `docker rename`, `pause`, `unpause`, `wait`, `diff`, `update` | — | no equivalent |
 
-There is no `--restart` policy flag on `container run`. Supervise long-running services with
-launchd on the host, or run them under an init system inside a container machine.
+The SiliconShip 1.3.0 engine accepts `--restart no|always|unless-stopped|on-failure[:N]`
+and stores the policy for `inspect`. The app applies `always` and `unless-stopped` when it
+starts the engine; the standalone engine does not yet supervise policies. Process-exit
+restarts arrive with the engine supervisor planned for 1.5.0. See the roadmap below.
+
+The 1.3.0 fork also accepts `--hostname`, `--sysctl key=value`, `--add-host name:address`
+(including `host-gateway`), and `--pull always|missing|never`. A host service reached through
+`host-gateway` must listen on an address accessible from the guest, not only host loopback.
 
 ## Images
 
@@ -95,8 +101,26 @@ container network prune
 
 ## Replacing a compose file
 
-There is no `container compose`. A compose file becomes a shell script: DNS-resolvable names
-on the `default` network, and `-d`.
+There is no `container compose` in SiliconShip 1.3.0. A small stack can be translated into
+explicit `container run` commands, but that script does not implement Compose semantics.
+The [migration roadmap](https://github.com/devops-thiago/SiliconShip/issues/235) separates
+what ships now from planned work:
+
+| Release | Planned capability |
+|---|---|
+| 1.3.0 | Migration report, run-command paste, image archives, and the flags described above |
+| 1.4.0 | Native `container compose` commands and in-app Compose startup with dependency health gates |
+| 1.5.0 | Engine restart supervision, live health, dynamic guest name resolution, and single-file bind mounts |
+| 1.6.0 | Engine API compatibility for the user's Docker CLI, Docker Compose, Testcontainers and IDE integrations |
+
+Those later capabilities are plans, not commands available in the 1.3.0 binary. The user
+migration guide is at [siliconship.app/docker](https://siliconship.app/docker).
+
+On the `default` network, peer names are captured when the consuming container starts.
+Start dependencies first and wait for readiness before starting their consumers. If a peer
+restarts with a different address, recreate or restart its consumers after that peer is ready;
+existing guests do not receive a live name-to-address update. This limitation is tracked in
+[SiliconShip#188](https://github.com/devops-thiago/SiliconShip/issues/188).
 
 **Do not reach for `container network create` here.** Name lookup between containers works on
 the `default` network with a domain-qualified name. It does *not* work for containers on a
@@ -158,17 +182,20 @@ container delete web db
 
 Mapping notes:
 
-- `depends_on` has no declarative form. Compose only waits for *start*, not readiness, so an
-  explicit readiness loop is usually more correct than what it replaced.
-- Reference other services as `<name>.<domain>` (`db.test`). A bare `db` does not resolve.
-  This means editing your application's config, not just the `run` command.
+- `depends_on` has no declarative form here. Compose can wait for health with
+  `condition: service_healthy`; a hand-written script needs its own readiness checks and
+  teardown/error handling to approximate that behavior.
+- The example references the dependency as `<name>.<domain>` (`db.test`). The fork also
+  installs bare peer hostnames for peers already running on the network at consumer startup.
+  Neither spelling makes those entries dynamic; dependency order and restart handling still matter.
 - `ports:` → `-p`. Often unnecessary between containers, since each container has its own IP
   and is reachable without publishing. You need `-p` to reach a service from a host browser or
   a macOS-native tool.
 - `volumes:` → `-v` for bind mounts, or `container volume create` plus `-v <name>:<path>`.
 - `build:` → a `container build -t <name> .` line before the `run`.
-- `restart:` has no equivalent. Supervise with launchd on the host, or run the stack under an
-  init system inside a container machine.
+- `restart:` can be carried as `--restart`, but 1.3.0 only persists it and applies the app's
+  engine-start pass. It is not Compose's exit-driven supervision. Keep recovery explicit in
+  scripts until the planned 1.5.0 engine supervisor is available.
 
 ## Features with no Docker counterpart
 
