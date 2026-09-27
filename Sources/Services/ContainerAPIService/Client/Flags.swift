@@ -380,7 +380,7 @@ public struct Flags {
         @Option(
             name: .long,
             help: .init(
-                "Restart policy kept on the container: no, always, unless-stopped or on-failure[:<n>]. Applied when the engine starts; exit-driven restarts arrive in a later release",
+                "Policy stored on the container: no, always, unless-stopped or on-failure[:<n>]. SiliconShip applies always/unless-stopped at app-managed engine start: always includes manually stopped containers; unless-stopped restores the last app shutdown's running set. Standalone engine starts and process exits do not apply this policy yet",
                 valueName: "policy"
             )
         )
