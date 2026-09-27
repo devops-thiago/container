@@ -297,7 +297,13 @@ public actor ImagesService {
         }
 
         if DockerImageArchive.needsConversion(at: tempDir) {
-            rejectedMembers += try DockerImageArchive(log: self.log).convertToOCILayout(at: tempDir)
+            let converted = try DockerImageArchive(log: self.log).convertToOCILayout(at: tempDir)
+            rejectedMembers += converted.rejectedMembers
+            // ImageStore rejects an empty index. Untagged Docker entries are
+            // reported rejections, including when none of the entries has a tag.
+            guard converted.hasImages else {
+                return ([], rejectedMembers)
+            }
         } else if !DockerImageArchive.isOCILayout(at: tempDir) {
             throw ContainerizationError(
                 .invalidArgument,
