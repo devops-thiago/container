@@ -22,6 +22,18 @@ public struct ContainerListFilters: Sendable, Codable {
         "^(?!\(str)$)"
     }
 
+    /// An additional label condition. A nil pattern requires the key to exist, even
+    /// when its value is empty. A pattern keeps the legacy missing-as-empty semantics.
+    public struct LabelCondition: Sendable, Codable, Equatable {
+        public var key: String
+        public var pattern: String?
+
+        public init(key: String, pattern: String? = nil) {
+            self.key = key
+            self.pattern = pattern
+        }
+    }
+
     /// Filter by container IDs. If non-empty, only containers with matching IDs are returned.
     public var ids: [String]
     /// Filter by container status.
@@ -35,6 +47,9 @@ public struct ContainerListFilters: Sendable, Codable {
     /// Filter by container ID with a regular expression. Unlike ``ids`` it is searched for in
     /// the ID, so ``web`` matches every container whose ID mentions it and ``^web$`` one.
     public var name: String?
+    /// Additional label conditions, all ANDed with ``labels``. Optional on the wire so
+    /// requests from clients predating key-presence and repeated conditions still decode.
+    public var labelConditions: [LabelCondition]?
 
     /// No filters applied. Will return all containers.
     public static let all = ContainerListFilters()
@@ -43,19 +58,21 @@ public struct ContainerListFilters: Sendable, Codable {
         ids: [String] = [],
         status: RuntimeStatus? = nil,
         labels: [String: String] = [:],
-        name: String? = nil
+        name: String? = nil,
+        labelConditions: [LabelCondition]? = nil
     ) {
         self.ids = ids
         self.status = status
         self.labels = labels
         self.name = name
+        self.labelConditions = labelConditions
     }
 }
 
 extension ContainerListFilters {
     public func withoutMachines() -> ContainerListFilters {
         var filters = self
-        filters.labels[ResourceLabelKeys.plugin] = Self.exclude("machine")
+        filters.addPluginCondition(Self.exclude("machine"))
         return filters
     }
 
@@ -73,7 +90,17 @@ extension ContainerListFilters {
     /// Exclude every plugin-owned container, including plugins added after this client ships.
     public func withoutInfrastructure() -> ContainerListFilters {
         var filters = self
-        filters.labels[ResourceLabelKeys.plugin] = "^$"
+        filters.addPluginCondition("^$")
         return filters
     }
+    private mutating func addPluginCondition(_ pattern: String) {
+        let key = ResourceLabelKeys.plugin
+        if labels[key] == nil {
+            labels[key] = pattern
+        } else {
+            // Preserve the caller's condition; exclusions narrow a request, never replace it.
+            labelConditions = (labelConditions ?? []) + [LabelCondition(key: key, pattern: pattern)]
+        }
+    }
+
 }
