@@ -261,7 +261,7 @@ public actor ImagesService {
             try? FileManager.default.removeItem(at: tempDir)
         }
         try await self.imageStore.save(references: references, out: tempDir, platform: platform)
-        try DockerImageArchive(log: self.log).writeCompatibilityFiles(in: tempDir)
+        try DockerImageArchive(log: self.log).writeCompatibilityFiles(in: tempDir, platform: platform ?? .current)
         let writer = try ArchiveWriter(format: .pax, filter: .none, file: out)
         try writer.archiveDirectory(tempDir)
         try writer.finishEncoding()
