@@ -108,7 +108,7 @@ what ships now from planned work:
 
 | Release | Planned capability |
 |---|---|
-| 1.3.0 | Migration report, run-command paste, image archives, and the flags described above |
+| 1.3.0 | Migration report, image archives, and the flags described above |
 | 1.4.0 | Native `container compose` commands and in-app Compose startup with dependency health gates |
 | 1.5.0 | Engine restart supervision, live health, dynamic guest name resolution, and single-file bind mounts |
 | 1.6.0 | Engine API compatibility for the user's Docker CLI, Docker Compose, Testcontainers and IDE integrations |
