@@ -525,15 +525,31 @@ struct DockerImageArchiveTests {
             try "{\"imageLayoutVersion\":\"1.0.0\"}".write(to: self.root.appendingPathComponent("oci-layout"), atomically: true, encoding: .utf8)
             try JSONEncoder().encode(Index(manifests: manifests)).write(to: self.root.appendingPathComponent("index.json"))
         }
+
+        /// A second image for `platform`, with a layer and config of its own, so a test
+        /// can tell which of several platforms the writer named.
+        func anotherManifest(for platform: Platform) throws -> (descriptor: Descriptor, configDigest: String, layerDigest: String) {
+            let writer = try ContentWriter(for: self.blobs)
+            let layer = try writer.write(Data("layer bytes for \(platform)".utf8))
+            let config = try writer.write(try DockerArchiveFixture.config(diffIDs: [layer.digest.digestString]))
+            let manifest = try writer.create(
+                from: Manifest(
+                    config: Descriptor(mediaType: MediaTypes.imageConfig, digest: config.digest.digestString, size: config.size),
+                    layers: [Descriptor(mediaType: MediaTypes.imageLayerGzip, digest: layer.digest.digestString, size: layer.size)]))
+            return (
+                Descriptor(mediaType: MediaTypes.imageManifest, digest: manifest.digest.digestString, size: manifest.size, platform: platform),
+                config.digest.digestString, layer.digest.digestString
+            )
+        }
     }
 
-    @Test func writesManifestAndRepositoriesForEachSinglePlatformImage() async throws {
+    @Test func writesManifestAndRepositoriesForEachImageDockerLoadCanTake() async throws {
         try await withTemporaryDirectory { root in
             let layout = try SyntheticLayout(in: root)
             let wrapped = try layout.index(over: [layout.manifest])
             var other = layout.manifest
             other.platform = Platform(arch: "amd64", os: "linux")
-            let multi = try layout.index(over: [layout.manifest, other])
+            let multi = try layout.index(over: [other, layout.manifest])
             try layout.writeIndex([
                 layout.named(layout.manifest, "docker.io/example/app:1"),
                 layout.named(wrapped, "docker.io/example/app:2"),
@@ -541,17 +557,54 @@ struct DockerImageArchiveTests {
                 layout.named(layout.manifest, "untagged@\(layout.manifest.digest)"),
             ])
 
-            try DockerImageArchive(log: log).writeCompatibilityFiles(in: root)
+            try DockerImageArchive(log: log).writeCompatibilityFiles(in: root, platform: DockerArchiveFixture.platform)
 
             let configID = try layout.configDigest.validatedDigestEncoding()
             let layerID = try layout.layerDigest.validatedDigestEncoding()
             let entries = try decode([DockerImageArchive.ManifestEntry].self, at: root.appendingPathComponent("manifest.json"))
-            #expect(entries.count == 3)
-            #expect(entries.map(\.repoTags) == [["docker.io/example/app:1"], ["docker.io/example/app:2"], nil])
+            #expect(entries.count == 4)
+            #expect(entries.map(\.repoTags) == [["docker.io/example/app:1"], ["docker.io/example/app:2"], ["docker.io/example/multi:1"], nil])
             #expect(entries.allSatisfy { $0.config == "blobs/sha256/\(configID)" && $0.layers == ["blobs/sha256/\(layerID)"] })
 
             let repositories = try decode([String: [String: String]].self, at: root.appendingPathComponent("repositories"))
-            #expect(repositories == ["docker.io/example/app": ["1": layerID, "2": layerID]])
+            #expect(repositories == ["docker.io/example/app": ["1": layerID, "2": layerID], "docker.io/example/multi": ["1": layerID]])
+        }
+    }
+
+    /// A plain `image pull` keeps every platform, so this is the common shape of a saved
+    /// image: `docker load` takes one, and it has to be the one asked for.
+    @Test(arguments: [
+        (Platform(arch: "arm64", os: "linux"), "arm64"),
+        (Platform(arch: "arm64", os: "linux", variant: "v8"), "arm64"),
+        (Platform(arch: "amd64", os: "linux"), "amd64"),
+    ])
+    func namesThePlatformsManifestOfAMultiPlatformImage(platform: Platform, expected: String) async throws {
+        try await withTemporaryDirectory { root in
+            let layout = try SyntheticLayout(in: root)
+            let amd64 = try layout.anotherManifest(for: Platform(arch: "amd64", os: "linux"))
+            var attestation = layout.manifest
+            attestation.platform = Platform(arch: "unknown", os: "unknown")
+            let multi = try layout.index(over: [amd64.descriptor, attestation, layout.manifest])
+            try layout.writeIndex([layout.named(multi, "docker.io/example/multi:1")])
+
+            try DockerImageArchive(log: log).writeCompatibilityFiles(in: root, platform: platform)
+
+            let configs = [
+                "arm64": try layout.configDigest.validatedDigestEncoding(),
+                "amd64": try amd64.configDigest.validatedDigestEncoding(),
+            ]
+            let layers = [
+                "arm64": try layout.layerDigest.validatedDigestEncoding(),
+                "amd64": try amd64.layerDigest.validatedDigestEncoding(),
+            ]
+            let entries = try decode([DockerImageArchive.ManifestEntry].self, at: root.appendingPathComponent("manifest.json"))
+            #expect(entries.count == 1)
+            #expect(entries.first?.repoTags == ["docker.io/example/multi:1"])
+            #expect(entries.first?.config == "blobs/sha256/\(configs[expected]!)")
+            #expect(entries.first?.layers == ["blobs/sha256/\(layers[expected]!)"])
+
+            let repositories = try decode([String: [String: String]].self, at: root.appendingPathComponent("repositories"))
+            #expect(repositories == ["docker.io/example/multi": ["1": layers[expected]!]])
         }
     }
 
@@ -563,7 +616,7 @@ struct DockerImageArchiveTests {
             let multi = try layout.index(over: [layout.manifest, other])
             try layout.writeIndex([layout.named(multi, "docker.io/example/multi:1")])
 
-            try DockerImageArchive(log: log).writeCompatibilityFiles(in: root)
+            try DockerImageArchive(log: log).writeCompatibilityFiles(in: root, platform: Platform(arch: "s390x", os: "linux"))
 
             #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("manifest.json").path))
             #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("repositories").path))

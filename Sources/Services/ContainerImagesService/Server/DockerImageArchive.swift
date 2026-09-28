@@ -268,11 +268,13 @@ struct DockerImageArchive {
 
     /// Write `manifest.json` and `repositories` beside the layout `ImageStore.save`
     /// left in `directory`, so that a classic `docker load` accepts the archive; a
-    /// containerd-backed one reads the layout and ignores both files. An image
-    /// saved for more than one platform has no single config to name and is left
-    /// out, and one whose only name is a digest gets no `RepoTags`, since
-    /// `docker load` refuses a digest where it expects a tag.
-    func writeCompatibilityFiles(in directory: URL) throws {
+    /// containerd-backed one reads the layout and ignores both files. `docker load`
+    /// takes one platform per image, so an image saved for several is named by its
+    /// manifest for `platform` — the platform the save asked for, or this machine's
+    /// when it took every one — and left out when it has none for it. One whose only
+    /// name is a digest gets no `RepoTags`, since `docker load` refuses a digest where
+    /// it expects a tag.
+    func writeCompatibilityFiles(in directory: URL, platform: Platform = .current) throws {
         let index: Index = try Self.decode(controlFile: directory.appendingPathComponent(Self.indexFileName))
         let blobs = directory.appendingPathComponent(Self.blobsDirectoryName)
 
@@ -280,7 +282,7 @@ struct DockerImageArchive {
         var repositories: [String: [String: String]] = [:]
         for descriptor in index.manifests {
             let name = Self.imageName(of: descriptor)
-            guard let manifest = try self.singleManifest(for: descriptor, name: name, blobs: blobs) else {
+            guard let manifest = try self.manifest(for: descriptor, platform: platform, name: name, blobs: blobs) else {
                 continue
             }
             let config = try Self.blobPath(manifest.config)
@@ -304,9 +306,10 @@ struct DockerImageArchive {
         try encoder.encode(repositories).write(to: directory.appendingPathComponent(Self.repositoriesFileName))
     }
 
-    /// The image manifest an index entry stands for, or nil with a log line when
-    /// it stands for several platforms.
-    private func singleManifest(for descriptor: Descriptor, name: String?, blobs: URL) throws -> Manifest? {
+    /// The image manifest an index entry stands for: the entry itself, the one image a
+    /// nested index holds, or the image for `platform` among several. Nil with a log
+    /// line when several are there and none is for `platform`.
+    private func manifest(for descriptor: Descriptor, platform: Platform, name: String?, blobs: URL) throws -> Manifest? {
         var current = descriptor
         while true {
             switch current.mediaType {
@@ -316,10 +319,13 @@ struct DockerImageArchive {
                 let index: Index = try Self.decode(blob: current, in: blobs)
                 // Attestation manifests describe no platform that could be loaded.
                 let images = index.manifests.filter { $0.platform?.os != "unknown" }
-                guard images.count == 1, let image = images.first else {
+                guard let image = images.count == 1 ? images.first : Self.image(for: platform, among: images) else {
                     self.log.info(
-                        "leaving an image out of \(Self.manifestFileName): docker load takes one platform",
-                        metadata: ["image": "\(name ?? current.digest)", "platforms": "\(images.count)"])
+                        "leaving an image out of \(Self.manifestFileName): docker load takes one platform, and there is none for \(platform)",
+                        metadata: [
+                            "image": "\(name ?? current.digest)",
+                            "platforms": "\(images.compactMap(\.platform).map(\.description))",
+                        ])
                     return nil
                 }
                 current = image
@@ -330,6 +336,13 @@ struct DockerImageArchive {
                 return nil
             }
         }
+    }
+
+    /// The image for `platform` among several: an exact match first (`Platform.==` reads
+    /// a missing arm64 variant as v8), then one that only shares the OS and architecture.
+    private static func image(for platform: Platform, among images: [Descriptor]) -> Descriptor? {
+        images.first { $0.platform == platform }
+            ?? images.first { $0.platform?.os == platform.os && $0.platform?.architecture == platform.architecture }
     }
 
     /// The name the loader would give the entry, in the loader's order of preference.
