@@ -436,6 +436,191 @@ public struct Flags {
         }
     }
 
+    /// Flags of other container tools that this engine cannot honour. Accepted so that a
+    /// command copied from a README, a script or another tool runs as it is: each one
+    /// given is reported on stderr and ignored, and the container runs without it. Hidden
+    /// from help, where the flags to learn are the ones that do something.
+    public struct Unsupported: ParsableArguments {
+        public init() {}
+        @Flag(name: .customLong("privileged"), help: .hidden)
+        public var privileged = false
+        @Flag(name: .customLong("oom-kill-disable"), help: .hidden)
+        public var oomKillDisable = false
+        @Flag(name: .customLong("no-healthcheck"), help: .hidden)
+        public var noHealthcheck = false
+        @Flag(name: [.customShort("P"), .customLong("publish-all")], help: .hidden)
+        public var publishAll = false
+        @Option(name: .customLong("pid"), help: .hidden)
+        public var pid: String?
+        @Option(name: .customLong("ipc"), help: .hidden)
+        public var ipc: String?
+        @Option(name: .customLong("uts"), help: .hidden)
+        public var uts: String?
+        @Option(name: .customLong("userns"), help: .hidden)
+        public var userns: String?
+        @Option(name: .customLong("cgroupns"), help: .hidden)
+        public var cgroupns: String?
+        @Option(name: .customLong("cgroup-parent"), help: .hidden)
+        public var cgroupParent: String?
+        @Option(name: .customLong("oom-score-adj"), help: .hidden)
+        public var oomScoreAdj: String?
+        @Option(name: .customLong("log-driver"), help: .hidden)
+        public var logDriver: String?
+        @Option(name: .customLong("gpus"), help: .hidden)
+        public var gpus: String?
+        @Option(name: .customLong("isolation"), help: .hidden)
+        public var isolation: String?
+        @Option(name: .customLong("stop-signal"), help: .hidden)
+        public var stopSignal: String?
+        @Option(name: .customLong("stop-timeout"), help: .hidden)
+        public var stopTimeout: String?
+        @Option(name: .customLong("health-cmd"), help: .hidden)
+        public var healthCmd: String?
+        @Option(name: .customLong("health-interval"), help: .hidden)
+        public var healthInterval: String?
+        @Option(name: .customLong("health-retries"), help: .hidden)
+        public var healthRetries: String?
+        @Option(name: .customLong("health-start-period"), help: .hidden)
+        public var healthStartPeriod: String?
+        @Option(name: .customLong("health-start-interval"), help: .hidden)
+        public var healthStartInterval: String?
+        @Option(name: .customLong("health-timeout"), help: .hidden)
+        public var healthTimeout: String?
+        @Option(name: .customLong("ip"), help: .hidden)
+        public var ip: String?
+        @Option(name: .customLong("ip6"), help: .hidden)
+        public var ip6: String?
+        @Option(name: .customLong("mac-address"), help: .hidden)
+        public var macAddress: String?
+        @Option(name: .customLong("domainname"), help: .hidden)
+        public var domainname: String?
+        @Option(name: .customLong("memory-swap"), help: .hidden)
+        public var memorySwap: String?
+        @Option(name: .customLong("memory-swappiness"), help: .hidden)
+        public var memorySwappiness: String?
+        @Option(name: .customLong("memory-reservation"), help: .hidden)
+        public var memoryReservation: String?
+        @Option(name: .customLong("kernel-memory"), help: .hidden)
+        public var kernelMemory: String?
+        @Option(name: .customLong("cpu-shares"), help: .hidden)
+        public var cpuShares: String?
+        @Option(name: .customLong("cpu-period"), help: .hidden)
+        public var cpuPeriod: String?
+        @Option(name: .customLong("cpu-quota"), help: .hidden)
+        public var cpuQuota: String?
+        @Option(name: .customLong("cpuset-cpus"), help: .hidden)
+        public var cpusetCpus: String?
+        @Option(name: .customLong("cpuset-mems"), help: .hidden)
+        public var cpusetMems: String?
+        @Option(name: .customLong("blkio-weight"), help: .hidden)
+        public var blkioWeight: String?
+        @Option(name: .customLong("pids-limit"), help: .hidden)
+        public var pidsLimit: String?
+        @Option(name: .customLong("detach-keys"), help: .hidden)
+        public var detachKeys: String?
+        @Option(name: .customLong("volume-driver"), help: .hidden)
+        public var volumeDriver: String?
+        @Option(name: .customLong("device"), help: .hidden)
+        public var device: [String] = []
+        @Option(name: .customLong("device-cgroup-rule"), help: .hidden)
+        public var deviceCgroupRule: [String] = []
+        @Option(name: .customLong("security-opt"), help: .hidden)
+        public var securityOpt: [String] = []
+        @Option(name: .customLong("log-opt"), help: .hidden)
+        public var logOpt: [String] = []
+        @Option(name: .customLong("storage-opt"), help: .hidden)
+        public var storageOpt: [String] = []
+        @Option(name: .customLong("link"), help: .hidden)
+        public var link: [String] = []
+        @Option(name: .customLong("expose"), help: .hidden)
+        public var expose: [String] = []
+        @Option(name: .customLong("group-add"), help: .hidden)
+        public var groupAdd: [String] = []
+        @Option(name: .customLong("network-alias"), help: .hidden)
+        public var networkAlias: [String] = []
+        @Option(name: .customLong("blkio-weight-device"), help: .hidden)
+        public var blkioWeightDevice: [String] = []
+        @Option(name: .customLong("device-read-bps"), help: .hidden)
+        public var deviceReadBps: [String] = []
+        @Option(name: .customLong("device-read-iops"), help: .hidden)
+        public var deviceReadIops: [String] = []
+        @Option(name: .customLong("device-write-bps"), help: .hidden)
+        public var deviceWriteBps: [String] = []
+        @Option(name: .customLong("device-write-iops"), help: .hidden)
+        public var deviceWriteIops: [String] = []
+        @Option(name: .customLong("attach"), help: .hidden)
+        public var attach: [String] = []
+        @Option(name: .customLong("annotation"), help: .hidden)
+        public var annotation: [String] = []
+        @Option(name: .customLong("label-file"), help: .hidden)
+        public var labelFile: [String] = []
+        @Option(name: .customLong("volumes-from"), help: .hidden)
+        public var volumesFrom: [String] = []
+
+        /// The flags that were given, spelled the way they were typed, in declaration order.
+        public var given: [String] {
+            var names: [String] = []
+            if privileged { names.append("--privileged") }
+            if oomKillDisable { names.append("--oom-kill-disable") }
+            if noHealthcheck { names.append("--no-healthcheck") }
+            if publishAll { names.append("--publish-all") }
+            if pid != nil { names.append("--pid") }
+            if ipc != nil { names.append("--ipc") }
+            if uts != nil { names.append("--uts") }
+            if userns != nil { names.append("--userns") }
+            if cgroupns != nil { names.append("--cgroupns") }
+            if cgroupParent != nil { names.append("--cgroup-parent") }
+            if oomScoreAdj != nil { names.append("--oom-score-adj") }
+            if logDriver != nil { names.append("--log-driver") }
+            if gpus != nil { names.append("--gpus") }
+            if isolation != nil { names.append("--isolation") }
+            if stopSignal != nil { names.append("--stop-signal") }
+            if stopTimeout != nil { names.append("--stop-timeout") }
+            if healthCmd != nil { names.append("--health-cmd") }
+            if healthInterval != nil { names.append("--health-interval") }
+            if healthRetries != nil { names.append("--health-retries") }
+            if healthStartPeriod != nil { names.append("--health-start-period") }
+            if healthStartInterval != nil { names.append("--health-start-interval") }
+            if healthTimeout != nil { names.append("--health-timeout") }
+            if ip != nil { names.append("--ip") }
+            if ip6 != nil { names.append("--ip6") }
+            if macAddress != nil { names.append("--mac-address") }
+            if domainname != nil { names.append("--domainname") }
+            if memorySwap != nil { names.append("--memory-swap") }
+            if memorySwappiness != nil { names.append("--memory-swappiness") }
+            if memoryReservation != nil { names.append("--memory-reservation") }
+            if kernelMemory != nil { names.append("--kernel-memory") }
+            if cpuShares != nil { names.append("--cpu-shares") }
+            if cpuPeriod != nil { names.append("--cpu-period") }
+            if cpuQuota != nil { names.append("--cpu-quota") }
+            if cpusetCpus != nil { names.append("--cpuset-cpus") }
+            if cpusetMems != nil { names.append("--cpuset-mems") }
+            if blkioWeight != nil { names.append("--blkio-weight") }
+            if pidsLimit != nil { names.append("--pids-limit") }
+            if detachKeys != nil { names.append("--detach-keys") }
+            if volumeDriver != nil { names.append("--volume-driver") }
+            if !device.isEmpty { names.append("--device") }
+            if !deviceCgroupRule.isEmpty { names.append("--device-cgroup-rule") }
+            if !securityOpt.isEmpty { names.append("--security-opt") }
+            if !logOpt.isEmpty { names.append("--log-opt") }
+            if !storageOpt.isEmpty { names.append("--storage-opt") }
+            if !link.isEmpty { names.append("--link") }
+            if !expose.isEmpty { names.append("--expose") }
+            if !groupAdd.isEmpty { names.append("--group-add") }
+            if !networkAlias.isEmpty { names.append("--network-alias") }
+            if !blkioWeightDevice.isEmpty { names.append("--blkio-weight-device") }
+            if !deviceReadBps.isEmpty { names.append("--device-read-bps") }
+            if !deviceReadIops.isEmpty { names.append("--device-read-iops") }
+            if !deviceWriteBps.isEmpty { names.append("--device-write-bps") }
+            if !deviceWriteIops.isEmpty { names.append("--device-write-iops") }
+            if !attach.isEmpty { names.append("--attach") }
+            if !annotation.isEmpty { names.append("--annotation") }
+            if !labelFile.isEmpty { names.append("--label-file") }
+            if !volumesFrom.isEmpty { names.append("--volumes-from") }
+            return names
+        }
+    }
+
     public struct Progress: ParsableArguments {
         public init() {}
 
