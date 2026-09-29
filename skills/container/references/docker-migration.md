@@ -38,6 +38,11 @@ The 1.3.0 fork also accepts `--hostname`, `--sysctl key=value`, `--add-host name
 (including `host-gateway`), and `--pull always|missing|never`. A host service reached through
 `host-gateway` must listen on an address accessible from the guest, not only host loopback.
 
+Flags this engine has no equivalent for, such as `--privileged`, `--device`, `--pid`, `--ipc`,
+`--security-opt`, `--gpus`, the `--log-*` and `--health-*` families, are accepted by `container run`
+and `container create`, reported on stderr as `Warning! --privileged is not supported by this
+engine and was ignored`, and ignored: a command copied from elsewhere still runs, without them.
+
 ## Images
 
 | Docker | container |

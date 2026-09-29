@@ -33,7 +33,15 @@ extension Application {
         public init() {}
         public static let configuration = CommandConfiguration(
             commandName: "run",
-            abstract: "Run a container")
+            abstract: "Run a container",
+            discussion: """
+                Flags of other container tools that this engine cannot honour, such as \
+                --privileged, --device or --pid, are accepted, reported on stderr and \
+                ignored, so a command copied from elsewhere still runs.
+                """)
+
+        @OptionGroup
+        public var unsupportedFlags: Flags.Unsupported
 
         @OptionGroup(title: "Process options")
         var processFlags: Flags.Process
@@ -63,6 +71,7 @@ extension Application {
         var arguments: [String] = []
 
         public func run() async throws {
+            unsupportedFlags.warnAboutGivenFlags()
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
             var exitCode: Int32 = 127
             let id = Utility.createContainerID(name: self.managementFlags.name)
