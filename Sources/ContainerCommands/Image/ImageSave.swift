@@ -54,7 +54,8 @@ extension Application {
         var output: FilePath?
 
         @Option(
-            help: "Platform for the saved image (format: os/arch[/variant], takes precedence over --os and --arch) [environment: CONTAINER_DEFAULT_PLATFORM]"
+            help:
+                "Platform for the saved image (default: Linux on the host architecture; format: os/arch[/variant], takes precedence over --os and --arch) [environment: CONTAINER_DEFAULT_PLATFORM]"
         )
         var platform: String?
 
@@ -77,9 +78,16 @@ extension Application {
             }
         }
 
+        /// Save the same platform as an ordinary run unless flags or the environment
+        /// select another. A pulled index can reference platforms whose blobs are absent.
+        func savePlatform(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> ContainerizationOCI.Platform {
+            try DefaultPlatform.resolve(platform: platform, os: os, arch: arch, environment: environment, log: log)
+                ?? Parser.platform(os: "linux", arch: Arch.hostArchitecture().rawValue)
+        }
+
         public func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
-            let p = try DefaultPlatform.resolve(platform: platform, os: os, arch: arch, log: log)
+            let p = try savePlatform()
 
             let progressConfig = try ProgressConfig(
                 description: "Saving image(s)"
@@ -103,24 +111,22 @@ extension Application {
                 throw ContainerizationError(.invalidArgument, message: "failed to save image(s)")
             }
 
-            if let p {
-                for (reference, description) in zip(references, images) {
-                    let image = ClientImage(description: description)
-                    do {
-                        _ = try await image.manifest(for: p)
-                    } catch {
-                        var available: [String] = []
-                        if let index = try? await image.index() {
-                            available = index.manifests
-                                .compactMap { $0.platform?.description }
-                                .filter { $0 != "unknown/unknown" }
-                        }
-                        let availableStr = available.isEmpty ? "none" : available.joined(separator: ", ")
-                        throw ContainerizationError(
-                            .invalidArgument,
-                            message: "image \(reference) has no content for platform \(p.description); available platforms: \(availableStr)"
-                        )
+            for (reference, description) in zip(references, images) {
+                let image = ClientImage(description: description)
+                do {
+                    _ = try await image.manifest(for: p)
+                } catch {
+                    var available: [String] = []
+                    if let index = try? await image.index() {
+                        available = index.manifests
+                            .compactMap { $0.platform?.description }
+                            .filter { $0 != "unknown/unknown" }
                     }
+                    let availableStr = available.isEmpty ? "none" : available.joined(separator: ", ")
+                    throw ContainerizationError(
+                        .invalidArgument,
+                        message: "image \(reference) has no content for platform \(p.description); available platforms: \(availableStr)"
+                    )
                 }
             }
 
