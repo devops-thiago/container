@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import Foundation
 import Testing
 
@@ -109,5 +110,56 @@ struct SystemStatusTests {
         let resources = Application.ResourceCounts(containersTotal: 2, containersRunning: 0)
         let updated = Application.SystemStatus.withImageCount(resources, imageCount: nil)
         #expect(updated?.images == nil)
+    }
+}
+
+extension SystemStatusTests {
+    private var health: SystemHealth {
+        SystemHealth(
+            appRoot: URL(fileURLWithPath: "/tmp"), installRoot: URL(fileURLWithPath: "/tmp"), logRoot: nil,
+            apiServerVersion: "test", apiServerCommit: "test", apiServerBuild: "test", apiServerAppName: "test")
+    }
+
+    @Test("an answering API without a default network reports starting in JSON and table")
+    func missingNetwork() async throws {
+        let status = try await Application.SystemStatus.gather(
+            health: health,
+            networkReady: {
+                try await DefaultNetworkReadiness.verify(networkIDs: { [] })
+            })
+        #expect(status.status == "starting")
+        #expect(try Output.renderJSON(status).contains("starting"))
+        #expect(Application.SystemStatus.statusTable(status).contains("Waiting for the default network"))
+    }
+
+    @Test("a cancelled network probe does not publish running")
+    func cancelledNetwork() async {
+        await #expect(throws: CancellationError.self) {
+            try await Application.SystemStatus.gather(health: health, networkReady: { throw CancellationError() })
+        }
+    }
+}
+
+extension SystemStatusTests {
+    private actor NetworkGate {
+        var continuation: CheckedContinuation<Void, Never>?
+        var waiting: Bool { continuation != nil }
+        func wait() async { await withCheckedContinuation { continuation = $0 } }
+        func release() {
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    @Test("status remains pending until a delayed network probe completes")
+    func delayedNetwork() async throws {
+        let gate = NetworkGate()
+        let task = Task {
+            try await Application.SystemStatus.gather(health: health, networkReady: { await gate.wait() }, resourceCounts: { nil })
+        }
+        while !(await gate.waiting) { await Task.yield() }
+        await gate.release()
+        let status = try await task.value
+        #expect(status.status == "running")
     }
 }
