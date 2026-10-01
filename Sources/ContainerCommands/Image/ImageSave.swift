@@ -63,18 +63,20 @@ extension Application {
 
         @Argument var references: [String]
 
-        /// Put the staged archive where the user asked, replacing what is there: a rename when
-        /// the two are on one volume, a copy otherwise.
-        static func deliver(_ staged: URL, to destination: URL) throws {
-            let manager = FileManager.default
-            if manager.fileExists(atPath: destination.path(percentEncoded: false)) {
-                try manager.removeItem(at: destination)
+        /// Use the same transactional destination handling as container export. The
+        /// previous file stays in place until staging succeeds; non-files are refused.
+        static func deliver(
+            _ staged: URL,
+            to destination: URL,
+            operations: ExportDestination.Operations = .init()
+        ) throws {
+            var source = stat()
+            guard lstat(staged.path(percentEncoded: false), &source) == 0,
+                source.st_mode & S_IFMT == S_IFREG
+            else {
+                throw ContainerizationError(.invalidArgument, message: "the staged image archive is missing or is not a regular file")
             }
-            do {
-                try manager.moveItem(at: staged, to: destination)
-            } catch {
-                try manager.copyItem(at: staged, to: destination)
-            }
+            try ExportDestination.commit(archive: staged, to: destination, force: true, operations: operations)
         }
 
         public func run() async throws {

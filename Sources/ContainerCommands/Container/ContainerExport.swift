@@ -388,13 +388,13 @@ public enum ExportDestination {
         return directory
     }
 
-    private static func stageArchive(_ archive: URL, in directory: Int32, named name: String) throws {
+    static func stageArchive(_ archive: URL, in directory: Int32, named name: String, forceCopy: Bool = false) throws {
         let archivePath = archive.path(percentEncoded: false)
-        if Darwin.renameatx_np(AT_FDCWD, archivePath, directory, name, UInt32(RENAME_EXCL)) == 0 {
+        if !forceCopy, Darwin.renameatx_np(AT_FDCWD, archivePath, directory, name, UInt32(RENAME_EXCL)) == 0 {
             return
         }
         let renameErrno = errno
-        guard renameErrno == EXDEV else { throw FilesystemFailure(errno: renameErrno) }
+        guard forceCopy || renameErrno == EXDEV else { throw FilesystemFailure(errno: renameErrno) }
 
         let source = Darwin.open(archivePath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard source >= 0 else { throw FilesystemFailure(errno: errno) }
