@@ -53,7 +53,7 @@ extension Application {
             // Now ping our friendly daemon. Fail after 10 seconds with no response.
             do {
                 let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
-                let status = await Self.gather(health: health)
+                let status = try await Self.gather(health: health)
                 try Output.render(payload: status, format: format) {
                     Self.statusTable(status)
                 }
@@ -68,7 +68,19 @@ extension Application {
         /// Collects system-wide status from the CLI and the running daemon.
         /// Resource counts are populated best-effort and omitted when their
         /// source is unavailable.
-        static func gather(health: SystemHealth) async -> StatusPayload {
+        static func gather(
+            health: SystemHealth,
+            networkReady: @Sendable () async throws -> Void = { try await DefaultNetworkReadiness.verify() },
+            resourceCounts: @Sendable () async -> ResourceCounts? = { await gatherResources() }
+        ) async throws -> StatusPayload {
+            do {
+                try await networkReady()
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return StatusPayload(status: "starting")
+            }
             let client = ClientInfo(
                 version: ReleaseVersion.version(),
                 build: ReleaseVersion.buildType(),
@@ -95,6 +107,19 @@ extension Application {
                 logRoot: health.logRoot?.string
             )
 
+            let resources = await resourceCounts()
+
+            return StatusPayload(
+                status: "running",
+                client: client,
+                server: server,
+                host: host,
+                paths: paths,
+                resources: resources
+            )
+        }
+
+        private static func gatherResources() async -> ResourceCounts? {
             var resources: ResourceCounts? = nil
             let containerClient = ContainerClient()
             if let all = try? await containerClient.list(filters: ContainerListFilters.all.withoutMachines()) {
@@ -108,14 +133,7 @@ extension Application {
                 resources = Self.withImageCount(resources, imageCount: images.count)
             }
 
-            return StatusPayload(
-                status: "running",
-                client: client,
-                server: server,
-                host: host,
-                paths: paths,
-                resources: resources
-            )
+            return resources
         }
 
         /// Records the image count on the resource counts when both are
@@ -132,6 +150,7 @@ extension Application {
             var rows: [[String]] = [["FIELD", "VALUE"]]
 
             rows.append(["status", status.status])
+            if status.status == "starting" { rows.append(["detail", "Waiting for the default network; retry after startup."]) }
 
             if let client = status.client {
                 rows.append(["client.version", client.version])
