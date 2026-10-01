@@ -17,6 +17,7 @@
 #if os(macOS)
 import ContainerizationError
 import Foundation
+import Synchronization
 
 public final class XPCClient: Sendable {
     /// The maximum amount of time to wait for a request to a recently
@@ -98,42 +99,29 @@ extension XPCClient {
     /// Send the provided message to the service.
     @discardableResult
     public func send(_ message: XPCMessage, responseTimeout: Duration? = nil) async throws -> XPCMessage {
-        try await withThrowingTaskGroup(of: XPCMessage.self, returning: XPCMessage.self) { group in
+        // A continuation waiting on an XPC reply cannot be cancelled, so racing it against a
+        // timeout in a task group leaves the group waiting for the reply and the timeout never
+        // takes effect. Resume the one continuation from whichever of the reply and the timer
+        // comes first instead.
+        try await withCheckedThrowingContinuation { continuation in
+            let pending = PendingReply(continuation)
             if let responseTimeout {
-                group.addTask {
-                    try await Task.sleep(for: responseTimeout)
-                    let route = message.string(key: XPCMessage.routeKey) ?? "nil"
-                    throw ContainerizationError(
-                        .internalError,
-                        message: "XPC timeout for request to \(self.service)/\(route)"
-                    )
-                }
+                let route = message.string(key: XPCMessage.routeKey) ?? "nil"
+                pending.setTimeout(
+                    Task {
+                        try await Task.sleep(for: responseTimeout)
+                        pending.resume(
+                            with: .failure(
+                                ContainerizationError(
+                                    .internalError,
+                                    message: "XPC timeout for request to \(self.service)/\(route)"
+                                )))
+                    })
             }
 
-            group.addTask {
-                try await withCheckedThrowingContinuation { cont in
-                    xpc_connection_send_message_with_reply(self.connection, message.underlying, nil) { reply in
-                        do {
-                            let message = try self.parseReply(reply)
-                            cont.resume(returning: message)
-                        } catch {
-                            cont.resume(throwing: error)
-                        }
-                    }
-                }
+            xpc_connection_send_message_with_reply(self.connection, message.underlying, nil) { reply in
+                pending.resume(with: Result { try self.parseReply(reply) })
             }
-
-            let response = try await group.next()
-            // once one task has finished, cancel the rest.
-            group.cancelAll()
-            // we don't really care about the second error here
-            // as it's most likely a `CancellationError`.
-            try? await group.waitForAll()
-
-            guard let response else {
-                throw ContainerizationError(.invalidState, message: "failed to receive XPC response")
-            }
-            return response
         }
     }
 
@@ -156,6 +144,45 @@ extension XPCClient {
         default:
             fatalError("unhandled xpc object type: \(xpc_get_type(reply))")
         }
+    }
+}
+
+/// The continuation of a request that is waiting for its reply, which either the reply or the
+/// request's timeout can resume. Only the first of them does.
+private final class PendingReply: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<XPCMessage, any Error>?
+        var timeout: Task<Void, any Error>?
+    }
+
+    private let state: Mutex<State>
+
+    init(_ continuation: CheckedContinuation<XPCMessage, any Error>) {
+        self.state = Mutex(State(continuation: continuation))
+    }
+
+    func setTimeout(_ task: Task<Void, any Error>) {
+        let alreadyResumed = state.withLock { state in
+            guard state.continuation != nil else {
+                return true
+            }
+            state.timeout = task
+            return false
+        }
+        if alreadyResumed {
+            task.cancel()
+        }
+    }
+
+    func resume(with result: Result<XPCMessage, any Error>) {
+        let (continuation, timeout) = state.withLock { state in
+            let taken = (state.continuation, state.timeout)
+            state.continuation = nil
+            state.timeout = nil
+            return taken
+        }
+        timeout?.cancel()
+        continuation?.resume(with: result)
     }
 }
 

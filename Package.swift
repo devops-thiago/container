@@ -167,6 +167,13 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "ContainerXPCTests",
+            dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                "ContainerXPC",
+            ]
+        ),
+        .testTarget(
             name: "K8sPluginTests",
             dependencies: [
                 "ContainerAPIClient",
