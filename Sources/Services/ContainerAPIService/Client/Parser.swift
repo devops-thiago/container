@@ -357,15 +357,16 @@ public struct Parser {
             if label.isEmpty {
                 throw ContainerizationError(.invalidArgument, message: "label cannot be an empty string")
             }
-            let parts = label.split(separator: "=", maxSplits: 2)
-            switch parts.count {
-            case 1:
-                result[String(parts[0])] = ""
-            case 2:
-                result[String(parts[0])] = String(parts[1])
-            default:
+            // The key is what comes before the first "=", and the value is everything
+            // after it: a value may hold "=" itself, as a URL with a query does.
+            guard let equals = label.firstIndex(of: "=") else {
+                result[label] = ""
+                continue
+            }
+            guard equals != label.startIndex else {
                 throw ContainerizationError(.invalidArgument, message: "invalid label format \(label)")
             }
+            result[String(label[..<equals])] = String(label[label.index(after: equals)...])
         }
         return result
     }

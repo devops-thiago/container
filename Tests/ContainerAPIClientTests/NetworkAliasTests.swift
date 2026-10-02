@@ -23,7 +23,7 @@ import Testing
 @testable import ContainerAPIClient
 
 struct NetworkAliasTests {
-    @Test("--network takes alias= properties, each a DNS name")
+    @Test("--network takes alias= properties, each a host name")
     func grammar() throws {
         let parsed = try Parser.network("backend,alias=db,mtu=1500,alias=postgres.internal")
         #expect(parsed.name == "backend")
@@ -33,6 +33,20 @@ struct NetworkAliasTests {
         #expect(throws: ContainerizationError.self) { try Parser.network("backend,alias=") }
         #expect(throws: ContainerizationError.self) { try Parser.network("backend,alias=not a name") }
         #expect(throws: ContainerizationError.self) { try Parser.network("backend,alias=-db") }
+    }
+
+    @Test("an alias is parsed as --network parses alias=: underscores pass inside a label, names are normalized")
+    func aliasCharacters() throws {
+        for alias in ["db", "db_primary", "db-1.stack_a.internal"] {
+            #expect(try Parser.networkAlias(alias) == alias)
+        }
+        #expect(try Parser.networkAlias("A1") == "a1")
+        #expect(try Parser.networkAlias(".stack.internal") == ".stack.internal")
+        let label = String(repeating: "a", count: 63)
+        #expect(try Parser.networkAlias(label) == label)
+        for alias in ["", "-db", "db-", "a..b", "_internal", "two words", "db,primary", "db/primary", label + "a"] {
+            #expect(throws: ContainerizationError.self, "\(alias)") { try Parser.networkAlias(alias) }
+        }
     }
 
     @Test("--network-alias is a flag of run and create, no longer one that is ignored")
