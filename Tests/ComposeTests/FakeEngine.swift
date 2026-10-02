@@ -40,6 +40,8 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     /// The digest a pull of an image returns.
     var digests: [String: String] = [:]
     var failingStarts: Set<String> = []
+    /// Called while a container is being made, before it exists.
+    var whileCreating: (@Sendable (String) -> Void)?
 
     private func locked<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
@@ -133,6 +135,9 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     }
 
     func createContainer(_ request: ContainerRequest, progress: @escaping ProgressUpdateHandler) async throws {
+        whileCreating?(request.name)
+        // The engine's own calls give up when the task they are in is cancelled.
+        try Task.checkCancellation()
         var labels: [String: String] = [:]
         for label in ArgumentList.values(of: "--label", in: request.options) {
             let parts = label.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
