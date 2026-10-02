@@ -287,16 +287,24 @@ public actor VolumesService {
     }
 
     private func createVolumeImage(for name: String, sizeInBytes: UInt64 = VolumeStorage.defaultVolumeSizeBytes, journal: EXT4.JournalConfig? = nil) throws {
-        let blockPath = blockPath(for: name)
+        try Self.formatVolumeImage(at: blockPath(for: name), sizeInBytes: sizeInBytes, journal: journal)
+    }
 
+    /// Write an empty ext4 filesystem for a volume.
+    ///
+    /// Empty means empty. The formatter gives every filesystem a `/lost+found`, which is
+    /// where a filesystem check puts what it recovers, and a volume is mounted where an
+    /// image expects a directory nobody has written to: `initdb` and others refuse a data
+    /// directory that has anything in it. A check that needs the directory makes it.
+    static func formatVolumeImage(at path: String, sizeInBytes: UInt64, journal: EXT4.JournalConfig? = nil) throws {
         // Use the containerization library's EXT4 formatter
         let formatter = try EXT4.Formatter(
-            FilePath(blockPath),
+            FilePath(path),
             blockSize: 4096,
             minDiskSize: sizeInBytes,
             journal: journal
         )
-
+        try formatter.unlink(path: FilePath("/lost+found"))
         try formatter.close()
     }
 
