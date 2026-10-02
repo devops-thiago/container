@@ -200,7 +200,8 @@ public struct Flags {
             tmpFs: [String],
             useInit: Bool,
             virtualization: Bool,
-            volumes: [String]
+            volumes: [String],
+            networkAliases: [String] = []
         ) {
             self.addHosts = addHosts
             self.arch = arch
@@ -220,6 +221,7 @@ public struct Flags {
             self.mounts = mounts
             self.name = name
             self.networks = networks
+            self.networkAliases = networkAliases
             self.os = os
             self.platform = platform
             self.publishPorts = publishPorts
@@ -331,8 +333,11 @@ public struct Flags {
         @Option(name: .long, help: "Use the specified name as the container ID")
         public var name: String?
 
-        @Option(name: [.customLong("network")], help: "Attach the container to a network (format: <name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE])")
+        @Option(name: [.customLong("network")], help: "Attach the container to a network (format: <name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME])")
         public var networks: [String] = []
+
+        @Option(name: .customLong("network-alias"), help: "Add a name the container answers to on every network it attaches to")
+        public var networkAliases: [String] = []
 
         @Flag(name: [.customLong("no-dns")], help: "Do not configure DNS in the container")
         public var dnsDisabled = false
@@ -536,8 +541,6 @@ public struct Flags {
         public var expose: [String] = []
         @Option(name: .customLong("group-add"), help: .hidden)
         public var groupAdd: [String] = []
-        @Option(name: .customLong("network-alias"), help: .hidden)
-        public var networkAlias: [String] = []
         @Option(name: .customLong("blkio-weight-device"), help: .hidden)
         public var blkioWeightDevice: [String] = []
         @Option(name: .customLong("device-read-bps"), help: .hidden)
@@ -607,7 +610,6 @@ public struct Flags {
             if !link.isEmpty { names.append("--link") }
             if !expose.isEmpty { names.append("--expose") }
             if !groupAdd.isEmpty { names.append("--group-add") }
-            if !networkAlias.isEmpty { names.append("--network-alias") }
             if !blkioWeightDevice.isEmpty { names.append("--blkio-weight-device") }
             if !deviceReadBps.isEmpty { names.append("--device-read-bps") }
             if !deviceReadIops.isEmpty { names.append("--device-read-iops") }
