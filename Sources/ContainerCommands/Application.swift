@@ -165,14 +165,14 @@ public struct Application: AsyncLoggableCommand {
             return [
                 BuilderCommand.self,
                 SystemCommand.self,
-            ]
+            ] + Application.systemRootSpellings
         }
 
         return [
             BuilderCommand.self,
             NetworkCommand.self,
             SystemCommand.self,
-        ]
+        ] + Application.systemRootSpellings
     }
 
     private static func restoreCursorAtExit() {

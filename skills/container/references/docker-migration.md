@@ -4,6 +4,12 @@ Complete command mapping. Verified against `container --help` and each group's `
 When a flag matters, confirm with `container <command> --help` rather than assuming Docker's
 spelling.
 
+The SiliconShip 1.4.0 engine also takes the Docker spelling wherever the tables below show
+an equivalent: `ps`, `container <verb>`, `restart`, `logs --tail`, `images`, `pull`, `push`,
+`tag`, `rmi`, `save`, `load`, `image ls NAME`, `version`, `info`, `-f` on every prune and
+`system prune`. With `alias docker=container`, those command lines run as typed; the
+`container` column stays the primary spelling in `--help`.
+
 ## Containers
 
 | Docker | container | Notes |
@@ -20,9 +26,11 @@ spelling.
 | `docker export` | `container export` | |
 | `docker inspect` | `container inspect` | also the way to find a container's IP |
 | `docker stats` | `container stats` | |
-| `docker ps` | `container list` / `ls` | add `-a` for stopped containers |
-| `docker container prune` | `container prune` | |
-| `docker restart` | — | `container stop <id> && container start <id>` |
+| `docker ps` | `container list` / `ls` / `ps` | add `-a` for stopped containers |
+| `docker container prune` | `container prune` | `-f` is accepted and changes nothing: it never asks |
+| `docker container <verb>` | `container <verb>` | the noun is accepted too: `container container ls` |
+| `docker restart` | `container restart` | stop, then start; `-t` and `-s` as on `stop` |
+| `docker logs --tail N` | `container logs -n N` / `--tail N` | |
 | `docker attach` | — | use `container exec -it <id> sh` |
 | `docker top` | — | `container exec <id> ps aux` |
 | `docker port` | — | `container inspect <id>` |
@@ -48,13 +56,14 @@ engine and was ignored`, and ignored: a command copied from elsewhere still runs
 | Docker | container |
 |---|---|
 | `docker build` | `container build` |
-| `docker images` | `container image list` / `ls` |
-| `docker pull` | `container image pull` |
-| `docker push` | `container image push` |
-| `docker rmi` | `container image delete` / `rm` |
-| `docker tag` | `container image tag` |
-| `docker save` | `container image save` |
-| `docker load` | `container image load` |
+| `docker images` | `container image list` / `ls`, or `container images` |
+| `docker image ls NAME` | `container image ls NAME`: a repository, or repository:tag |
+| `docker pull` | `container image pull`, or `container pull` |
+| `docker push` | `container image push`, or `container push` |
+| `docker rmi` | `container image delete` / `rm`, or `container rmi` |
+| `docker tag` | `container image tag`, or `container tag` |
+| `docker save` | `container image save`, or `container save` |
+| `docker load` | `container image load`, or `container load` |
 | `docker image inspect` | `container image inspect` |
 | `docker image prune` | `container image prune` |
 | `docker history` | — no equivalent |
@@ -89,13 +98,15 @@ Two differences worth knowing:
 
 | Docker | container |
 |---|---|
-| `docker info` | `container system status` |
-| `docker version` | `container system version` |
+| `docker info` | `container system status`, or `container info` |
+| `docker version` | `container system version`, or `container version` |
 | `docker system df` | `container system df` |
 | daemon logs | `container system logs` |
 | `docker events` | — no equivalent |
 
-`docker system prune` has no single equivalent. Run the four prunes:
+`container system prune` runs the prunes in a row: stopped containers, unused networks,
+then dangling images (`-a` for every unused image). Volumes hold data and are pruned only
+with `--volumes`. Each prune also runs on its own:
 
 ```bash
 container prune                 # stopped containers
