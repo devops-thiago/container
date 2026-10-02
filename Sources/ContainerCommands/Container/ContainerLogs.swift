@@ -37,7 +37,9 @@ extension Application {
         @Flag(name: .shortAndLong, help: "Follow log output")
         var follow: Bool = false
 
-        @Option(name: .short, help: "Number of lines to show from the end of the logs. If not provided this will print all of the logs")
+        @Option(
+            name: [.customShort("n"), .customLong("tail")],
+            help: "Number of lines to show from the end of the logs. If not provided this will print all of the logs")
         var numLines: Int?
 
         @OptionGroup
