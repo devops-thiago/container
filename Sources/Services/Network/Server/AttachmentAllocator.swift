@@ -47,6 +47,10 @@ actor AttachmentAllocator {
     private var subtreeAliases: [DNSName: String] = [:]
     // The aliases registered for each canonical hostname, so that they can be removed with it.
     private var aliasesByHostname: [String: [DNSMatchRule]] = [:]
+    /// How many holders each hostname has: the engine, from a container's create to its
+    /// delete, and the container's runtime while it runs. The address goes back to the pool
+    /// when the last one lets go, so a stopped container keeps the address it had.
+    private var holders: [String: Int] = [:]
 
     init(lower: UInt32, size: Int) throws {
         allocator = try UInt32.rotatingAllocator(
@@ -55,7 +59,8 @@ actor AttachmentAllocator {
         )
     }
 
-    /// Allocate a network address for a host, and register aliases that resolve to it.
+    /// Allocate a network address for a host, or hand another holder the one it has, and register
+    /// aliases that resolve to it.
     ///
     /// The allocation fails without changing any state if an alias is already in use by another host
     /// on this network, either as a hostname or as an alias.
@@ -94,13 +99,17 @@ actor AttachmentAllocator {
             newAliases.append(rule)
         }
 
-        // Client is responsible for ensuring two containers don't use same hostname, so provide existing IP if hostname exists
+        // Client is responsible for ensuring two containers don't use same hostname, so provide existing IP if hostname exists.
+        // Each call is another holder: the engine, from a container's create to its delete, and the
+        // container's runtime while it runs.
         let index: UInt32
         if let existing = hostnames[hostname] {
             index = existing
+            holders[hostname, default: 0] += 1
         } else {
             index = try allocator.allocate()
             hostnames[hostname] = index
+            holders[hostname] = 1
         }
 
         for rule in newAliases {
@@ -116,13 +125,22 @@ actor AttachmentAllocator {
         return index
     }
 
-    /// Free an allocated network address by hostname, along with the aliases registered for it.
+    /// Let go of a hostname's address. It is freed, and returned, along with the aliases registered
+    /// for it, only when no holder is left; nil while another still has it, or when the hostname was
+    /// never allocated.
     @discardableResult
     func deallocate(hostname: String) async throws -> UInt32? {
         let hostname = AttachmentOptions.canonicalHostname(hostname)
-        guard let index = hostnames.removeValue(forKey: hostname) else {
+        guard let index = hostnames[hostname] else {
             return nil
         }
+        let remaining = (holders[hostname] ?? 1) - 1
+        guard remaining <= 0 else {
+            holders[hostname] = remaining
+            return nil
+        }
+        holders.removeValue(forKey: hostname)
+        hostnames.removeValue(forKey: hostname)
 
         for rule in aliasesByHostname.removeValue(forKey: hostname) ?? [] {
             switch rule {

@@ -71,7 +71,10 @@ public actor DefaultNetworkService: NetworkService {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
         }
 
-        let macAddress = macAddress ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
+        // The address a container was given at create is the one its runtime gets at start,
+        // with the same MAC unless one is asked for, and the aliases it was created with
+        // unless the request brings its own.
+        let aliases = aliases.isEmpty ? (self.aliases[AttachmentOptions.canonicalHostname(hostname)] ?? []) : aliases
         // The aliases come over XPC, so check them against the same rules as the API server does,
         // instead of trusting that the caller did.
         let rules: [DNSMatchRule]
@@ -81,7 +84,16 @@ public actor DefaultNetworkService: NetworkService {
         } catch {
             throw ContainerizationError(.invalidArgument, message: "invalid aliases for \(hostname): \(error)")
         }
-        let index = try await allocator.allocate(hostname: hostname, aliases: rules)
+        // A session that already holds this hostname is asking again, not holding it twice.
+        let canonical = AttachmentOptions.canonicalHostname(hostname)
+        let alreadyHeld = allocationsBySession[session]?.contains { AttachmentOptions.canonicalHostname($0.hostname) == canonical } ?? false
+        let index: UInt32
+        if alreadyHeld, let held = try await allocator.lookup(hostname: hostname) {
+            index = held
+        } else {
+            index = try await allocator.allocate(hostname: hostname, aliases: rules)
+        }
+        let macAddress = macAddress ?? macAddresses[index] ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
         let ipv6Address = try status.ipv6Subnet
             .map { try CIDRv6(macAddress.ipv6Address(network: $0.lower), prefix: $0.prefix) }
         let ip = IPv4Address(index)
@@ -113,7 +125,9 @@ public actor DefaultNetworkService: NetworkService {
         self.aliases[AttachmentOptions.canonicalHostname(hostname)] = aliases
 
         let isNewSession = allocationsBySession[session] == nil
-        allocationsBySession[session, default: []].append((hostname: hostname, index: index))
+        if !alreadyHeld {
+            allocationsBySession[session, default: []].append((hostname: hostname, index: index))
+        }
         if isNewSession {
             await session.onDisconnect { [weak self] in
                 await self?.releaseSession(session)
@@ -128,7 +142,9 @@ public actor DefaultNetworkService: NetworkService {
             return
         }
         for allocation in allocations {
-            _ = try? await allocator.deallocate(hostname: allocation.hostname)
+            // Freed only when this was the last holder: a container that stops keeps the
+            // address the engine reserved for it at create.
+            guard (try? await allocator.deallocate(hostname: allocation.hostname)) != nil else { continue }
             macAddresses.removeValue(forKey: allocation.index)
             aliases.removeValue(forKey: AttachmentOptions.canonicalHostname(allocation.hostname))
         }

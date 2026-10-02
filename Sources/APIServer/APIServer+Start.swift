@@ -247,6 +247,9 @@ extension APIServer {
                             return .success(())
                         }
                         await networkService.startPersistedNetworks()
+                        // The networks are up and know nothing yet: every container that exists
+                        // gets its address back before anything can start and take it.
+                        await containersService.reserveAddressesForExistingContainers()
                         return .success(())
                     }
 
