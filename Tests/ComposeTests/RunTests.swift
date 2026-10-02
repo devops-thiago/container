@@ -559,6 +559,51 @@ struct LifecycleTests {
     }
 
     @Test
+    func aStopWaitsAsLongAsTheServiceSaysThenAsTheCallerPrefers() async throws {
+        let run = try await running()
+        var project = run.project()
+        project.defaultStopTimeout = 12
+        try await project.stop()
+        #expect(
+            run.engine.calls == ["stop shop-worker-1 in 12s", "stop shop-web-1 in 30s", "stop shop-db-1 in 12s"],
+            "a service's own grace period comes before the caller's default")
+        try await project.start()
+        run.engine.clearCalls()
+        try await project.stop(timeout: 1)
+        #expect(run.engine.calls == ["stop shop-worker-1 in 1s", "stop shop-web-1 in 1s", "stop shop-db-1 in 1s"], "and a timeout given with the stop comes before both")
+    }
+
+    @Test
+    func aCancelledRunStopsBeforeTheNextContainer() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan(Self.stack)
+        let project = run.project()
+        let task = Task {
+            // Cancelled before it begins: nothing is made at all.
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await project.up(plan)
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(run.engine.calls.isEmpty)
+    }
+
+    @Test
+    func aRunCancelledPartWayLeavesWhatItMadeAndBeginsNothingMore() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan(Self.stack)
+        // The first container's creation is where the caller gives up.
+        let recorder = Recorder()
+        var hooks = recorder.hooks()
+        hooks.event = { event in
+            if event.status == .created, event.subject == .container { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let project = ComposeProject(name: "shop", engine: run.engine, hooks: hooks)
+        await #expect(throws: CancellationError.self) { try await Task { try await project.up(plan) }.value }
+        #expect(run.engine.calls.filter { $0.hasPrefix("create") } == ["create shop-db-1"], "the container being made is finished")
+        #expect(!run.engine.calls.contains { $0.hasPrefix("start") })
+    }
+
+    @Test
     func theProjectsContainersAreListedByService() async throws {
         let run = try await running()
         let containers = try await run.project().containers()

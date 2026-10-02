@@ -32,6 +32,9 @@ public struct ComposeProject: Sendable {
         try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
     }
     var pathExists: @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    /// Seconds a stop waits for a container whose service sets no `stop_grace_period`,
+    /// when the caller of a stop gives none either. nil leaves it to the engine.
+    public var defaultStopTimeout: Int?
 
     public init(name: String, engine: any ComposeEngine = LiveComposeEngine(), hooks: ComposeHooks = ComposeHooks()) {
         self.name = name
@@ -61,6 +64,7 @@ public struct ComposeProject: Sendable {
     // MARK: Up
 
     public func up(_ plan: ProjectPlan, options: UpOptions = UpOptions()) async throws {
+        try Task.checkCancellation()
         for network in plan.networks where !(try await engine.networkExists(network.name)) {
             guard !network.external else {
                 throw ComposeError(
@@ -101,6 +105,7 @@ public struct ComposeProject: Sendable {
         var digests: [String: String] = [:]
         var seen = Set<String>()
         for service in plan.services where seen.insert(service.image).inserted {
+            try Task.checkCancellation()
             let policy = options.pull ?? service.pullPolicy
             if let build = service.build {
                 var digest = try await engine.imageDigest(service.image)
@@ -135,6 +140,9 @@ public struct ComposeProject: Sendable {
     private func createContainers(_ plan: ProjectPlan, options: UpOptions, images: [String: String]) async throws {
         let existing = try await engine.containers(project: name)
         for service in plan.services {
+            // A run that was cancelled stops here, between containers: what is being
+            // fetched or made is finished, and nothing further is begun.
+            try Task.checkCancellation()
             var current = existing.first { $0.service == service.service }
             if current == nil, let other = try await engine.container(named: service.containerName) {
                 guard other.project == name, other.service == service.service else {
@@ -153,7 +161,7 @@ public struct ComposeProject: Sendable {
                 guard options.forceRecreate || (changed && !options.noRecreate) else { continue }
                 hooks.event(ComposeEvent(.container, current.id, service: service.service, .recreating))
                 if current.state != .stopped {
-                    try await engine.stopContainer(current.id, timeout: current.stopTimeout)
+                    try await engine.stopContainer(current.id, timeout: current.stopTimeout ?? defaultStopTimeout)
                 }
                 try await engine.removeContainer(current.id)
             } else {
@@ -226,6 +234,7 @@ public struct ComposeProject: Sendable {
         var satisfied = Set<String>()
         let dependents = Self.dependentsOnCompletion(plan.services.map { ($0.service, $0.dependencies) })
         for service in plan.services {
+            try Task.checkCancellation()
             for dependency in service.dependencies {
                 let key = "\(dependency.service)/\(dependency.condition.rawValue)"
                 guard !satisfied.contains(key), let target = plan.service(dependency.service) else { continue }
@@ -361,6 +370,7 @@ public struct ComposeProject: Sendable {
         var satisfied = Set<String>()
         let dependents = Self.dependentsOnCompletion(everyone.map { ($0.service ?? $0.id, $0.dependencies) })
         for container in ordered {
+            try Task.checkCancellation()
             let service = container.service ?? container.id
             for dependency in container.dependencies {
                 let key = "\(dependency.service)/\(dependency.condition.rawValue)"
@@ -390,7 +400,7 @@ public struct ComposeProject: Sendable {
 
     private func stop(_ container: ComposeContainer, timeout: Int?) async throws {
         hooks.event(ComposeEvent(.container, container.id, service: container.service, .stopping))
-        try await engine.stopContainer(container.id, timeout: timeout ?? container.stopTimeout)
+        try await engine.stopContainer(container.id, timeout: timeout ?? container.stopTimeout ?? defaultStopTimeout)
         hooks.event(ComposeEvent(.container, container.id, service: container.service, .stopped))
     }
 

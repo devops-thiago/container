@@ -125,14 +125,14 @@ public protocol ComposeEngine: Sendable {
 
 /// Something compose did, or is doing, to one part of a project.
 public struct ComposeEvent: Sendable, Equatable {
-    public enum Subject: String, Sendable {
+    public enum Subject: String, Sendable, CaseIterable {
         case network
         case volume
         case image
         case container
     }
 
-    public enum Status: String, Sendable {
+    public enum Status: String, Sendable, CaseIterable {
         case creating, created, exists
         case recreating
         case pulling, pulled
