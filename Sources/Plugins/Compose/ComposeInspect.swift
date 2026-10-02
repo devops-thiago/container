@@ -310,7 +310,7 @@ struct ComposeConfig: AsyncParsableCommand {
             // What does not run was not checked, and what is wrong with it is not something
             // the project printed from it would carry.
             for (part, errors) in definition.unread {
-                reporter.warn("\(part) does not run as the project is, and is left out: it cannot run as written (\(errors[0]))")
+                reporter.warn("\(part.leftOut) (\(errors[0]))")
             }
             print(try definition.yaml(), terminator: "")
         }
