@@ -56,6 +56,9 @@ public actor HostDirectoryGrants {
     public static let shared = HostDirectoryGrants()
 
     private var log: Logger?
+    /// Whether the app this engine is embedded in is running. Until configured, never: a
+    /// request with no embedder announced then fails at once, as it always did.
+    private var appIsRunning: @Sendable () -> Bool = { false }
     /// Retained because releasing a URL is what ends the access. Never released: the pool is
     /// the boot's worth of grants, and there is no moment before exit at which dropping one is
     /// correct. The bookmark is kept beside the URL because it is what a lend hands on: a
@@ -67,8 +70,11 @@ public actor HostDirectoryGrants {
     /// process owns it — just the key the attach table files the endpoint under.
     public static var vendorLabel: String { ServiceIdentity.machPrefix + "grants" }
 
-    public func configure(log: Logger) {
+    /// - Parameter appIsRunning: whether the embedding app is up right now, which is when a
+    ///   request that finds no embedder announced waits for one rather than failing.
+    public func configure(log: Logger, appIsRunning: @escaping @Sendable () -> Bool = { false }) {
         self.log = log
+        self.appIsRunning = appIsRunning
     }
 
     /// Take grants the embedder pushed, and keep the ones that carry access.
@@ -155,11 +161,24 @@ public actor HostDirectoryGrants {
     public func request(_ path: String) async -> GrantOutcome {
         if Task.isCancelled { return .declined }
         if covers(path) { return .granted }
-        guard var endpoint = InstanceEndpoints.endpoint(label: Self.vendorLabel) else {
+        let running = appIsRunning()
+        if running, InstanceEndpoints.endpoint(label: Self.vendorLabel) == nil {
+            log?.info(
+                "waiting for the running app to announce its grant listener",
+                metadata: ["path": "\(path)"])
+        }
+        guard
+            var endpoint = await Self.announcedEndpoint(
+                label: Self.vendorLabel, appIsRunning: running, grace: Self.reannounceGrace)
+        else {
+            if Task.isCancelled { return .declined }
             log?.warning(
                 "no embedder to ask for a host directory grant", metadata: ["path": "\(path)"])
             return .noEmbedder
         }
+        // The app publishes what it holds right after it announces, so a wait can end with the
+        // folder already covered and nothing left to ask.
+        if covers(path) { return .granted }
 
         let requestID = UUID().uuidString
         // One retry, because the first endpoint can be a dead one. Both attempts remain the same
@@ -187,6 +206,24 @@ public actor HostDirectoryGrants {
     /// Longer than the embedder's re-announce heartbeat, so a displaced listener has had its
     /// chance to take the label back before this gives up.
     private static let reannounceGrace: Duration = .seconds(45)
+
+    /// The listener announced under `label`, or the one a running app announces within `grace`.
+    ///
+    /// The app starts this engine and announces its listener a second or two after the engine
+    /// first answers, once it sees the engine running. A command in that window, such as a
+    /// `container start` typed while the app opens, was told the app was not open and could
+    /// not be asked. While the app is running its announce is coming, within one heartbeat if
+    /// a listener it had went away. With no app running nobody will announce, and the answer
+    /// is nil at once.
+    static func announcedEndpoint(
+        label: String,
+        appIsRunning: Bool,
+        grace: Duration
+    ) async -> xpc_endpoint_t? {
+        if let endpoint = InstanceEndpoints.endpoint(label: label) { return endpoint }
+        guard appIsRunning else { return nil }
+        return await InstanceEndpoints.endpoint(label: label, timeout: grace)
+    }
 
     /// The small transport surface lets cancellation be tested without wall-clock waits while
     /// production still uses one fresh XPC connection per grant request.
