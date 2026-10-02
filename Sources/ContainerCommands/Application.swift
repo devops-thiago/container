@@ -53,23 +53,7 @@ public struct Application: AsyncLoggableCommand {
         groupedSubcommands: [
             CommandGroup(
                 name: "Container",
-                subcommands: [
-                    ContainerClean.self,
-                    ContainerCopy.self,
-                    ContainerCreate.self,
-                    ContainerDelete.self,
-                    ContainerExec.self,
-                    ContainerExport.self,
-                    ContainerInspect.self,
-                    ContainerKill.self,
-                    ContainerList.self,
-                    ContainerLogs.self,
-                    ContainerRun.self,
-                    ContainerStart.self,
-                    ContainerStats.self,
-                    ContainerStop.self,
-                    ContainerPrune.self,
-                ]
+                subcommands: Application.containerVerbs + [ContainerNoun.self]
             ),
             CommandGroup(
                 name: "Image",
