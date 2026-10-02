@@ -132,7 +132,10 @@ extension APIServer {
                     // from their received XPC message's signing identity. This remains
                     // route-local: spawned helpers still use the shared listener and inherited
                     // owner token without pretending to be the host app.
-                    await HostDirectoryGrants.shared.configure(log: log)
+                    // A request that finds no listener yet waits while the app is up: the app
+                    // announces one a second or two after this engine first answers.
+                    await HostDirectoryGrants.shared.configure(
+                        log: log, appIsRunning: { OwnerWatchdog.embeddingAppIsRunning })
                     let grantHarness = HostDirectoryGrantHarness(log: log)
                     routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route(grantHarness.publish)
                     routes[XPCRoute.hostDirectoryGrantLend] = XPCServer.route(grantHarness.lend)
