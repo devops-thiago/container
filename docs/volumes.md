@@ -118,6 +118,11 @@ Or with `--mount`:
 container run -it --rm --mount type=volume,source=foo,target=/mnt/foo alpine sh
 ```
 
+A volume is a disk image, and one running container has it attached at a time. A second
+container that mounts the same volume starts once the first has stopped; started while the
+first runs, it fails and names the container that holds the volume. To share files between
+containers that run together, bind-mount a host directory into each of them.
+
 ## Anonymous volumes
 
 Using `-v /path` or `--mount type=volume,target=/path` without specifying a source creates
@@ -149,7 +154,8 @@ container run -v $VOL:/data alpine
 
 A `tmpfs` mount is temporary storage that lives only in the guest VM's memory. When the
 container stops, the mount and everything written to it are gone. You can't share a
-`tmpfs` mount between containers, unlike a bind mount or a named volume.
+`tmpfs` mount between containers, unlike a bind mount, or a named volume that containers
+use one after the other.
 
 Use a `tmpfs` mount when you need high-performance storage and don't need the data to
 persist after the container stops.
