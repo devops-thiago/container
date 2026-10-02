@@ -509,6 +509,13 @@ public actor ContainersService {
 
             let path = self.containerRoot.appendingPathComponent(id)
             let (config, _) = try Self.getContainerConfiguration(at: path)
+            if let held = Self.volumeInUse(by: await self.containers.values.map(\.snapshot), neededBy: config) {
+                throw ContainerizationError(
+                    .invalidState,
+                    message:
+                        "volume \(held.volume) is in use by container \(held.container): a volume is a disk, and one running container holds it at a time. Stop \(held.container) first, or give this container a volume of its own"
+                )
+            }
             try await self.restoreHostDirectoryAccess(
                 for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks)
 
@@ -1376,6 +1383,22 @@ public actor ContainersService {
 
     /// Reserve the directory exclusively after asynchronous preparation. A bundle
     /// restored since create's initial existence check must never enter its rollback.
+    /// A volume `configuration` mounts that another container has attached, with that
+    /// container. A volume is a disk image, and Virtualization refuses a machine whose
+    /// disk another machine has open, with an error that names neither.
+    static func volumeInUse(
+        by containers: [ContainerSnapshot], neededBy configuration: ContainerConfiguration
+    ) -> (volume: String, container: String)? {
+        let needed = Set(configuration.mounts.compactMap(\.volumeName))
+        guard !needed.isEmpty else { return nil }
+        for container in containers.sorted(by: { $0.id < $1.id }) where container.id != configuration.id && container.status != .stopped {
+            if let volume = container.configuration.mounts.compactMap(\.volumeName).first(where: needed.contains) {
+                return (volume, container.id)
+            }
+        }
+        return nil
+    }
+
     static func withNewContainerDirectory<T: Sendable>(
         at path: URL, _ body: @Sendable () async throws -> T
     ) async throws -> T {
