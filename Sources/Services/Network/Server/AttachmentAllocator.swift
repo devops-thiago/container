@@ -20,6 +20,10 @@ import ContainerizationExtras
 actor AttachmentAllocator {
     private let allocator: any AddressAllocator<UInt32>
     private var hostnames: [String: UInt32] = [:]
+    /// How many holders each hostname has: the engine, from a container's create to its
+    /// delete, and the container's runtime while it runs. The address goes back to the pool
+    /// when the last one lets go, so a stopped container keeps the address it had.
+    private var holders: [String: Int] = [:]
 
     init(lower: UInt32, size: Int) throws {
         allocator = try UInt32.rotatingAllocator(
@@ -28,25 +32,35 @@ actor AttachmentAllocator {
         )
     }
 
-    /// Allocate a network address for a host.
+    /// Allocate a network address for a host, or hand another holder the one it has.
     func allocate(hostname: String) async throws -> UInt32 {
         // Client is responsible for ensuring two containers don't use same hostname, so provide existing IP if hostname exists
         if let index = hostnames[hostname] {
+            holders[hostname, default: 0] += 1
             return index
         }
 
         let index = try allocator.allocate()
         hostnames[hostname] = index
+        holders[hostname] = 1
 
         return index
     }
 
-    /// Free an allocated network address by hostname.
+    /// Let go of a hostname's address. It is freed, and returned, only when no holder is
+    /// left; nil while another still has it, or when the hostname was never allocated.
     @discardableResult
     func deallocate(hostname: String) async throws -> UInt32? {
-        guard let index = hostnames.removeValue(forKey: hostname) else {
+        guard let index = hostnames[hostname] else {
             return nil
         }
+        let remaining = (holders[hostname] ?? 1) - 1
+        guard remaining <= 0 else {
+            holders[hostname] = remaining
+            return nil
+        }
+        holders.removeValue(forKey: hostname)
+        hostnames.removeValue(forKey: hostname)
 
         try allocator.release(index)
         return index
