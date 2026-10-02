@@ -31,7 +31,9 @@ struct Resolver {
     private var diagnostics: DiagnosticCollector { context.diagnostics }
 
     func resolve(_ raw: RawProject) -> ComposeFile {
-        let services = raw.services.keys.sorted().map { service($0, raw.services[$0] ?? RawService(), in: raw) }
+        let services = raw.services.keys.sorted().map { name in
+            diagnostics.reading(.service(name)) { service(name, raw.services[name] ?? RawService(), in: raw) }
+        }
         let networks = raw.networks.keys.sorted().map { key -> ComposeNetwork in
             let declared = raw.networks[key] ?? RawNetwork()
             var network = ComposeNetwork(key: key)

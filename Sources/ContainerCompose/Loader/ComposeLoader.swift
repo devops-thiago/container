@@ -29,14 +29,37 @@ public struct ComposeDefinition: Sendable, Equatable {
     public let profiles: [String]
     /// What the files say that will not happen, or not as written.
     public let warnings: [ComposeDiagnostic]
+    /// What was found about the parts of the project that do not run as it was read: a
+    /// service whose profiles are off, and a network or a volume that no service which runs
+    /// uses. Errors and warnings both. They count once the part is planned, which naming
+    /// the service does.
+    public let withheld: [ComposePart: [ComposeDiagnostic]]
 
-    public init(name: String, directory: String, configFiles: [String], file: ComposeFile, profiles: [String], warnings: [ComposeDiagnostic]) {
+    public init(
+        name: String, directory: String, configFiles: [String], file: ComposeFile, profiles: [String], warnings: [ComposeDiagnostic],
+        withheld: [ComposePart: [ComposeDiagnostic]] = [:]
+    ) {
         self.name = name
         self.directory = directory
         self.configFiles = configFiles
         self.file = file
         self.profiles = profiles
         self.warnings = warnings
+        self.withheld = withheld
+    }
+
+    /// The parts held back with something wrong with them, and what is wrong, in the order
+    /// the files have it. Such a part was not read as the files mean it, so it is not what
+    /// `file` says of it either.
+    public var unread: [(part: ComposePart, errors: [ComposeDiagnostic])] {
+        let found = withheld.compactMap { part, diagnostics -> (part: ComposePart, errors: [ComposeDiagnostic])? in
+            let errors = diagnostics.filter { $0.severity == .error }
+            return errors.isEmpty ? nil : (part, errors)
+        }
+        let order = DiagnosticCollector.inFileOrder(found.compactMap(\.errors.first))
+        return found.sorted { first, second in
+            (order.firstIndex(of: first.errors[0]) ?? 0) < (order.firstIndex(of: second.errors[0]) ?? 0)
+        }
     }
 }
 
@@ -153,6 +176,10 @@ public enum ComposeLoader {
     }
 
     /// Read the project. Throws `ComposeError` with everything that keeps it from running.
+    ///
+    /// A service whose profiles are off does not run, and neither does a network or a volume
+    /// that only such services use, so what is wrong with one of those does not stop the
+    /// project: it is kept in `ComposeDefinition.withheld` for a plan that uses the part.
     public static func load(_ options: Options) throws -> ComposeDefinition {
         let sources = try sources(options)
         let (files, directory, variables, documents, name) = (sources.files, sources.directory, sources.variables, sources.documents, sources.name)
@@ -182,20 +209,24 @@ public enum ComposeLoader {
         }
 
         let file = Resolver(context: context, environment: variables).resolve(merged)
-        try diagnostics.throwIfFailed()
 
         let fromEnvironment = (variables["COMPOSE_PROFILES"] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         var profiles: [String] = []
         for profile in options.profiles + fromEnvironment where !profile.isEmpty && !profiles.contains(profile) {
             profiles.append(profile)
         }
+
+        let used = file.parts(of: file.services.filter { $0.isActive(in: profiles) })
+        let withheld = diagnostics.withhold { !used.contains($0) }
+        try diagnostics.throwIfFailed()
         return ComposeDefinition(
             name: name,
             directory: directory.path,
             configFiles: files.map(\.path),
             file: file,
             profiles: profiles,
-            warnings: DiagnosticCollector.inFileOrder(diagnostics.warnings))
+            warnings: DiagnosticCollector.inFileOrder(diagnostics.warnings),
+            withheld: withheld)
     }
 
     // MARK: Files

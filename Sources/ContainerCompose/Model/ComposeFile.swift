@@ -36,6 +36,18 @@ public struct ComposeFile: Sendable, Equatable {
     public func service(_ name: String) -> ComposeService? {
         services.first { $0.name == name }
     }
+
+    /// The parts of the project `services` come to: the services themselves, the networks
+    /// they attach to and the volumes they mount.
+    public func parts(of services: [ComposeService]) -> Set<ComposePart> {
+        var parts = Set<ComposePart>()
+        for service in services {
+            parts.insert(.service(service.name))
+            for key in service.networkKeys { parts.insert(.network(key)) }
+            for key in service.volumeKeys { parts.insert(.volume(key)) }
+        }
+        return parts
+    }
 }
 
 public struct ComposeService: Sendable, Equatable {
@@ -87,6 +99,26 @@ public struct ComposeService: Sendable, Equatable {
 
     public init(name: String) {
         self.name = name
+    }
+
+    /// Whether the service runs without being named: it has no profiles, or one of them is
+    /// among `profiles`. `*` turns every profile on.
+    public func isActive(in profiles: [String]) -> Bool {
+        self.profiles.isEmpty || profiles.contains("*") || !Set(self.profiles).isDisjoint(with: profiles)
+    }
+
+    /// The keys of the networks the service attaches to: the ones it names, or the
+    /// project's default.
+    public var networkKeys: [String] {
+        networks.isEmpty ? ["default"] : networks.map(\.key)
+    }
+
+    /// The keys of the named volumes the service mounts.
+    public var volumeKeys: [String] {
+        mounts.compactMap { mount in
+            if case .volume(let key) = mount.kind { return key }
+            return nil
+        }
     }
 }
 

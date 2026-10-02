@@ -123,10 +123,9 @@ extension ProjectPlan {
     public static func make(_ definition: ComposeDefinition, selection: Selection = Selection()) throws -> ProjectPlan {
         let diagnostics = DiagnosticCollector()
         let file = definition.file
-        let everyProfile = definition.profiles.contains("*")
 
         func enabled(_ service: ComposeService) -> Bool {
-            service.profiles.isEmpty || everyProfile || !Set(service.profiles).isDisjoint(with: definition.profiles)
+            service.isActive(in: definition.profiles)
         }
 
         // The services asked for. One named on the command line runs whatever its profiles.
@@ -170,11 +169,22 @@ extension ProjectPlan {
 
         let order = try DependencyGraph(dependencies: dependencies.mapValues { $0.map(\.service) }).startOrder()
         let planned = order.compactMap { file.service($0) }
+        let networkKeys = Set(planned.flatMap(\.networkKeys))
+        let volumeKeys = Set(planned.flatMap(\.volumeKeys))
+
+        // What reading the files held back, about the parts this plan uses after all: a
+        // service named in spite of its profiles, and the networks and volumes it brings.
+        // An error among them may have left the part half read, so nothing is made of it.
+        let parts: [ComposePart] =
+            planned.map { .service($0.name) } + networkKeys.sorted().map { .network($0) } + volumeKeys.sorted().map { .volume($0) }
+        for diagnostic in parts.flatMap({ definition.withheld[$0] ?? [] }) {
+            diagnostics.add(diagnostic)
+        }
+        try diagnostics.throwIfFailed()
 
         // The networks and volumes those services use, under their names on the engine.
         var networks: [NetworkPlan] = []
         var networkNames: [String: String] = [:]
-        let networkKeys = Set(planned.flatMap { $0.networks.isEmpty ? ["default"] : $0.networks.map(\.key) })
         for key in networkKeys.sorted() {
             let declared = file.networks.first { $0.key == key } ?? ComposeNetwork(key: key)
             let name = declared.name ?? "\(definition.name)_\(key)"
@@ -198,10 +208,6 @@ extension ProjectPlan {
 
         var volumes: [VolumePlan] = []
         var volumeNames: [String: String] = [:]
-        var volumeKeys = Set<String>()
-        for mount in planned.flatMap(\.mounts) {
-            if case .volume(let key) = mount.kind { volumeKeys.insert(key) }
-        }
         for key in volumeKeys.sorted() {
             let declared = file.volumes.first { $0.key == key } ?? ComposeVolume(key: key)
             let name = declared.name ?? "\(definition.name)_\(key)"
