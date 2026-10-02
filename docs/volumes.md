@@ -43,6 +43,9 @@ Create a named volume with `container volume create`:
 container volume create foo
 ```
 
+A new volume is empty: it has no `lost+found` directory, so an image that wants an unused
+data directory, as database images do, can be given the volume's mount point itself.
+
 By default, a volume uses a journaled `ext4` filesystem. Configure the journal mode and
 size at creation time with `--opt`:
 
