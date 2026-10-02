@@ -64,6 +64,9 @@ struct ComposeUp: AsyncParsableCommand {
     @Flag(name: .long, help: "Wait until every service with a health check is healthy; implies --detach")
     var wait = false
 
+    @OptionGroup(title: "Registry options")
+    var registry: Flags.Registry
+
     @Argument(help: "Services to bring up (default: all)")
     var services: [String] = []
 
@@ -92,7 +95,8 @@ struct ComposeUp: AsyncParsableCommand {
         options.wait = wait
         options.start = !noStart
 
-        let project = ComposeProject(name: plan.name, hooks: hooks)
+        let scheme = registry.scheme
+        let project = ComposeProject(name: plan.name, engine: LiveComposeEngine(registryScheme: { _ in scheme }), hooks: hooks)
         try await project.up(plan, options: options)
         reporter.finishBar()
         guard !detach, !wait, !noStart else { return }
@@ -105,11 +109,11 @@ struct ComposeUp: AsyncParsableCommand {
                 return false
             }
             group.addTask {
-                await waitForInterrupt()
+                await Self.waitForInterrupt()
                 return true
             }
             group.addTask {
-                try await waitUntilStopped(project)
+                try await Self.waitUntilStopped(project)
                 return false
             }
             let first = try await group.next() ?? false
@@ -123,7 +127,7 @@ struct ComposeUp: AsyncParsableCommand {
     }
 
     /// Returns when the user interrupts the command.
-    private func waitForInterrupt() async {
+    private static func waitForInterrupt() async {
         signal(SIGINT, SIG_IGN)
         signal(SIGTERM, SIG_IGN)
         let stream = AsyncStream<Void> { continuation in
@@ -139,7 +143,7 @@ struct ComposeUp: AsyncParsableCommand {
     }
 
     /// Returns when none of the project's containers runs any more.
-    private func waitUntilStopped(_ project: ComposeProject) async throws {
+    private static func waitUntilStopped(_ project: ComposeProject) async throws {
         while try await project.containers().contains(where: { $0.state != .stopped }) {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -238,6 +242,9 @@ struct ComposePull: AsyncParsableCommand {
 
     @ParentCommand var compose: ComposeCommand
 
+    @OptionGroup(title: "Registry options")
+    var registry: Flags.Registry
+
     @Argument(help: "Services whose images to fetch (default: all)")
     var services: [String] = []
 
@@ -245,7 +252,8 @@ struct ComposePull: AsyncParsableCommand {
         let reporter = ConsoleReporter()
         defer { reporter.finishBar() }
         let plan = try await compose.plan(services: services, includesDependencies: false, reporter: reporter)
-        try await ComposeProject(name: plan.name, hooks: reporter.hooks).pull(plan)
+        let scheme = registry.scheme
+        try await ComposeProject(name: plan.name, engine: LiveComposeEngine(registryScheme: { _ in scheme }), hooks: reporter.hooks).pull(plan)
     }
 }
 
