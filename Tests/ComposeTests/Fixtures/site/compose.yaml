@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: blog-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${BLOG_DB_NAME}
+      MYSQL_USER: ${BLOG_DB_USER}
+      MYSQL_PASSWORD: ${BLOG_DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - blog
+    command: '--default-authentication-plugin=mysql_native_password'
+
+  blog:
+    # The custom image, published to the registry by CI.
+    image: ${REGISTRY}/${IMAGE_NAME}:latest
+    container_name: blog
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      BLOG_DB_HOST: mysql
+      BLOG_DB_NAME: ${BLOG_DB_NAME}
+      BLOG_DB_USER: ${BLOG_DB_USER}
+      BLOG_DB_PASSWORD: ${BLOG_DB_PASSWORD}
+      BLOG_TABLE_PREFIX: ${BLOG_TABLE_PREFIX}
+    volumes:
+      # Only what has to outlive the container; the theme is in the image.
+      - blog_plugins:/var/www/html/wp-content/plugins
+      - blog_uploads:/var/www/html/wp-content/uploads
+      # - blog_themes:/var/www/html/wp-content/themes
+    networks:
+      - root_proxy
+      - blog
+    labels:
+      - "traefik.enable=true"
+      # Main domain
+      - "traefik.http.routers.blog.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.blog.entrypoints=websecure"
+      - "traefik.http.services.blog.loadbalancer.server.port=80"
+      - "traefik.docker.network=root_proxy"
+
+      # WWW redirect
+      - "traefik.http.middlewares.redirect-www.redirectregex.regex=^https?://www\\.(.+)"
+      - "traefik.http.middlewares.redirect-www.redirectregex.replacement=https://$${1}"
+      - "traefik.http.routers.blog-www.rule=Host(`www.${DOMAIN}`)"
+
+networks:
+  root_proxy:
+    external: true
+  blog:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  blog_plugins:
+  blog_uploads:
+  blog_themes:

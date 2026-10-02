@@ -1,0 +1,87 @@
+# The same logging settings for every service that ships its logs.
+x-app-logging: &app-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  db:
+    logging: *app-logging
+    image: postgres:15-alpine
+    command: ["postgres", "-c", "max_connections=${PG_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${PG_SHARED_BUFFERS:-512MB}"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    logging: *app-logging
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collector:
+    image: grafana/alloy:latest
+    profiles: ["observability"]
+
+  # Runs the schema migrations, then exits.
+  migrate:
+    logging: *app-logging
+    image: ${APP_IMAGE:-app-backend:local}
+    build: .
+    command: python manage.py migrate --noinput
+    environment:
+      - DATABASE_URL=postgresql://app_user:${POSTGRES_PASSWORD:-app_password}@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web: &web-service
+    logging: *app-logging
+    image: ${APP_IMAGE:-app-backend:local}
+    build: .
+    command: uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --proxy-headers --workers ${WEB_WORKERS:-6}
+    volumes:
+      - media_data:/app/media
+      - ${ROOT_CERTS_HOST_DIR:-./config/root-certs}:/app/root-certs:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false  # the framework writes a cache
+    environment:
+      - ASGI_THREADS=${ASGI_THREADS:-8}
+      - DEBUG=${DEBUG:-False}
+      - DATABASE_URL=postgresql://app_user:${POSTGRES_PASSWORD:-app_password}@db:5432/app
+      - REDIS_URL=redis://redis:6379/1
+      - ALLOWED_HOSTS=*
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # The same image and settings as web, with its own workers and without the uploads.
+  ws:
+    <<: *web-service
+    command: uvicorn app.asgi:application --host 0.0.0.0 --port 8000 --proxy-headers --workers ${WS_WORKERS:-2}
+    volumes:
+      - ${ROOT_CERTS_HOST_DIR:-./config/root-certs}:/app/root-certs:ro
+
+volumes:
+  postgres_data:
+  media_data:

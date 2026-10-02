@@ -1,0 +1,24 @@
+services:
+  web:
+    command: serve --port 8000 --reload
+    environment:
+      - MODE=development
+      - DEBUG=1
+    ports:
+      - "9229:9229"
+    volumes:
+      - ./src:/srv/public
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    labels:
+      - "tier=dev"
+    healthcheck:
+      interval: 5s
+  db:
+    healthcheck:
+      test: pg_isready -U postgres
+  cache:
+    image: redis:8-alpine

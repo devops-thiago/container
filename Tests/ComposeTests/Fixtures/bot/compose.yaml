@@ -1,0 +1,42 @@
+# A bot and its database, started with one command.
+#
+#   cp .env.example .env   # fill in the credentials
+#   compose up -d
+services:
+  bot:
+    image: registry.example.com/acme/bot:${IMAGE_TAG:-latest}
+    container_name: acme-bot
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:8080}
+      DATASOURCE_DB_KIND: postgresql
+      DATABASE_URL: ${DATABASE_URL:-jdbc:postgresql://db:5432/bot}
+      # One source for the database credentials: DB_USER and DB_PASSWORD in .env feed
+      # both the bot's datasource and the postgres container below.
+      DATASOURCE_USERNAME: ${DB_USER:-bot}
+      DATASOURCE_PASSWORD: ${DB_PASSWORD:-bot}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: acme-bot-db
+    environment:
+      POSTGRES_DB: bot
+      POSTGRES_USER: ${DB_USER:-bot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bot} -d bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  pgdata:

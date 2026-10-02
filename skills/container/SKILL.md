@@ -35,7 +35,7 @@ trust that message when `container system status` also reports the service down.
 | `docker rm` | `container delete` (alias `rm`) |
 | `docker login` / `logout` | `container registry login` / `logout` |
 | `docker info` | `container system status` |
-| `docker compose` | no equivalent — see `references/docker-migration.md` |
+| `docker compose` | `container compose` — same files; see `references/docker-migration.md` for what differs |
 
 `run`, `build`, `exec`, `logs`, `cp`, `inspect`, `stats`, `start`, `stop`, `kill`, `export`,
 `prune`, `volume *`, and `network *` match Docker, as do the common `run` flags: `-d`, `--rm`,
@@ -87,6 +87,6 @@ containerized application. See `references/container-machines.md`.
 
 ## Reference
 
-- `references/docker-migration.md` — full mapping, what has no equivalent, replacing compose
+- `references/docker-migration.md` — full mapping, what has no equivalent, running compose files
 - `references/container-machines.md` — container machine workflows and host integrations
 - `container <command> --help` — authoritative flags, always current
