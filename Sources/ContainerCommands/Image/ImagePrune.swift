@@ -29,6 +29,9 @@ extension Application {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        @OptionGroup
+        var confirmation: PruneConfirmation
+
         @Flag(name: .shortAndLong, help: "Remove all unused images, not just dangling ones")
         var all: Bool = false
 
