@@ -113,7 +113,7 @@ extension Application {
             progress.set(description: "Unpacking image")
             progress.set(itemsName: "entries")
             for image in result.images {
-                try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: progress.handler))
+                try await image.unpackForHost(progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: progress.handler))
             }
             await taskManager.finish()
             progress.finish()

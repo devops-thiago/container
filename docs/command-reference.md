@@ -636,6 +636,8 @@ container image list [--format <format>] [--quiet] [--verbose] [--debug]
 
 Pulls an image from a registry. Supports specifying a platform and controlling progress display.
 
+Without a platform, every platform of the image is fetched and only the one this Mac runs is unpacked: the others are unpacked when a container is made for one. An image that does not have this Mac's platform is unpacked for every platform it has. `image load` and `build` unpack the same way.
+
 **Usage**
 
 ```bash

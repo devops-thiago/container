@@ -434,6 +434,30 @@ extension ClientImage {
         await progressUpdateClient?.finish()
     }
 
+    /// Unpack what this host needs from an image that was pulled, loaded or built without a
+    /// platform: the platform this host runs, when the image has it, and every platform the
+    /// image has when it does not.
+    ///
+    /// An index can list a dozen platforms, and each one unpacked is a snapshot of its own on
+    /// disk, most of them for platforms this host never runs. Another platform is unpacked
+    /// when a container is made for it, by `getCreateSnapshot(platform:)`.
+    public func unpackForHost(progressUpdate: ProgressUpdateHandler? = nil) async throws {
+        let platforms = try await self.index().manifests.compactMap(\.platform)
+        try await self.unpack(platform: Self.unpackPlatform(host: Self.hostPlatform, among: platforms), progressUpdate: progressUpdate)
+    }
+
+    /// The platform a container on this host runs by default.
+    public static var hostPlatform: Platform {
+        Parser.platform(os: "linux", arch: Arch.hostArchitecture().rawValue)
+    }
+
+    /// What `unpackForHost` unpacks: `host` when the image has it, and `nil`, every
+    /// platform, when it does not. `Platform` equality treats arm64 with and without its
+    /// `v8` variant as the same platform.
+    static func unpackPlatform(host: Platform, among platforms: [Platform]) -> Platform? {
+        platforms.contains(host) ? host : nil
+    }
+
     public func deleteSnapshot(platform: Platform?) async throws {
         let client = Self.newXPCClient()
         let request = Self.newRequest(.snapshotDelete)
