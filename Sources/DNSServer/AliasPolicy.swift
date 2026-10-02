@@ -24,11 +24,10 @@ public enum AliasPolicy {
     /// The most aliases that a single attachment may declare.
     public static let maximumAliasesPerAttachment = 32
 
-    /// The fewest labels that an exact alias, or the base of a subtree alias, may have.
+    /// The fewest labels that the base of a subtree alias may have.
     ///
-    /// A name with one label is not under any domain, so the system resolver never sends queries for
-    /// it to the container DNS server, and an alias like that would never resolve. For a subtree it
-    /// also keeps an alias from capturing a whole top-level domain.
+    /// A subtree alias with a one-label base would capture a whole top-level domain. An exact alias
+    /// may have one label, a Docker-style service name: peers' hosts files list it.
     public static let minimumLabels = 2
 
     /// A rule that an alias breaks. The description says which alias and why.
@@ -44,7 +43,6 @@ public enum AliasPolicy {
     ///
     /// - There are at most `maximumAliasesPerAttachment` of them, and each one is a valid rule.
     /// - No alias is listed twice, and an exact alias is not the hostname of the attachment.
-    /// - An exact alias has at least `minimumLabels` labels.
     /// - A subtree alias has a base with at least `minimumLabels` labels, and the base is the hostname
     ///   of the attachment or one of its exact aliases, so an attachment cannot claim the names below
     ///   a name that it does not own.
@@ -85,11 +83,9 @@ public enum AliasPolicy {
             }
             switch rule {
             case .exact(let name):
-                guard name.labels.count >= Self.minimumLabels else {
-                    throw Violation(
-                        "alias \"\(alias)\" must be a fully qualified name with at least \(Self.minimumLabels) labels, such as \"api.example.test\". Configure a default DNS domain to have the domain added to a name that has none"
-                    )
-                }
+                // A single-label exact alias is allowed, as Docker allows it: the system
+                // resolver never routes it here, but peers' hosts files list it, and the
+                // container DNS server answers it when a search domain is appended.
                 guard name != hostname else {
                     throw Violation("alias \"\(alias)\" is already a hostname of the container")
                 }

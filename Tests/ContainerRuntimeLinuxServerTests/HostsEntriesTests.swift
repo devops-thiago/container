@@ -69,4 +69,31 @@ struct HostsEntriesTests {
             extraHosts: [.init(name: "literal", address: "192.0.2.2")], gateway: nil)
         #expect(entries.last?.rendered == "192.0.2.2 literal")
     }
+
+    @Test func aliasesFollowAPeersOwnNamesAndTheContainersToo() throws {
+        let database = try ContainerResource.Attachment(
+            network: "test", hostname: "shop-db-1", ipv4Address: CIDRv4("192.0.2.30/24"),
+            ipv4Gateway: IPv4Address("192.0.2.1"), ipv6Address: nil, macAddress: nil, aliases: ["db", "shop-db-1", "postgres"])
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "shop-web-1", aliases: ["web", "shop-web-1"], primaryAddress: "192.0.2.10", peers: [database, peer("cache")],
+            searchDomain: "container.internal", extraHosts: [], gateway: "192.0.2.1")
+        #expect(
+            entries.map(\.rendered) == [
+                "127.0.0.1 localhost",
+                "192.0.2.10 shop-web-1 web",
+                "192.0.2.30 shop-db-1 shop-db-1.container.internal db postgres",
+                "192.0.2.20 cache cache.container.internal",
+            ])
+    }
+
+    @Test func anExplicitHostStillWinsOverAPeersAlias() throws {
+        let database = try ContainerResource.Attachment(
+            network: "test", hostname: "shop-db-1", ipv4Address: CIDRv4("192.0.2.30/24"),
+            ipv4Gateway: IPv4Address("192.0.2.1"), ipv6Address: nil, macAddress: nil, aliases: ["db"])
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "self", primaryAddress: nil, peers: [database], searchDomain: "container.internal",
+            extraHosts: [.init(name: "db", address: "192.0.2.99")], gateway: nil)
+        #expect(entries.filter { $0.hostnames.contains("db") }.map(\.ipAddress) == ["192.0.2.99"])
+        #expect(entries.contains { $0.rendered == "192.0.2.30 shop-db-1 shop-db-1.container.internal" })
+    }
 }

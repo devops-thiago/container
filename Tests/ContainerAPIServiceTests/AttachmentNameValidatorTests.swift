@@ -139,11 +139,9 @@ struct AttachmentNameValidatorTests {
         }
     }
 
-    @Test("An exact alias with a single label is rejected", arguments: ["api", "API.", "localhost"])
-    func unqualifiedExactAlias(alias: String) {
-        expectError(.invalidArgument, containing: "fully qualified") {
-            try validate([attachment("foo.test.", aliases: [alias])])
-        }
+    @Test("An exact alias with a single label is accepted, as Docker accepts a service name", arguments: ["api", "API.", "localhost"])
+    func unqualifiedExactAlias(alias: String) throws {
+        try validate([attachment("foo.test.", aliases: [alias])])
     }
 
     @Test("An exact alias with two labels is accepted")

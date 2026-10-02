@@ -59,7 +59,7 @@ struct UnsupportedFlagsTests {
             "memory-swappiness", "memory-reservation", "kernel-memory", "cpu-shares", "cpu-period", "cpu-quota",
             "cpuset-cpus", "cpuset-mems", "blkio-weight", "pids-limit", "detach-keys", "volume-driver", "device",
             "device-cgroup-rule", "security-opt", "log-opt", "storage-opt", "link", "expose", "group-add",
-            "network-alias", "blkio-weight-device", "device-read-bps", "device-read-iops", "device-write-bps",
+            "blkio-weight-device", "device-read-bps", "device-read-iops", "device-write-bps",
             "device-write-iops", "attach", "annotation", "label-file", "volumes-from",
         ]
         for flag in valued { arguments += ["--\(flag)", "x"] }

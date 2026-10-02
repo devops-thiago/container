@@ -74,9 +74,10 @@ struct AliasPolicyTests {
         expectViolation("more than once", ["api.test", "API.test."])
     }
 
-    @Test("An exact alias needs at least two labels", arguments: ["api", "localhost", "API."])
-    func exactNeedsTwoLabels(alias: String) {
-        expectViolation("fully qualified", [alias])
+    @Test("An exact alias with a single label is accepted, as Docker accepts a service name", arguments: ["api", "localhost", "API."])
+    func exactSingleLabel(alias: String) throws {
+        let rules = try validate([alias])
+        #expect(rules.count == 1)
     }
 
     @Test("An exact alias cannot be the hostname of the attachment")

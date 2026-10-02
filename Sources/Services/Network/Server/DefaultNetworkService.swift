@@ -27,6 +27,8 @@ public actor DefaultNetworkService: NetworkService {
     private let log: Logger
     private var allocator: AttachmentAllocator
     private var macAddresses: [UInt32: MACAddress]
+    /// The other names each hostname answers to, by canonical hostname, so a peer's hosts file can list them.
+    private var aliases: [String: [String]] = [:]
     private var allocationsBySession: [XPCServerSession: [(hostname: String, index: UInt32)]]
 
     /// Set up a network service for the specified network.
@@ -90,7 +92,8 @@ public actor DefaultNetworkService: NetworkService {
             ipv4Gateway: status.ipv4Gateway,
             ipv6Address: ipv6Address,
             macAddress: macAddress,
-            variant: network.variant
+            variant: network.variant,
+            aliases: aliases
         )
         log.info(
             "allocated attachment",
@@ -107,6 +110,7 @@ public actor DefaultNetworkService: NetworkService {
             additionalData = $0
         }
         macAddresses[index] = macAddress
+        self.aliases[AttachmentOptions.canonicalHostname(hostname)] = aliases
 
         let isNewSession = allocationsBySession[session] == nil
         allocationsBySession[session, default: []].append((hostname: hostname, index: index))
@@ -126,6 +130,7 @@ public actor DefaultNetworkService: NetworkService {
         for allocation in allocations {
             _ = try? await allocator.deallocate(hostname: allocation.hostname)
             macAddresses.removeValue(forKey: allocation.index)
+            aliases.removeValue(forKey: AttachmentOptions.canonicalHostname(allocation.hostname))
         }
         log.info("released session", metadata: ["allocations": "\(allocations.count)"])
     }
@@ -171,7 +176,8 @@ public actor DefaultNetworkService: NetworkService {
             ipv4Gateway: status.ipv4Gateway,
             ipv6Address: ipv6Address,
             macAddress: macAddress,
-            variant: network.variant
+            variant: network.variant,
+            aliases: aliases[AttachmentOptions.canonicalHostname(hostname)] ?? []
         )
         log.debug(
             "lookup attachment",
