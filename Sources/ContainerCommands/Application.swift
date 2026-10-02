@@ -61,7 +61,7 @@ public struct Application: AsyncLoggableCommand {
                     BuildCommand.self,
                     ImageCommand.self,
                     RegistryCommand.self,
-                ]
+                ] + Application.imageRootSpellings
             ),
             CommandGroup(
                 name: "Machine",
