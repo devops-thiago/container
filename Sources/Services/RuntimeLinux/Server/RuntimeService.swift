@@ -123,26 +123,31 @@ public actor RuntimeService {
 
     /// Build the guest's hosts entries without requiring a VM or real network.
     static func hostsEntries(
-        hostname: String, primaryAddress: String?, peers: [Attachment], searchDomain: String,
+        hostname: String, aliases: [String] = [], primaryAddress: String?, peers: [Attachment], searchDomain: String,
         extraHosts: [ContainerConfiguration.ExtraHost], gateway: String?
     ) throws -> [Hosts.Entry] {
         var hostsEntries = [Hosts.Entry.localHostIPV4()]
         if let primaryAddress {
+            // The container answers to its own aliases too: a service that calls itself by
+            // the name its peers use reaches itself.
             hostsEntries.append(
                 Hosts.Entry(
                     ipAddress: primaryAddress,
-                    hostnames: [hostname],
+                    hostnames: [hostname] + aliases.filter { $0 != hostname },
                 ))
         }
         // The containers already on this network, by bare name and qualified with the
         // search domain, so both `web` and `web.container.internal` resolve. getaddrinfo
         // reads hosts before DNS, which is what makes this work with no resolver in the
         // path at all.
+        // A peer's aliases follow its own names. Two peers may share an alias; the first in
+        // the file answers, as the first registered does elsewhere.
         for peer in peers {
             hostsEntries.append(
                 Hosts.Entry(
                     ipAddress: peer.ipv4Address.address.description,
-                    hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"],
+                    hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"]
+                        + peer.aliases.filter { $0 != peer.hostname },
                 ))
         }
         // Resolvers can return every matching hosts entry, in file order. Remove
@@ -255,6 +260,7 @@ public actor RuntimeService {
                     var (attachment, additionalData) = try await client.allocate(
                         hostname: attachmentConfig.options.hostname,
                         macAddress: attachmentConfig.options.macAddress,
+                        aliases: attachmentConfig.options.aliases,
                         on: session
                     )
                     if let mtu = attachmentConfig.options.mtu {
@@ -266,7 +272,8 @@ public actor RuntimeService {
                             ipv6Address: attachment.ipv6Address,
                             macAddress: attachment.macAddress,
                             mtu: mtu,
-                            variant: attachment.variant
+                            variant: attachment.variant,
+                            aliases: attachment.aliases
                         )
                     }
                     guard let iStrategy = self.interfaceStrategies[NetworkInterfaceKey(plugin: info.plugin, variant: attachment.variant)] else {
@@ -370,7 +377,8 @@ public actor RuntimeService {
                 czConfig.process.stdin = stdin
                 czConfig.hosts = Hosts(
                     entries: try Self.hostsEntries(
-                        hostname: czConfig.hostname ?? id, primaryAddress: interfaces.first?.ipv4Address.address.description,
+                        hostname: czConfig.hostname ?? id, aliases: attachments.flatMap(\.aliases),
+                        primaryAddress: interfaces.first?.ipv4Address.address.description,
                         peers: peerAttachments, searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
                         extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description))
                 czConfig.bootLog = BootLog.file(path: bundle.bootlog, append: true)
