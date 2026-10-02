@@ -64,6 +64,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `--mount <mount>`: Add a mount to the container (format: type=<>,source=<>,target=<>,readonly)
 *   `--name <name>`: Use the specified name as the container ID
 *   `--network <network>`: Attach the container to a network (format: `<name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME]...`). Use `alias` to give the container additional DNS names; see [Give a container additional DNS names](networking.md#give-a-container-additional-dns-names)
+*   `--network-alias <alias>`: Add a name the container answers to on every network it attaches to
 *   `--no-dns`: Do not configure DNS in the container
 *   `--os <os>`: Set OS if image can target multiple operating systems (default: from image, else linux)
 *   `-p, --publish <spec>`: Publish a port from container to host (format: [host-ip:]host-port:container-port[/protocol])
@@ -112,6 +113,9 @@ container run --network default,mac=02:42:ac:11:00:02 ubuntu:latest
 
 # run a container that also answers to api.test and to every name below gateway.test
 container run --name gateway --network default,alias=api.test,alias=.gateway.test nginx:latest
+
+# give a container a second name on its network; the other containers there reach it as db
+container run -d --name postgres-16 --network backend,alias=db postgres:16
 
 # run a container with an init process to reap zombies and forward signals
 container run --init ubuntu:latest my-app
@@ -255,6 +259,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `--mount <mount>`: Add a mount to the container (format: type=<>,source=<>,target=<>,readonly)
 *   `--name <name>`: Use the specified name as the container ID
 *   `--network <network>`: Attach the container to a network (format: `<name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME]...`). Use `alias` to give the container additional DNS names; see [Give a container additional DNS names](networking.md#give-a-container-additional-dns-names)
+*   `--network-alias <alias>`: Add a name the container answers to on every network it attaches to
 *   `--no-dns`: Do not configure DNS in the container
 *   `--os <os>`: Set OS if image can target multiple operating systems (default: from image, else linux)
 *   `-p, --publish <spec>`: Publish a port from container to host (format: [host-ip:]host-port:container-port[/protocol])
