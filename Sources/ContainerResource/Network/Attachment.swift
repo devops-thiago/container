@@ -35,6 +35,8 @@ public struct Attachment: Codable, Sendable {
     public let mtu: UInt32?
     /// The network plugin variant, used by the runtime to select an interface strategy.
     public let variant: String?
+    /// Other names the attachment answers to on its network, beside its hostname.
+    public let aliases: [String]
 
     public init(
         network: String,
@@ -44,7 +46,8 @@ public struct Attachment: Codable, Sendable {
         ipv6Address: CIDRv6?,
         macAddress: MACAddress?,
         mtu: UInt32? = nil,
-        variant: String? = nil
+        variant: String? = nil,
+        aliases: [String] = []
     ) {
         self.network = network
         self.hostname = hostname
@@ -54,6 +57,7 @@ public struct Attachment: Codable, Sendable {
         self.macAddress = macAddress
         self.mtu = mtu
         self.variant = variant
+        self.aliases = aliases
     }
 
     enum CodingKeys: String, CodingKey {
@@ -65,6 +69,7 @@ public struct Attachment: Codable, Sendable {
         case macAddress
         case mtu
         case variant
+        case aliases
         // TODO: retain for deserialization compatibility for now, remove later
         case address
         case gateway
@@ -91,6 +96,7 @@ public struct Attachment: Codable, Sendable {
         macAddress = try container.decodeIfPresent(MACAddress.self, forKey: .macAddress)
         mtu = try container.decodeIfPresent(UInt32.self, forKey: .mtu)
         variant = try container.decodeIfPresent(String.self, forKey: .variant)
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
     }
 
     /// Encode the configuration to the supplied Encoder.
@@ -105,5 +111,8 @@ public struct Attachment: Codable, Sendable {
         try container.encodeIfPresent(macAddress, forKey: .macAddress)
         try container.encodeIfPresent(mtu, forKey: .mtu)
         try container.encodeIfPresent(variant, forKey: .variant)
+        if !aliases.isEmpty {
+            try container.encode(aliases, forKey: .aliases)
+        }
     }
 }

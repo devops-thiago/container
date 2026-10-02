@@ -959,6 +959,19 @@ public struct Parser {
         }
     }
 
+    /// Parses one `--network-alias` value the way the `alias` property of `--network` is parsed:
+    /// an exact name such as `db` or `api.example.test`, or a name with a leading dot that matches
+    /// every name below it. Returns the normalized form of the rule.
+    public static func networkAlias(_ alias: String) throws -> String {
+        do {
+            return try DNSMatchRule(alias).description
+        } catch {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "invalid network alias '\(alias)': \(error)")
+        }
+    }
+
     /// Parse network attachment with optional properties
     /// Format: network_name[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME]...
     ///

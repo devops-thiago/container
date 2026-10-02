@@ -243,6 +243,7 @@ public struct Utility {
                 builtinNetworkId: builtinNetworkId,
                 networks: parsedNetworks,
                 dnsDomain: containerSystemConfig.dns.domain,
+                aliases: try management.networkAliases.map { try Parser.networkAlias($0) },
             )
             for attachmentConfiguration in config.networks {
                 _ = try await networkClient.get(id: attachmentConfiguration.network)
@@ -306,7 +307,14 @@ public struct Utility {
         builtinNetworkId: String?,
         networks: [Parser.ParsedNetwork],
         dnsDomain: String?,
+        aliases: [String] = [],
     ) throws -> [AttachmentConfiguration] {
+        // An alias given for every network (--network-alias) follows the ones a network
+        // spelled out for itself; a name said twice is one name.
+        func combined(_ own: [String]) -> [String] {
+            var seen = Set<String>()
+            return (own + aliases).filter { seen.insert($0).inserted }
+        }
         // Validate MAC addresses if provided
         for network in networks {
             if let mac = network.macAddress {
@@ -343,7 +351,7 @@ public struct Utility {
             return try networks.enumerated().map { item in
                 let macAddress = try item.element.macAddress.map { try MACAddress($0) }
                 let mtu = item.element.mtu ?? 1280
-                let aliases = try qualifyAliases(item.element.aliases, dnsDomain: dnsDomain)
+                let aliases = try qualifyAliases(combined(item.element.aliases), dnsDomain: dnsDomain)
                 guard item.offset == 0 else {
                     return AttachmentConfiguration(
                         network: item.element.name,
@@ -361,7 +369,10 @@ public struct Utility {
         guard let builtinNetworkId else {
             throw ContainerizationError(.invalidState, message: "builtin network is not present")
         }
-        return [AttachmentConfiguration(network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280))]
+        return [
+            AttachmentConfiguration(
+                network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280, aliases: try qualifyAliases(combined([]), dnsDomain: dnsDomain)))
+        ]
     }
 
     /// Appends the default DNS domain to the aliases that have no domain of their own.
@@ -369,8 +380,8 @@ public struct Utility {
     /// This follows the rule that makes `--name foo` the hostname `foo.test.` when the default domain
     /// is `test`: a name without a dot gets the domain, and a name with a dot is taken to be
     /// qualified already. For a name with a leading dot, which matches every name below it, the rule
-    /// applies to the name after the dot. Without a default domain the aliases are left as they are,
-    /// and the server rejects any that is not fully qualified.
+    /// applies to the name after the dot. Without a default domain the aliases are left as they are;
+    /// a single-label name is kept, as Docker keeps a service name.
     ///
     /// - Parameters:
     ///   - aliases: The aliases of an attachment, in their normalized form.
