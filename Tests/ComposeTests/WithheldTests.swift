@@ -99,6 +99,12 @@ struct WithheldTests {
         let definition = try project.load()
         #expect(definition.unread.map(\.part.description) == ["services.debug", "networks.wide", "volumes.nfs"])
         #expect(definition.unread.first?.errors.map(\.path) == ["services.debug.privileged", "services.debug.env_file", "services.debug.volumes"])
+        #expect(
+            definition.unread.map(\.part.leftOut) == [
+                "services.debug is left out: its profile is off, and it cannot run as written",
+                "networks.wide is left out: no service that runs uses it, and it cannot be made as written",
+                "volumes.nfs is left out: no service that runs uses it, and it cannot be made as written",
+            ])
 
         let rendered = try definition.yaml()
         #expect(rendered == "name: shop\nservices:\n  web:\n    image: web:1\n", "written with it, it would read back as a service with nothing wrong")
