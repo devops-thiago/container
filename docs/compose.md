@@ -120,6 +120,10 @@ merge keys (`<<`) work.
 `container compose config --commands` prints the `container` commands that would make it
 by hand.
 
+`container compose version` prints the version, as `--version` does. `--short` prints the
+number alone and `--format json` prints it as JSON, for a script that checks for compose
+before it uses it.
+
 ## What this engine does differently
 
 A container here is a lightweight virtual machine with its own kernel. Some of what a

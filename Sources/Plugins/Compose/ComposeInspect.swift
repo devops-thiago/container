@@ -19,6 +19,7 @@ import ContainerAPIClient
 import ContainerCommands
 import ContainerCompose
 import ContainerLog
+import ContainerVersion
 import ContainerizationError
 import Darwin
 import Foundation
@@ -258,6 +259,28 @@ struct ComposeExec: AsyncParsableCommand {
         if let user { arguments.append(contentsOf: ["--user", user]) }
         let exec = try Application.ContainerExec.parse(arguments + [container.id] + command)
         try await exec.run()
+    }
+}
+
+struct ComposeVersion: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "version",
+        abstract: "Print the version of compose",
+        discussion: "The same as --version. Scripts written for another compose run it to find out whether compose is there.")
+
+    @ParentCommand var compose: ComposeCommand
+
+    @Flag(name: .long, help: "Print the version number and nothing else")
+    var short = false
+
+    @Option(name: .long, help: "How to print it: pretty or json (also -f, as other compose tools spell it)")
+    var format: ComposeVersionReport.Format?
+
+    func run() {
+        print(
+            ComposeVersionReport.render(
+                line: ReleaseVersion.singleLine(appName: "compose"), version: ReleaseVersion.version(), short: short,
+                format: ComposeVersionReport.format(named: format, files: compose.files)))
     }
 }
 
