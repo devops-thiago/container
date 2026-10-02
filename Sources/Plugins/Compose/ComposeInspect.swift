@@ -307,6 +307,11 @@ struct ComposeConfig: AsyncParsableCommand {
             var seen = Set<String>()
             for service in plan.services where seen.insert(service.image).inserted { print(service.image) }
         } else {
+            // What does not run was not checked, and what is wrong with it is not something
+            // the project printed from it would carry.
+            for (part, errors) in definition.unread {
+                reporter.warn("\(part) does not run as the project is, and is left out: it cannot run as written (\(errors[0]))")
+            }
             print(try definition.yaml(), terminator: "")
         }
     }

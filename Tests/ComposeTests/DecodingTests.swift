@@ -562,12 +562,15 @@ struct KeySupportTests {
               web:
                 image: web:1
                 pid: host
+                secrets: [token]
                 ports:
                   - "eighty"
                 restart: sometimes
+                networks: [wide]
               worker:
                 build: https://github.com/example/worker.git
                 volumes:
+                  - nfs:/data
                   - type: npipe
                     source: pipe
                     target: /pipe
@@ -582,15 +585,15 @@ struct KeySupportTests {
         let errors = loadFailure { try project.load() }
         #expect(
             errors == [
-                "compose.yaml:2:1: secrets: not supported on this engine: mount a folder that holds the file, or pass the value in environment",
                 "compose.yaml:8:5: services.web.pid: not supported on this engine: a container has its own kernel and namespaces",
-                "compose.yaml:10:9: services.web.ports[0]: 'eighty' is not a port mapping: 'eighty' is not a port or a range of ports",
-                "compose.yaml:11:14: services.web.restart: expected no, always, unless-stopped or on-failure[:retries], found 'sometimes'",
-                "compose.yaml:13:12: services.worker.build: not supported on this engine: a build context has to be a folder on this Mac",
-                "compose.yaml:15:9: services.worker.volumes[0].type: not supported on this engine: a mount is a bind, a volume or a tmpfs",
-                "compose.yaml:20:5: networks.wide.driver: not supported on this engine: networks are of one kind, which compose calls bridge",
-                "compose.yaml:23:5: volumes.nfs.driver: not supported on this engine: volumes are local disk images",
-            ], "top to bottom, the way the file reads")
+                "compose.yaml:9:5: services.web.secrets: not supported on this engine: mount a folder that holds the file, or pass the value in environment",
+                "compose.yaml:11:9: services.web.ports[0]: 'eighty' is not a port mapping: 'eighty' is not a port or a range of ports",
+                "compose.yaml:12:14: services.web.restart: expected no, always, unless-stopped or on-failure[:retries], found 'sometimes'",
+                "compose.yaml:15:12: services.worker.build: not supported on this engine: a build context has to be a folder on this Mac",
+                "compose.yaml:18:9: services.worker.volumes[1].type: not supported on this engine: a mount is a bind, a volume or a tmpfs",
+                "compose.yaml:23:5: networks.wide.driver: not supported on this engine: networks are of one kind, which compose calls bridge",
+                "compose.yaml:26:5: volumes.nfs.driver: not supported on this engine: volumes are local disk images",
+            ], "top to bottom, the way the file reads; the secret is refused where a service asks for it")
     }
 
     @Test
@@ -600,6 +603,7 @@ struct KeySupportTests {
             services:
               web:
                 image: web:1
+                networks: [default, back]
             networks:
               default:
                 name: shared-net
@@ -641,8 +645,8 @@ struct KeySupportTests {
         #expect(volumes["theirs"]?.external == true)
         #expect(
             definition.warnings.map(\.description) == [
-                "compose.yaml:11:5: networks.back.attachable: ignored: any container can attach to a network",
-                "compose.yaml:16:11: networks.back.ipam.config[0].gateway: ignored: the gateway is the first address of the subnet",
+                "compose.yaml:12:5: networks.back.attachable: ignored: any container can attach to a network",
+                "compose.yaml:17:11: networks.back.ipam.config[0].gateway: ignored: the gateway is the first address of the subnet",
             ])
     }
 

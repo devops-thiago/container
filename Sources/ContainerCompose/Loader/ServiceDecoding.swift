@@ -33,11 +33,12 @@ extension DecodeContext {
     private static let virtualMachine = "each container runs in its own virtual machine, where only the cpus and memory limits apply"
 
     private static let topLevelKeys: [String: KeySupport] = [
-        "configs": .rejected("mount a folder that holds the file, or pass the value in environment"),
-        "secrets": .rejected("mount a folder that holds the file, or pass the value in environment"),
-        "include": .rejected("name each file with -f instead"),
-        "models": .rejected(""),
+        "include": .rejected("name each file with -f instead")
     ]
+
+    /// Top-level keys that only define what a service can then ask for. A service that asks
+    /// is refused where it does, so the definitions alone stop nothing.
+    private static let definitionKeys = ["configs", "secrets", "models"]
 
     private static let serviceKeys: [String: KeySupport] = [
         "annotations": .ignored("containers carry labels, not annotations"),
@@ -146,21 +147,26 @@ extension DecodeContext {
         // `version` meant something to Compose v1 and is accepted and unused since.
         _ = reader.take("version")
 
+        // What is found in a service, a network or a volume is about that part, and counts
+        // only when the part is one that runs.
         if let services = reader.take("services"), let entries = named(services, "services") {
             for entry in entries {
-                project.services[entry.key] = service(entry.value, name: entry.key, at: entry.keyLocation)
+                project.services[entry.key] = diagnostics.reading(.service(entry.key)) {
+                    service(entry.value, name: entry.key, at: entry.keyLocation)
+                }
             }
         }
         if let networks = reader.take("networks"), let entries = named(networks, "networks") {
             for entry in entries {
-                project.networks[entry.key] = network(entry.value, key: entry.key)
+                project.networks[entry.key] = diagnostics.reading(.network(entry.key)) { network(entry.value, key: entry.key) }
             }
         }
         if let volumes = reader.take("volumes"), let entries = named(volumes, "volumes") {
             for entry in entries {
-                project.volumes[entry.key] = volume(entry.value, key: entry.key)
+                project.volumes[entry.key] = diagnostics.reading(.volume(entry.key)) { volume(entry.value, key: entry.key) }
             }
         }
+        for key in Self.definitionKeys { _ = reader.take(key) }
         reader.finish(known: Self.topLevelKeys)
         return project
     }
