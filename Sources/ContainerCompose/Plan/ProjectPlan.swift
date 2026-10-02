@@ -93,6 +93,15 @@ public struct ServicePlan: Sendable, Equatable {
 
     /// The whole `container run` command line, without the command's own name.
     public var arguments: [String] { options + [image] + command }
+
+    /// The ports the service publishes, as `[address:]host:container[/protocol]`. A port
+    /// that takes whichever host port is free has none before the colon.
+    public var publishedPorts: [String] {
+        ArgumentList.values(of: "--publish", in: options)
+            + ephemeralPorts.map { port in
+                (port.hostIP.map { "\($0):" } ?? "") + ":\(port.target)" + (port.transport == .udp ? "/udp" : "")
+            }
+    }
 }
 
 extension ProjectPlan {

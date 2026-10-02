@@ -1896,7 +1896,7 @@ Creates the project's networks, volumes and containers, and starts the container
 **Usage**
 
 ```bash
-container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recreate] [--no-recreate] [--remove-orphans] [--no-start] [--wait] [<service> ...]
+container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recreate] [--no-recreate] [--remove-orphans] [--no-start] [--wait] [--scheme <scheme>] [<service> ...]
 ```
 
 **Options**
@@ -1910,6 +1910,7 @@ container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recre
 *   `--remove-orphans`: Remove the project's containers that no service accounts for
 *   `--no-start`: Create the containers without starting them
 *   `--wait`: Wait until every service with a health check is healthy; implies `--detach`
+*   `--scheme <scheme>`: Scheme to reach the services' registries with: `http` or `https` (default: `https`)
 
 **Examples**
 
@@ -2023,7 +2024,7 @@ container compose exec -T db pg_dump -U postgres app > backup.sql
 **Usage**
 
 ```bash
-container compose pull [<service> ...]
+container compose pull [--scheme <scheme>] [<service> ...]
 container compose build [<service> ...]
 ```
 

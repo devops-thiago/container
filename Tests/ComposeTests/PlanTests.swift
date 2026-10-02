@@ -391,6 +391,7 @@ struct LoweringTests {
         let (service, _) = try arguments("ports:\n  - \"80\"\n  - \"8443:443\"")
         #expect(service.ephemeralPorts == [ComposePort(published: nil, target: "80")])
         #expect(service.options.filter { $0 == "--publish" }.count == 1)
+        #expect(service.publishedPorts == ["8443:443", ":80"])
     }
 
     @Test
