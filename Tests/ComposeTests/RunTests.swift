@@ -604,6 +604,27 @@ struct LifecycleTests {
     }
 
     @Test
+    func aRunCancelledWhileAContainerIsBeingMadeFinishesMakingIt() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan(Self.stack)
+        let project = run.project()
+        // Held at a gate until the engine knows which task to cancel.
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        let task = Task {
+            for await _ in gate { break }
+            try await project.up(plan)
+        }
+        run.engine.whileCreating = { _ in task.cancel() }
+        open.yield()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(
+            run.engine.calls.filter { $0.hasPrefix("create") } == ["create shop-db-1"],
+            "the container being made is finished, and no other is begun")
+        #expect(run.engine.containerNames == ["shop-db-1"])
+        #expect(!run.engine.calls.contains { $0.hasPrefix("start") })
+    }
+
+    @Test
     func theProjectsContainersAreListedByService() async throws {
         let run = try await running()
         let containers = try await run.project().containers()
