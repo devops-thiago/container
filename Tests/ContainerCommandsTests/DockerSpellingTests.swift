@@ -64,4 +64,48 @@ struct DockerSpellingTests {
         #expect(throws: (any Error).self) { try Application.parseAsRoot(["restart"]) }
         _ = try parse(["container", "restart", "a"], as: Application.ContainerRestart.self)
     }
+
+    @Test("the image verbs are spelled at the root too, with their own flags")
+    func imageVerbs() throws {
+        let images: Application.Images = try parse(["images", "-q"])
+        #expect(images.command.quiet)
+        let pull: Application.Pull = try parse(["pull", "--platform", "linux/arm64", "alpine"])
+        #expect(pull.command.reference == "alpine")
+        let tag: Application.Tag = try parse(["tag", "alpine", "mine/alpine:v1"])
+        #expect(tag.command.source == "alpine")
+        #expect(tag.command.target == "mine/alpine:v1")
+        let remove: Application.RemoveImage = try parse(["rmi", "alpine", "nginx"])
+        #expect(remove.command.options.images == ["alpine", "nginx"])
+        let save: Application.Save = try parse(["save", "-o", "/tmp/a.tar", "alpine"])
+        #expect(save.command.references == ["alpine"])
+        let load: Application.Load = try parse(["load", "-i", "/tmp/a.tar"])
+        #expect(load.command.input == "/tmp/a.tar")
+        _ = try parse(["push", "ghcr.io/me/app:1"], as: Application.Push.self)
+        for spelling in Application.imageRootSpellings {
+            #expect(!spelling.configuration.shouldDisplay, "\(spelling) stays out of the root help")
+        }
+    }
+
+    @Test("image rm is image delete, and image ls takes a repository")
+    func imageSubcommands() throws {
+        _ = try parse(["image", "rm", "alpine"], as: Application.ImageDelete.self)
+        let list: Application.ImageList = try parse(["image", "ls", "alpine"])
+        #expect(list.reference == "alpine")
+        let all: Application.ImageList = try parse(["image", "ls"])
+        #expect(all.reference == nil)
+        let images: Application.Images = try parse(["images", "alpine:3.22"])
+        #expect(images.command.reference == "alpine:3.22")
+    }
+
+    @Test("a repository filter names its tags and nothing that merely starts like it")
+    func imageFilter() {
+        let names = Application.ImageList.names
+        #expect(names("alpine", "docker.io/library/alpine:latest", "alpine:latest"))
+        #expect(names("alpine:latest", "docker.io/library/alpine:latest", "alpine:latest"))
+        #expect(names("docker.io/library/alpine", "docker.io/library/alpine:3.22", "alpine:3.22"))
+        #expect(names("ghcr.io/me/app", "ghcr.io/me/app@sha256:abc", "ghcr.io/me/app@sha256:abc"))
+        #expect(!names("alp", "docker.io/library/alpine:latest", "alpine:latest"))
+        #expect(!names("alpine:3", "docker.io/library/alpine:3.22", "alpine:3.22"))
+        #expect(!names("nginx", "docker.io/library/alpine:latest", "alpine:latest"))
+    }
 }
