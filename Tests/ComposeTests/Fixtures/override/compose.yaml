@@ -1,0 +1,24 @@
+name: shop
+services:
+  web:
+    image: shop/web:1.0
+    command: ["serve", "--port", "8000"]
+    environment:
+      MODE: production
+      LOG_LEVEL: info
+    ports:
+      - "8000:8000"
+    volumes:
+      - assets:/srv/assets
+      - ./public:/srv/public:ro
+    depends_on:
+      - db
+    labels:
+      team: storefront
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+  db:
+    image: postgres:16
+volumes:
+  assets:

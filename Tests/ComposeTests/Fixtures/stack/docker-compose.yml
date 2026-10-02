@@ -1,0 +1,43 @@
+services:
+  app:
+    build: .
+    environment:
+      - ROUTING_API_KEY=${ROUTING_API_KEY}
+      - TRAVEL_TIME=${TRAVEL_TIME:-5} # five minutes unless told otherwise
+      - PDF_URL=http://pdf:3000
+    ports:
+      - "5100:5000"
+    volumes:
+      - ./data:/data:rw
+      - ./templates:/app/templates
+    depends_on:
+      db:
+        condition: service_healthy
+      pdf:
+        condition: service_started
+
+  pdf:
+    image: gotenberg/gotenberg:8
+    ports:
+      - "3100:3000"
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - app
+
+  db:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
