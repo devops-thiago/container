@@ -71,7 +71,7 @@ public struct ComposeProject: Sendable {
                     "the network \(network.name) is declared external and does not exist; create it with: container network create \(network.name)")
             }
             hooks.event(ComposeEvent(.network, network.name, .creating))
-            try await engine.createNetwork(network)
+            try await finishing { try await engine.createNetwork(network) }
             hooks.event(ComposeEvent(.network, network.name, .created))
         }
         for volume in plan.volumes where !(try await engine.volumeExists(volume.name)) {
@@ -80,7 +80,7 @@ public struct ComposeProject: Sendable {
                     "the volume \(volume.name) is declared external and does not exist; create it with: container volume create \(volume.name)")
             }
             hooks.event(ComposeEvent(.volume, volume.name, .creating))
-            try await engine.createVolume(volume)
+            try await finishing { try await engine.createVolume(volume) }
             hooks.event(ComposeEvent(.volume, volume.name, .created))
         }
 
@@ -117,8 +117,10 @@ public struct ComposeProject: Sendable {
                 digests[service.image] = digest
             } else if policy == .always {
                 hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulling))
-                digests[service.image] = try await engine.pullImage(
-                    service.image, platform: service.platform, progress: hooks.progress(service.service))
+                let progress = hooks.progress(service.service)
+                digests[service.image] = try await finishing {
+                    try await engine.pullImage(service.image, platform: service.platform, progress: progress)
+                }
                 hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulled))
             } else {
                 digests[service.image] = try await engine.imageDigest(service.image)
@@ -160,10 +162,13 @@ public struct ComposeProject: Sendable {
                 let changed = current.configHash != service.configHash || current.id != service.containerName || imageChanged
                 guard options.forceRecreate || (changed && !options.noRecreate) else { continue }
                 hooks.event(ComposeEvent(.container, current.id, service: service.service, .recreating))
-                if current.state != .stopped {
-                    try await engine.stopContainer(current.id, timeout: current.stopTimeout ?? defaultStopTimeout)
+                let timeout = current.stopTimeout ?? defaultStopTimeout
+                try await finishing {
+                    if current.state != .stopped {
+                        try await engine.stopContainer(current.id, timeout: timeout)
+                    }
+                    try await engine.removeContainer(current.id)
                 }
-                try await engine.removeContainer(current.id)
             } else {
                 hooks.event(ComposeEvent(.container, service.containerName, service: service.service, .creating))
             }
@@ -186,13 +191,23 @@ public struct ComposeProject: Sendable {
                 let free = try await engine.freeHostPort()
                 arguments.append(contentsOf: ["--publish", ServiceLowering.publishSpecification(port, published: "\(free)")])
             }
-            try await engine.createContainer(
-                ContainerRequest(
-                    name: service.containerName, image: service.image, options: arguments, command: service.command,
-                    stopSignal: service.stopSignal),
-                progress: hooks.progress(service.service))
+            let request = ContainerRequest(
+                name: service.containerName, image: service.image, options: arguments, command: service.command,
+                stopSignal: service.stopSignal)
+            let progress = hooks.progress(service.service)
+            try await finishing { try await engine.createContainer(request, progress: progress) }
             hooks.event(ComposeEvent(.container, service.containerName, service: service.service, .created))
         }
+    }
+
+    /// Runs engine work that changes something to its end, whatever becomes of the run.
+    ///
+    /// The engine's calls give up when the task they are in is cancelled, and a container
+    /// abandoned halfway through being made is worse than one made a moment late. So the
+    /// work goes in a task of its own: a cancelled run waits for it, and stops at its
+    /// next step.
+    private func finishing<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await Task { try await work() }.value
     }
 
     /// `options` with its `--pull` taken out and, when a policy is given, that one put in.
@@ -328,7 +343,7 @@ public struct ComposeProject: Sendable {
         }
         hooks.event(ComposeEvent(.container, container, service: service, .starting))
         do {
-            try await engine.startContainer(container)
+            try await finishing { try await engine.startContainer(container) }
         } catch {
             hooks.event(ComposeEvent(.container, container, service: service, .failed, detail: "\(error)"))
             throw error
