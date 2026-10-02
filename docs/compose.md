@@ -125,12 +125,13 @@ by hand.
 A container here is a lightweight virtual machine with its own kernel. Some of what a
 compose file can ask for has no meaning for one, and some works differently.
 
-Keys the engine cannot honour stop the command, and the message names the key and its
-line: `privileged`, `devices`, `gpus`, `network_mode`, `pid`, `ipc`, `uts`, `cgroup`,
-`userns_mode`, `secrets`, `configs`, `extends`, `volumes_from`, `runtime`, lifecycle
-hooks, a static `ipv4_address`, more than one replica, a network or volume driver other
-than the default, and a build from a remote context. A key `compose` does not know at all
-is reported as such, so a typo is not taken for something unsupported.
+Keys the engine cannot honour stop the command when they are in something that would run
+(see [Profiles](#profiles)), and the message names the key and its line: `privileged`,
+`devices`, `gpus`, `network_mode`, `pid`, `ipc`, `uts`, `cgroup`, `userns_mode`,
+`secrets`, `configs`, `extends`, `volumes_from`, `runtime`, lifecycle hooks, a static
+`ipv4_address`, more than one replica, a network or volume driver other than the default,
+and a build from a remote context. A key `compose` does not know at all is reported as
+such, so a typo is not taken for something unsupported.
 
 Keys that change nothing a container here could notice are ignored with a warning:
 `logging`, `security_opt`, `expose`, `links`, `stdin_open`, `cgroup_parent`, the CPU
@@ -168,3 +169,10 @@ same build and image are built once.
 A service with `profiles` is left out unless one of its profiles is turned on with
 `--profile` or `COMPOSE_PROFILES`, or the service is named on the command line.
 `--profile "*"` turns on all of them.
+
+What is left out is not checked. A key this engine cannot honour, an env file that is not
+there, or a mistake in a service whose profiles are off does not stop the project, and
+nothing is said about it; the same goes for a network or a volume that only such services
+use, or that no service uses. Turning the profile on, or naming the service, checks it.
+`container compose --profile "*" config -q` checks every service. `config` leaves out of
+what it prints a part that is not checked and has something wrong with it, and says so.
