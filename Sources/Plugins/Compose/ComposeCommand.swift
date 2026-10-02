@@ -61,6 +61,7 @@ struct ComposeCommand: AsyncParsableCommand {
             ComposeBuild.self,
             ComposeExec.self,
             ComposeConfig.self,
+            ComposeVersion.self,
         ]
     )
 
