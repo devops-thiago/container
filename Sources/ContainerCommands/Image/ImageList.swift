@@ -44,12 +44,21 @@ extension Application {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        @Argument(help: "Only list this repository, or this repository:tag")
+        var reference: String?
+
         public mutating func run() async throws {
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
             try Self.validate(quiet: quiet, verbose: verbose)
 
             var images = try await ClientImage.list().filter { img in
                 !Utility.isInfraImage(name: img.reference, builderImage: containerSystemConfig.build.image, initImage: containerSystemConfig.vminit.image)
+            }
+            if let reference {
+                images = try images.filter { image in
+                    let displayed = try ClientImage.denormalizeReference(image.reference, containerSystemConfig: containerSystemConfig)
+                    return Self.names(reference, image: image.reference, displayed: displayed)
+                }
             }
             images.sort { $0.reference < $1.reference }
 
@@ -70,6 +79,15 @@ extension Application {
                     return Output.renderTable(resources.flatMap { VerboseImageRow.rows(for: $0) })
                 }
                 return Output.renderTable(resources)
+            }
+        }
+
+        /// Whether `filter` names an image: its repository, in the spelling the list prints or
+        /// the full one, with or without the tag. `alpine` is every tag of alpine and
+        /// `alpine:3.22` that one; `alp` is neither.
+        static func names(_ filter: String, image reference: String, displayed: String) -> Bool {
+            [reference, displayed].contains { name in
+                name == filter || name.hasPrefix(filter + ":") || name.hasPrefix(filter + "@")
             }
         }
 
