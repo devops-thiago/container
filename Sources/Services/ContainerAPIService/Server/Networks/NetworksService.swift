@@ -19,6 +19,7 @@ import ContainerNetworkClient
 import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
+import ContainerXPC
 import Containerization
 import ContainerizationError
 import ContainerizationExtras
@@ -47,6 +48,11 @@ public actor NetworksService {
 
     private let stateLock = AsyncLock()
     private var serviceStates = [String: NetworkEntry]()
+
+    /// One open session per attachment of every container that exists, started or not. The
+    /// network helper keeps an address for as long as a session holds its hostname, so the
+    /// container has its address, and its peers have its name, from create to delete.
+    private var reservations = [String: [XPCClientSession]]()
 
     public init(
         pluginLoader: PluginLoader,
@@ -133,6 +139,53 @@ public actor NetworksService {
         } catch {
             log.error("failed to create default network: \(error)")
         }
+    }
+
+    /// Hold an address for each of a container's attachments until `releaseAddresses`.
+    ///
+    /// Called at create, and again for every container when the engine starts, since a
+    /// helper that was restarted has forgotten what it handed out. Doing it twice for one
+    /// container is harmless.
+    public func reserveAddresses(for container: String, attachments: [AttachmentConfiguration]) async throws {
+        guard reservations[container] == nil, !attachments.isEmpty else { return }
+        var sessions: [XPCClientSession] = []
+        do {
+            for attachment in attachments {
+                // A network that is not up yet is not this container's failure: its runtime
+                // allocates at start, as it always has, and the next engine start reserves.
+                guard let entry = serviceStates[attachment.network] else {
+                    log.info("network not running; address not reserved", metadata: ["id": "\(container)", "network": "\(attachment.network)"])
+                    continue
+                }
+                let session = entry.client.connect()
+                sessions.append(session)
+                do {
+                    _ = try await entry.client.allocate(
+                        hostname: attachment.options.hostname,
+                        macAddress: attachment.options.macAddress,
+                        aliases: attachment.options.aliases,
+                        on: session)
+                } catch {
+                    throw ContainerizationError(
+                        .invalidState,
+                        message:
+                            "network \(attachment.network) has no address to give \(container): every address of its subnet may be held by a container; delete one, or use a network with a larger subnet",
+                        cause: error)
+                }
+            }
+        } catch {
+            for session in sessions { session.close() }
+            throw error
+        }
+        reservations[container] = sessions
+        log.info("reserved addresses", metadata: ["id": "\(container)", "attachments": "\(attachments.count)"])
+    }
+
+    /// Give back the addresses held for a container that no longer exists.
+    public func releaseAddresses(for container: String) {
+        guard let sessions = reservations.removeValue(forKey: container) else { return }
+        for session in sessions { session.close() }
+        log.info("released addresses", metadata: ["id": "\(container)"])
     }
 
     /// List all networks registered with the service.
