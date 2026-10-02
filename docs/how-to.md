@@ -18,6 +18,7 @@
 - [Multiplatform images](./multiplatform-images.md) — build, run, and publish images that support both Apple silicon and x86-64.
 - [Inspecting containers and images](./container-inspection.md) — machine-readable `inspect` and `list` output for scripting.
 - [Logs](./logs.md) — container output, VM boot logs, and the `container` system's own logs.
+- [Compose files](./compose.md) — run the services a compose file describes, with their network, volumes and start order.
 - [`config.toml` reference](./container-system-config.md) — every configuration key, its default, and how to view your merged configuration.
 - [Container machines](./container-machine.md) — persistent Linux environments built from OCI images, with your home directory mounted in and the filesystem surviving stop/start.
 - [Kubernetes clusters](./kubernetes.md) — run local single-node Kubernetes clusters for development and testing, load your own images, and test deployments before production.
