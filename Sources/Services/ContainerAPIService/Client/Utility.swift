@@ -236,6 +236,7 @@ public struct Utility {
                 builtinNetworkId: builtinNetworkId,
                 networks: parsedNetworks,
                 dnsDomain: containerSystemConfig.dns.domain,
+                aliases: try management.networkAliases.map { try Parser.networkAlias($0) },
             )
             for attachmentConfiguration in config.networks {
                 _ = try await networkClient.get(id: attachmentConfiguration.network)
@@ -301,7 +302,14 @@ public struct Utility {
         builtinNetworkId: String?,
         networks: [Parser.ParsedNetwork],
         dnsDomain: String?,
+        aliases: [String] = [],
     ) throws -> [AttachmentConfiguration] {
+        // An alias given for every network (--network-alias) follows the ones a network
+        // spelled out for itself; a name said twice is one name.
+        func combined(_ own: [String]) -> [String] {
+            var seen = Set<String>()
+            return (own + aliases).filter { seen.insert($0).inserted }
+        }
         // Validate MAC addresses if provided
         for network in networks {
             if let mac = network.macAddress {
@@ -338,15 +346,16 @@ public struct Utility {
             return try networks.enumerated().map { item in
                 let macAddress = try item.element.macAddress.map { try MACAddress($0) }
                 let mtu = item.element.mtu ?? 1280
+                let names = combined(item.element.aliases)
                 guard item.offset == 0 else {
                     return AttachmentConfiguration(
                         network: item.element.name,
-                        options: AttachmentOptions(hostname: containerId, macAddress: macAddress, mtu: mtu)
+                        options: AttachmentOptions(hostname: containerId, macAddress: macAddress, mtu: mtu, aliases: names)
                     )
                 }
                 return AttachmentConfiguration(
                     network: item.element.name,
-                    options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: macAddress, mtu: mtu)
+                    options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: macAddress, mtu: mtu, aliases: names)
                 )
             }
         }
@@ -355,7 +364,10 @@ public struct Utility {
         guard let builtinNetworkId else {
             throw ContainerizationError(.invalidState, message: "builtin network is not present")
         }
-        return [AttachmentConfiguration(network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280))]
+        return [
+            AttachmentConfiguration(
+                network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280, aliases: combined([])))
+        ]
     }
 
     private static func getKernel(management: Flags.Management) async throws -> Kernel {

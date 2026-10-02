@@ -42,9 +42,14 @@ public actor NetworkHarness: Sendable {
             try message.string(key: NetworkKeys.macAddress.rawValue)
             .map { try MACAddress($0) }
 
+        let aliases =
+            message.string(key: NetworkKeys.aliases.rawValue)?
+            .split(separator: ",").map(String.init) ?? []
+
         let (attachment:attachment, additionalData:additionalData) = try await service.allocate(
             hostname: hostname,
             macAddress: macAddress,
+            aliases: aliases,
             session: session
         )
 
