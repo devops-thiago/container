@@ -30,6 +30,7 @@ extension Application {
                 SystemLogs.self,
                 SystemProperty.self,
                 SystemPrune.self,
+                SystemRelay.self,
                 SystemStart.self,
                 SystemStatus.self,
                 SystemStop.self,
