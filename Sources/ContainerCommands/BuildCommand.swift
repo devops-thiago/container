@@ -434,7 +434,7 @@ extension Application {
                                 }
                                 for image in result.images {
                                     try Task.checkCancellation()
-                                    try await image.unpack(platform: nil, progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
+                                    try await image.unpackForHost(progressUpdate: ProgressTaskCoordinator.handler(for: unpackTask, from: unpackProgress.handler))
 
                                     // Tag the unpacked image with all requested tags
                                     for tagName in imageNames {
