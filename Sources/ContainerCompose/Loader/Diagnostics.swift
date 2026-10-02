@@ -96,6 +96,25 @@ extension ComposeDiagnostic {
     }
 }
 
+/// A part of a project that is made only when something that runs uses it: a service, and
+/// the networks and volumes services name.
+public enum ComposePart: Sendable, Hashable, CustomStringConvertible {
+    case service(String)
+    /// By the key the files know the network by.
+    case network(String)
+    /// By the key the files know the volume by.
+    case volume(String)
+
+    /// The part as a path in the files: `services.web`.
+    public var description: String {
+        switch self {
+        case .service(let name): "services.\(name)"
+        case .network(let key): "networks.\(key)"
+        case .volume(let key): "volumes.\(key)"
+        }
+    }
+}
+
 /// A compose file, or a set of them, that cannot be run as written. Carries every reason
 /// found, not the first: a file with three unsupported keys says so once.
 public struct ComposeError: Error, Sendable, CustomStringConvertible, LocalizedError {
@@ -120,15 +139,53 @@ public struct ComposeError: Error, Sendable, CustomStringConvertible, LocalizedE
 final class DiagnosticCollector {
     private(set) var warnings: [ComposeDiagnostic] = []
     private(set) var errors: [ComposeDiagnostic] = []
+    /// The part being read, when one is.
+    private var part: ComposePart?
+    /// The part each diagnostic is about, for the ones that are about one.
+    private var parts: [ComposeDiagnostic: ComposePart] = [:]
 
     func warn(_ path: String, _ message: String, at location: SourceLocation? = nil) {
-        let diagnostic = ComposeDiagnostic(severity: .warning, path: path, message: message, location: location)
-        if !warnings.contains(diagnostic) { warnings.append(diagnostic) }
+        add(ComposeDiagnostic(severity: .warning, path: path, message: message, location: location))
     }
 
     func error(_ path: String, _ message: String, at location: SourceLocation? = nil) {
-        let diagnostic = ComposeDiagnostic(severity: .error, path: path, message: message, location: location)
-        if !errors.contains(diagnostic) { errors.append(diagnostic) }
+        add(ComposeDiagnostic(severity: .error, path: path, message: message, location: location))
+    }
+
+    /// Take a diagnostic as it is: one found earlier, about something that is used after all.
+    func add(_ diagnostic: ComposeDiagnostic) {
+        switch diagnostic.severity {
+        case .warning:
+            guard !warnings.contains(diagnostic) else { return }
+            warnings.append(diagnostic)
+        case .error:
+            guard !errors.contains(diagnostic) else { return }
+            errors.append(diagnostic)
+        }
+        if let part { parts[diagnostic] = part }
+    }
+
+    /// Run `body` with what it reports marked as being about `part`.
+    func reading<T>(_ part: ComposePart, _ body: () -> T) -> T {
+        let outer = self.part
+        self.part = part
+        defer { self.part = outer }
+        return body()
+    }
+
+    /// Take out what was found about the parts `unused` says nothing uses, and return it by
+    /// part, in the order someone reading the files meets it. What is left is about the
+    /// project, or about a part of it that runs.
+    func withhold(where unused: (ComposePart) -> Bool) -> [ComposePart: [ComposeDiagnostic]] {
+        var withheld: [ComposePart: [ComposeDiagnostic]] = [:]
+        for diagnostic in Self.inFileOrder(errors + warnings) {
+            guard let part = parts[diagnostic], unused(part) else { continue }
+            withheld[part, default: []].append(diagnostic)
+        }
+        let taken = Set(withheld.values.joined())
+        errors.removeAll(where: taken.contains)
+        warnings.removeAll(where: taken.contains)
+        return withheld
     }
 
     /// Throw what was found, if any of it stops the project from running.

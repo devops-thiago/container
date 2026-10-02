@@ -20,14 +20,21 @@ import Yams
 extension ComposeDefinition {
     /// The project as one compose file: the files merged, their variables substituted, and
     /// every short form spelled out. Reading it back gives the same project.
+    ///
+    /// A part in `unread` is left out. What is wrong with it is not in the model, so written
+    /// from the model it would read back as a part with nothing wrong.
     public func yaml() throws -> String {
+        let left = Set(unread.map(\.part))
+        let services = file.services.filter { !left.contains(.service($0.name)) }
+        let networks = file.networks.filter { !left.contains(.network($0.key)) }
+        let volumes = file.volumes.filter { !left.contains(.volume($0.key)) }
         var root: [String: Any] = ["name": name]
-        root["services"] = Dictionary(uniqueKeysWithValues: file.services.map { ($0.name, Self.node(for: $0) as Any) })
-        if !file.networks.isEmpty {
-            root["networks"] = Dictionary(uniqueKeysWithValues: file.networks.map { ($0.key, Self.node(for: $0) as Any) })
+        root["services"] = Dictionary(uniqueKeysWithValues: services.map { ($0.name, Self.node(for: $0) as Any) })
+        if !networks.isEmpty {
+            root["networks"] = Dictionary(uniqueKeysWithValues: networks.map { ($0.key, Self.node(for: $0) as Any) })
         }
-        if !file.volumes.isEmpty {
-            root["volumes"] = Dictionary(uniqueKeysWithValues: file.volumes.map { ($0.key, Self.node(for: $0) as Any) })
+        if !volumes.isEmpty {
+            root["volumes"] = Dictionary(uniqueKeysWithValues: volumes.map { ($0.key, Self.node(for: $0) as Any) })
         }
         return try Yams.dump(object: Self.prepared(root), indent: 2, width: -1, allowUnicode: true)
     }
