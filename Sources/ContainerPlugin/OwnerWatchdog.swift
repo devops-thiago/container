@@ -81,6 +81,11 @@ public actor OwnerWatchdog {
     /// Whether the engine is embedded in an app whose life it should follow at all.
     public static var isEnforceable: Bool { ServiceIdentity.hostAppBundleIdentifier != nil }
 
+    /// Whether the app this engine is embedded in is running right now. False when there is no
+    /// such app, where the watchdog's own check answers true so a standalone install keeps
+    /// running: this one decides whether an answer from the app is worth waiting for.
+    public static var embeddingAppIsRunning: Bool { isEnforceable && hostAppIsRunning() }
+
     /// Ask Launch Services whether the host app is running.
     ///
     /// Deliberately *not* `NSWorkspace.shared.runningApplications`: that array is a
