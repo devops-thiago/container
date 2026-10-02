@@ -155,4 +155,38 @@ struct AttachmentAllocatorTest {
         let secondDeallocate = try await allocator.deallocate(hostname: "test-host")
         #expect(secondDeallocate == nil)
     }
+
+    @Test func testAddressIsKeptUntilItsLastHolderLetsGo() async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 10)
+
+        // The engine holds the address from create; the runtime holds it while it runs.
+        let reserved = try await allocator.allocate(hostname: "web")
+        let running = try await allocator.allocate(hostname: "web")
+        #expect(reserved == running)
+
+        // The container stops: its runtime lets go, the address stays where it was.
+        #expect(try await allocator.deallocate(hostname: "web") == nil)
+        #expect(try await allocator.lookup(hostname: "web") == reserved)
+        #expect(await allocator.allocations() == ["web": reserved])
+
+        // It starts again and gets the same address, then is deleted while stopped.
+        #expect(try await allocator.allocate(hostname: "web") == reserved)
+        #expect(try await allocator.deallocate(hostname: "web") == nil)
+        #expect(try await allocator.deallocate(hostname: "web") == reserved)
+        #expect(try await allocator.lookup(hostname: "web") == nil)
+        #expect(try await allocator.deallocate(hostname: "web") == nil)
+    }
+
+    @Test func testAFreedAddressIsNotHandedOutWhileAnotherHostnameHoldsIts() async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 2)
+        let first = try await allocator.allocate(hostname: "a")
+        let second = try await allocator.allocate(hostname: "b")
+        #expect(first != second)
+        // The pool is spent: a third container is refused instead of sharing an address.
+        await #expect(throws: (any Error).self) { try await allocator.allocate(hostname: "c") }
+        // Deleting one frees exactly its address for the next.
+        #expect(try await allocator.deallocate(hostname: "a") == first)
+        #expect(try await allocator.allocate(hostname: "c") == first)
+        #expect(try await allocator.lookup(hostname: "b") == second)
+    }
 }
