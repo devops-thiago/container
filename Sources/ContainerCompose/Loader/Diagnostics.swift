@@ -113,6 +113,15 @@ public enum ComposePart: Sendable, Hashable, CustomStringConvertible {
         case .volume(let key): "volumes.\(key)"
         }
     }
+
+    /// Why the part is not in a project written out from what was read, for one that was
+    /// held back with something wrong with it.
+    public var leftOut: String {
+        switch self {
+        case .service: "\(self) is left out: its profile is off, and it cannot run as written"
+        case .network, .volume: "\(self) is left out: no service that runs uses it, and it cannot be made as written"
+        }
+    }
 }
 
 /// A compose file, or a set of them, that cannot be run as written. Carries every reason
