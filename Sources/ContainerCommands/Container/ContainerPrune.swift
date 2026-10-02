@@ -32,6 +32,9 @@ extension Application {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        @OptionGroup
+        var confirmation: PruneConfirmation
+
         public func run() async throws {
             let client = ContainerClient()
             let filters = ContainerListFilters(status: .stopped).withoutMachines()

@@ -29,6 +29,9 @@ extension Application.NetworkCommand {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        @OptionGroup
+        var confirmation: PruneConfirmation
+
         public func run() async throws {
             let networkClient = NetworkClient()
             let client = ContainerClient()

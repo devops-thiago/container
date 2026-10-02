@@ -108,4 +108,39 @@ struct DockerSpellingTests {
         #expect(!names("alpine:3", "docker.io/library/alpine:3.22", "alpine:3.22"))
         #expect(!names("nginx", "docker.io/library/alpine:latest", "alpine:latest"))
     }
+
+    @Test("every prune takes -f and --force, which change nothing")
+    func pruneForce() throws {
+        let containers: Application.ContainerPrune = try parse(["prune", "-f"])
+        #expect(containers.confirmation.force)
+        let images: Application.ImagePrune = try parse(["image", "prune", "-f", "-a"])
+        #expect(images.all && images.confirmation.force)
+        let volumes: Application.VolumeCommand.VolumePrune = try parse(["volume", "prune", "--force"])
+        #expect(volumes.confirmation.force)
+        if #available(macOS 26, *) {
+            _ = try parse(["network", "prune", "-f"], as: Application.NetworkCommand.NetworkPrune.self)
+        }
+        let plain: Application.ContainerPrune = try parse(["prune"])
+        #expect(!plain.confirmation.force)
+        #expect(!Application.ContainerPrune.helpMessage().contains("--force"), "the flag does nothing, so help does not list it")
+    }
+
+    @Test("system prune is the prune commands in order, volumes only when asked")
+    func systemPrune() throws {
+        let prune: Application.SystemPrune = try parse(["system", "prune", "-f", "-a", "--volumes"])
+        #expect(prune.all && prune.volumes && prune.confirmation.force)
+        typealias Prune = Application.SystemPrune
+        #expect(Prune.steps(all: false, volumes: false, networks: true) == [["prune"], ["network", "prune"], ["image", "prune"]])
+        #expect(Prune.steps(all: true, volumes: true, networks: true) == [["prune"], ["network", "prune"], ["image", "prune", "--all"], ["volume", "prune"]])
+        #expect(Prune.steps(all: false, volumes: false, networks: false) == [["prune"], ["image", "prune"]])
+        #expect(
+            Prune.steps(all: true, volumes: true, debug: true, networks: false) == [
+                ["prune", "--debug"], ["image", "prune", "--debug", "--all"], ["volume", "prune", "--debug"],
+            ])
+        // Every step is a command line this CLI parses, so none can go to a plugin lookup.
+        for step in Prune.steps(all: true, volumes: true, debug: true) {
+            let command = try Application.parseAsRoot(step)
+            #expect(!(command is DefaultCommand), "\(step)")
+        }
+    }
 }
