@@ -1668,6 +1668,19 @@ struct ParserTest {
         #expect(result["key99"] == "value99")
     }
 
+    @Test("a label's value is everything after the first equals sign")
+    func testLabelValueMayHoldEqualsSigns() throws {
+        let result = try Parser.labels([
+            "plain=value", "query=http://example.com/?a=1&b=2", "trailing=x=", "bare", "empty=",
+        ])
+        #expect(
+            result == [
+                "plain": "value", "query": "http://example.com/?a=1&b=2", "trailing": "x=", "bare": "", "empty": "",
+            ])
+        #expect(throws: ContainerizationError.self) { try Parser.labels(["=value"]) }
+        #expect(throws: ContainerizationError.self) { try Parser.labels([""]) }
+    }
+
     @Test("resolve with large input preserves all entries")
     func testParseKeyValuePairsLargeInput() {
         let pairs = (0..<100).map { "key\($0)=value\($0)" }
