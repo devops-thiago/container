@@ -115,50 +115,45 @@ container volume prune
 container network prune
 ```
 
-## Replacing a compose file
+## Running a compose file
 
-There is no `container compose` in SiliconShip 1.3.0. A small stack can be translated into
-explicit `container run` commands, but that script does not implement Compose semantics.
-The [migration roadmap](https://github.com/devops-thiago/SiliconShip/issues/235) separates
-what ships now from planned work:
-
-| Release | Planned capability |
-|---|---|
-| 1.3.0 | Migration report, image archives, and the flags described above |
-| 1.4.0 | Native `container compose` commands and in-app Compose startup with dependency health gates |
-| 1.5.0 | Engine restart supervision, live health, dynamic guest name resolution, and single-file bind mounts |
-| 1.6.0 | Engine API compatibility for the user's Docker CLI, Docker Compose, Testcontainers and IDE integrations |
-
-Those later capabilities are plans, not commands available in the 1.3.0 binary. The user
-migration guide is at [siliconship.app/docker](https://siliconship.app/docker).
-
-A container's hosts file is written when it starts, with the name and address of every
-container that exists on its networks, started or not. A container holds its address from
-create to delete, so stopping and starting one does not move it. Create the containers of a
-stack before starting any of them and the start order stops mattering for names; waiting for
-a dependency to be ready is still the script's job. A container created after its consumer
-started is unknown to that consumer until the consumer restarts: existing guests do not
-receive live updates, which is tracked in
-[SiliconShip#188](https://github.com/devops-thiago/SiliconShip/issues/188). Because a stopped
-container keeps its address, a network runs out when every address of its subnet belongs to
-a container that exists; `container create` then fails and says so.
-
-**Do not reach for `container network create` here.** Name lookup between containers works on
-the `default` network with a domain-qualified name. It does *not* work for containers on a
-custom network — that gap is tracked as
-[apple/container#1809](https://github.com/apple/container/issues/1809). A custom network is
-for *isolating* containers; if you use one, wire the containers together by IP from
-`container inspect <name>`, not by name.
-
-Set up name resolution once (all three steps — see SKILL.md):
+`container compose` reads the compose files `docker compose` reads and runs each service as a
+container on a network of the project's own: `up`, `down`, `ps`, `logs`, `exec`, `start`,
+`stop`, `restart`, `pull`, `build` and `config`, with `-f`, `-p`, `--profile` and `--env-file`
+in front of the subcommand. `docs/compose.md` describes all of it.
 
 ```bash
-# [dns] domain = "test" in ~/.config/container/config.toml
-container system stop && container system start
-sudo container system dns create test
+container compose up -d      # networks, volumes, containers, started in dependency order
+container compose ps
+container compose logs -f web
+container compose exec db psql -U postgres
+container compose down       # containers and networks; volumes stay unless -v
 ```
 
-Then translate the file. This compose file:
+What carries over as written: `image`, `build`, `command`, `entrypoint`, `environment`,
+`env_file`, `${VAR:-default}` substitution with `.env`, `ports`, `volumes` for folders and
+named volumes, `depends_on` with its three conditions, `healthcheck` as what
+`service_healthy` waits for, `networks` with aliases, `profiles`, override files and `-f`
+merges, YAML anchors, and the resource, capability, DNS and `extra_hosts` settings.
+
+What to change in a file written for another engine:
+
+- A file mounted into a container (`./nginx.conf:/etc/nginx/nginx.conf`) is refused: mount
+  the folder that holds it. Single-file mounts are planned for 1.5.0.
+- Two services that mount the same named volume cannot run at the same time: a volume is a
+  disk that one running container holds. `compose` warns about such a pair. Services that
+  run together share files through a folder mounted into each.
+- `privileged`, `devices`, `network_mode`, `pid`, `ipc`, `secrets`, `configs`, `extends` and
+  `volumes_from` stop the command, which names the key and its line. `logging`,
+  `security_opt`, `expose`, `links` and the CPU-scheduling keys are ignored with a warning.
+- `restart` is recorded with the container and applied by the SiliconShip app when it starts
+  the engine. A container that exits is not started again until the engine supervisor
+  planned for 1.5.0.
+- A health check built into an image is not read. Put a `healthcheck` on the service that
+  others wait for.
+
+`container compose config --commands` prints the `container` commands a project comes to.
+For this file:
 
 ```yaml
 services:
@@ -174,50 +169,38 @@ services:
     depends_on: [db]
 ```
 
-becomes:
+in a directory named `shop`, it prints (labels left out here):
 
 ```bash
-#!/bin/bash
-set -euo pipefail
-
-# no --network flag: both containers land on `default`, where name lookup works
-container run -d --name db \
-  -e POSTGRES_PASSWORD=secret \
-  postgres:16
-
-# depends_on becomes an explicit readiness check
-until container exec db pg_isready -q; do sleep 1; done
-
-# db.test, not db — the name must be domain-qualified
-container run -d --name web -p 8080:80 \
-  -e DATABASE_URL=postgres://postgres:secret@db.test:5432/postgres \
-  my-app:latest
+container network create shop_default
+container run --detach --name shop-db-1 --network shop_default,alias=db \
+  --env POSTGRES_PASSWORD=secret postgres:16
+container run --detach --name shop-web-1 --network shop_default,alias=web --publish 8080:80 \
+  --env DATABASE_URL=postgres://postgres:secret@db:5432/postgres my-app:latest
 ```
 
-Teardown:
+`web` reaches the database as `db`: a service is a name on each of its networks. A
+container's hosts file is written when it starts, with the name and address of every
+container that exists on its networks, started or not, and a container holds its address
+from create to delete. `compose up` creates every container before it starts the first, so
+each service resolves every other one whatever the start order. A container created after
+another started is unknown to that one until it restarts: existing guests do not receive
+live updates, which is tracked in
+[SiliconShip#188](https://github.com/devops-thiago/SiliconShip/issues/188). Because a stopped
+container keeps its address, a network runs out when every address of its subnet belongs to
+a container that exists; `container create` then fails and says so.
 
-```bash
-container stop web db
-container delete web db
-```
+The [migration roadmap](https://github.com/devops-thiago/SiliconShip/issues/235) has what
+comes next:
 
-Mapping notes:
+| Release | Capability |
+|---|---|
+| 1.3.0 | Migration report, image archives, and the flags described above |
+| 1.4.0 | `container compose`, and compose files in the app, with dependency health gates |
+| 1.5.0 | Planned: engine restart supervision, live health, dynamic guest name resolution, single-file bind mounts |
+| 1.6.0 | Planned: Engine API compatibility for the user's Docker CLI, Docker Compose, Testcontainers and IDE integrations |
 
-- `depends_on` has no declarative form here. Compose can wait for health with
-  `condition: service_healthy`; a hand-written script needs its own readiness checks and
-  teardown/error handling to approximate that behavior.
-- The example references the dependency as `<name>.<domain>` (`db.test`). The fork also
-  installs the bare hostname of every container that exists on the network when the consumer
-  starts, on custom networks too. Neither spelling makes those entries dynamic; readiness and
-  restart handling still matter.
-- `ports:` → `-p`. Often unnecessary between containers, since each container has its own IP
-  and is reachable without publishing. You need `-p` to reach a service from a host browser or
-  a macOS-native tool.
-- `volumes:` → `-v` for bind mounts, or `container volume create` plus `-v <name>:<path>`.
-- `build:` → a `container build -t <name> .` line before the `run`.
-- `restart:` can be carried as `--restart`, but 1.3.0 only persists it and applies the app's
-  engine-start pass. It is not Compose's exit-driven supervision. Keep recovery explicit in
-  scripts until the planned 1.5.0 engine supervisor is available.
+The user migration guide is at [siliconship.app/docker](https://siliconship.app/docker).
 
 ## Features with no Docker counterpart
 
