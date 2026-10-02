@@ -312,15 +312,16 @@ public struct Parser {
             if label.isEmpty {
                 throw ContainerizationError(.invalidArgument, message: "label cannot be an empty string")
             }
-            let parts = label.split(separator: "=", maxSplits: 2)
-            switch parts.count {
-            case 1:
-                result[String(parts[0])] = ""
-            case 2:
-                result[String(parts[0])] = String(parts[1])
-            default:
+            // The key is what comes before the first "=", and the value is everything
+            // after it: a value may hold "=" itself, as a URL with a query does.
+            guard let equals = label.firstIndex(of: "=") else {
+                result[label] = ""
+                continue
+            }
+            guard equals != label.startIndex else {
                 throw ContainerizationError(.invalidArgument, message: "invalid label format \(label)")
             }
+            result[String(label[..<equals])] = String(label[label.index(after: equals)...])
         }
         return result
     }
@@ -912,13 +913,17 @@ public struct Parser {
         }
     }
 
-    /// A network alias has to be a name a hosts file can hold: a DNS name, each label within
-    /// the usual limits.
+    /// A network alias has to be a name a hosts file can hold: labels of letters, digits,
+    /// "-" and "_", separated by dots, each within the usual limits. An underscore is not
+    /// a DNS character, but peers find an alias in their hosts file, where it is an
+    /// ordinary one, and names written for other container tools use it.
     public static func networkAlias(_ alias: String) throws -> String {
-        guard isValidDomainName(alias) else {
+        let label = #/[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?/#
+        let labels = alias.split(separator: ".", omittingEmptySubsequences: false)
+        guard !alias.isEmpty, alias.count <= 255, labels.allSatisfy({ $0.wholeMatch(of: label) != nil }) else {
             throw ContainerizationError(
                 .invalidArgument,
-                message: "invalid network alias '\(alias)': an alias is a DNS name, such as db or db.internal")
+                message: "invalid network alias '\(alias)': an alias is a host name, such as db, db_primary or db.internal")
         }
         return alias
     }
