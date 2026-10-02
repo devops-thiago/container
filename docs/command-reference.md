@@ -1818,3 +1818,179 @@ container k8s write-config
 # write the context for a named cluster to an alternate kubeconfig file
 container k8s write-config --name my-cluster --kubeconfig ~/.kube/my-cluster.kubeconfig
 ```
+
+## Compose
+
+`container compose` runs the containers a compose file describes. See [Compose files](./compose.md) for what is read from a file and how a project runs.
+
+**Usage**
+
+```bash
+container compose [-f <path> ...] [-p <name>] [--project-directory <path>] [--profile <name> ...] [--env-file <path> ...] <subcommand>
+```
+
+**Options**
+
+These come before the subcommand.
+
+*   `-f, --file <path>`: Compose file to read; repeat to merge several, in order (default: `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` in the current directory, with its override file)
+*   `-p, --project-name <name>`: Project name (default: `COMPOSE_PROJECT_NAME`, the files' `name:`, then the directory's name)
+*   `--project-directory <path>`: What relative paths in the files are relative to (default: the first file's directory)
+*   `--profile <name>`: Profile to turn on; repeat for several
+*   `--env-file <path>`: File of variables for the compose files, in place of `.env`
+
+### `container compose up`
+
+Creates the project's networks, volumes and containers, and starts the containers in dependency order. A container whose service has not changed is left as it is. Without `--detach` the command stays attached, prints the services' output and stops them on Control-C.
+
+**Usage**
+
+```bash
+container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recreate] [--no-recreate] [--remove-orphans] [--no-start] [--wait] [<service> ...]
+```
+
+**Options**
+
+*   `-d, --detach`: Start the containers and return
+*   `--build`: Build images before starting, even those that exist
+*   `--pull <policy>`: Fetch images: `always`, `missing` or `never` (default: each service's `pull_policy`)
+*   `--no-deps`: Leave out the services the named ones depend on
+*   `--force-recreate`: Make every container again, changed or not
+*   `--no-recreate`: Keep existing containers even when their service changed
+*   `--remove-orphans`: Remove the project's containers that no service accounts for
+*   `--no-start`: Create the containers without starting them
+*   `--wait`: Wait until every service with a health check is healthy; implies `--detach`
+
+**Examples**
+
+```bash
+# start the project in the background
+container compose up -d
+
+# start one service and what it depends on, from another file, under another name
+container compose -f deploy/compose.yaml -p shop up -d web
+
+# rebuild the images and make the containers again
+container compose up -d --build --force-recreate
+```
+
+### `container compose down`
+
+Stops and removes the project's containers and the networks compose made for it. Volumes stay unless `--volumes` is given; a network or volume declared `external` is never removed.
+
+**Usage**
+
+```bash
+container compose down [-v] [-t <seconds>]
+```
+
+**Options**
+
+*   `-v, --volumes`: Remove the project's volumes too
+*   `-t, --timeout <seconds>`: Seconds to wait for each container before killing it
+
+### `container compose ps`
+
+Lists the project's containers.
+
+**Usage**
+
+```bash
+container compose ps [-a] [-q] [--services] [--format <format>]
+```
+
+**Options**
+
+*   `-a, --all`: Include containers that are not running
+*   `-q, --quiet`: Print only container names
+*   `--services`: Print the services that have a container, one per line
+*   `--format <format>`: Output format: `table` or `json` (default: `table`)
+
+### `container compose logs`
+
+Prints the output of the project's containers, each line under the name of its container. Output from before the command started is printed container by container; with `--follow`, what comes after is printed as it arrives.
+
+**Usage**
+
+```bash
+container compose logs [-f] [-n <lines>] [--no-log-prefix] [<service> ...]
+```
+
+**Options**
+
+*   `-f, --follow`: Keep printing as the containers write
+*   `-n, --tail <lines>`: Lines to print from the end of each container's output (default: all)
+*   `--no-log-prefix`: Print the lines without the name of the container they came from
+
+### `container compose start`, `stop`, `restart`
+
+Start the project's stopped containers in dependency order, stop its running ones in the reverse order, or do one then the other. The containers stay; `start` waits for dependencies as `up` does, from what the containers' labels record.
+
+**Usage**
+
+```bash
+container compose start [<service> ...]
+container compose stop [-t <seconds>] [<service> ...]
+container compose restart [-t <seconds>] [<service> ...]
+```
+
+**Options**
+
+*   `-t, --timeout <seconds>`: Seconds to wait for each container before killing it (default: the service's `stop_grace_period`, else the engine's)
+
+### `container compose exec`
+
+Runs a command in a service's running container. With a terminal attached the command gets one, and standard input stays open.
+
+**Usage**
+
+```bash
+container compose exec [-d] [-T] [-e <key=value> ...] [-w <dir>] [-u <user>] <service> <command> [<argument> ...]
+```
+
+**Options**
+
+*   `-d, --detach`: Run the command and return
+*   `-T, --no-tty`: Do not give the command a terminal
+*   `-e, --env <key=value>`: Set an environment variable (repeatable)
+*   `-w, --workdir <dir>`: Working directory for the command
+*   `-u, --user <user>`: User to run the command as (`name|uid[:gid]`)
+
+**Examples**
+
+```bash
+# a shell in the web service's container
+container compose exec web sh
+
+# one command, with its output captured by a script
+container compose exec -T db pg_dump -U postgres app > backup.sql
+```
+
+### `container compose pull`, `build`
+
+`pull` fetches the image of every service that runs one from a registry. `build` builds the image of every service that has a `build`.
+
+**Usage**
+
+```bash
+container compose pull [<service> ...]
+container compose build [<service> ...]
+```
+
+### `container compose config`
+
+Checks the compose files and prints the project they come to as one file: merged, with variables substituted and short forms spelled out.
+
+**Usage**
+
+```bash
+container compose config [--commands] [--services] [--volumes] [--images] [-q]
+```
+
+**Options**
+
+*   `--commands`: Print the `container` commands that make the project by hand
+*   `--services`: Print the names of the services
+*   `--volumes`: Print the names of the volumes
+*   `--images`: Print the images the services run
+*   `-q, --quiet`: Only check the files; print nothing when they are fine

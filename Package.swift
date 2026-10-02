@@ -53,6 +53,7 @@ let package = Package(
         .library(name: "MachineAPIClient", targets: ["MachineAPIClient"]),
         .library(name: "MachineAPIService", targets: ["MachineAPIService"]),
         .library(name: "ContainerK8s", targets: ["ContainerK8s"]),
+        .library(name: "ContainerCompose", targets: ["ContainerCompose"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
@@ -218,6 +219,45 @@ let package = Package(
             dependencies: ["ContainerK8s"],
             path: "Sources/Plugins/K8s",
             exclude: ["config.toml", "Resources"]
+        ),
+        .target(
+            name: "ContainerCompose",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "SystemPackage", package: "swift-system"),
+                "ContainerAPIClient",
+                "ContainerPersistence",
+                "ContainerResource",
+                "TerminalProgress",
+                "Yams",
+            ]
+        ),
+        .executableTarget(
+            name: "compose",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "ContainerAPIClient",
+                "ContainerCommands",
+                "ContainerCompose",
+                "ContainerLog",
+                "ContainerVersion",
+                "TerminalProgress",
+            ],
+            path: "Sources/Plugins/Compose",
+            exclude: ["config.toml"]
+        ),
+        .testTarget(
+            name: "ComposeTests",
+            dependencies: [
+                "ContainerCompose"
+            ],
+            resources: [
+                .copy("Fixtures")
+            ]
         ),
         .executableTarget(
             name: "container-apiserver",

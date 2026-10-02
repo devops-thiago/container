@@ -1,0 +1,74 @@
+services:
+  # Object storage for the trace, metric and log stores.
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password123
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - observability
+
+  # Creates the buckets, then exits.
+  minio-setup:
+    image: quay.io/minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set minio http://minio:9000 admin password123;
+      /usr/bin/mc mb minio/tempo-data;
+      /usr/bin/mc mb minio/loki-data;
+      exit 0;
+      "
+    networks:
+      - observability
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"  # OTLP gRPC
+    command:
+      - "-config.file=/etc/tempo.yaml"
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo.yaml
+    depends_on:
+      - minio-setup
+    networks:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - tempo
+    networks:
+      - observability
+
+volumes:
+  minio_data:
+  grafana_data:
+
+networks:
+  observability:
