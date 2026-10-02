@@ -147,13 +147,13 @@ public struct Application: AsyncLoggableCommand {
         guard #available(macOS 26, *) else {
             return [
                 SystemCommand.self
-            ]
+            ] + Application.systemRootSpellings
         }
 
         return [
             NetworkCommand.self,
             SystemCommand.self,
-        ]
+        ] + Application.systemRootSpellings
     }
 
 }
