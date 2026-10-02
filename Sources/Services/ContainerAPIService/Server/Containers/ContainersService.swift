@@ -392,57 +392,79 @@ public actor ContainersService {
             )
             let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
 
-            return try await Self.withNewContainerDirectory(at: path) {
-                self.log.debug(
-                    "create snapshot",
-                    metadata: [
-                        "id": "\(configuration.id)",
-                        "ref": "\(configuration.image.reference)",
-                    ])
-                let containerImage = ClientImage(description: configuration.image)
-                let imageFs = try await options.rootFsOverride == nil ? containerImage.getCreateSnapshot(platform: configuration.platform) : nil
+            // The address is the container's from here to its delete (and its name its peers'
+            // to resolve), so a subnet with none left fails the create, not a later start.
+            try await self.networksService?.reserveAddresses(for: configuration.id, attachments: configuration.networks)
+            do {
+                return try await Self.withNewContainerDirectory(at: path) {
+                    self.log.debug(
+                        "create snapshot",
+                        metadata: [
+                            "id": "\(configuration.id)",
+                            "ref": "\(configuration.image.reference)",
+                        ])
+                    let containerImage = ClientImage(description: configuration.image)
+                    let imageFs = try await options.rootFsOverride == nil ? containerImage.getCreateSnapshot(platform: configuration.platform) : nil
 
-                self.log.debug(
-                    "configure runtime",
-                    metadata: [
-                        "id": "\(configuration.id)",
-                        "kernel": "\(kernel.path)",
-                        "initfs": "\(initImage ?? self.containerSystemConfig.vminit.image)",
-                    ])
-                let runtimeConfig = RuntimeConfiguration(
-                    path: path,
-                    initialFilesystem: initFilesystem,
-                    kernel: kernel,
-                    containerConfiguration: configuration,
-                    containerRootFilesystem: imageFs,
-                    options: options,
-                    runtimeData: runtimeData
-                )
-
-                try runtimeConfig.writeRuntimeConfiguration()
-                let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
-                try Self.persistIncarnation(incarnation, at: path)
-                try Self.persistHostDirectoryBookmarks(requiredHostDirectoryBookmarks, at: path)
-
-                let snapshot = ContainerSnapshot(
-                    configuration: configuration,
-                    incarnation: incarnation,
-                    status: .stopped,
-                    networks: [],
-                    startedDate: nil
-                )
-                guard
-                    await self.hostDirectoryAccess.resolve(
-                        bookmarks: requiredHostDirectoryBookmarks,
-                        for: configuration.id)
-                else {
-                    throw ContainerizationError(
-                        .invalidArgument,
-                        message: "failed to resolve host-directory authorization for container \(configuration.id)"
+                    self.log.debug(
+                        "configure runtime",
+                        metadata: [
+                            "id": "\(configuration.id)",
+                            "kernel": "\(kernel.path)",
+                            "initfs": "\(initImage ?? self.containerSystemConfig.vminit.image)",
+                        ])
+                    let runtimeConfig = RuntimeConfiguration(
+                        path: path,
+                        initialFilesystem: initFilesystem,
+                        kernel: kernel,
+                        containerConfiguration: configuration,
+                        containerRootFilesystem: imageFs,
+                        options: options,
+                        runtimeData: runtimeData
                     )
+
+                    try runtimeConfig.writeRuntimeConfiguration()
+                    let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
+                    try Self.persistIncarnation(incarnation, at: path)
+                    try Self.persistHostDirectoryBookmarks(requiredHostDirectoryBookmarks, at: path)
+
+                    let snapshot = ContainerSnapshot(
+                        configuration: configuration,
+                        incarnation: incarnation,
+                        status: .stopped,
+                        networks: [],
+                        startedDate: nil
+                    )
+                    guard
+                        await self.hostDirectoryAccess.resolve(
+                            bookmarks: requiredHostDirectoryBookmarks,
+                            for: configuration.id)
+                    else {
+                        throw ContainerizationError(
+                            .invalidArgument,
+                            message: "failed to resolve host-directory authorization for container \(configuration.id)"
+                        )
+                    }
+                    await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
+                    return incarnation
                 }
-                await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
-                return incarnation
+            } catch {
+                await self.networksService?.releaseAddresses(for: configuration.id)
+                throw error
+            }
+        }
+    }
+
+    /// Hold an address for every container that exists, once the networks are up. The
+    /// helpers start empty with the engine, so the reservations made at create are made
+    /// again here; in id order, so the outcome does not depend on dictionary order.
+    public func reserveAddressesForExistingContainers() async {
+        for id in containers.keys.sorted() {
+            guard let configuration = containers[id]?.snapshot.configuration else { continue }
+            do {
+                try await networksService?.reserveAddresses(for: id, attachments: configuration.networks)
+            } catch {
+                log.warning("could not reserve addresses", metadata: ["id": "\(id)", "error": "\(error)"])
             }
         }
     }
@@ -1283,6 +1305,8 @@ public actor ContainersService {
         // return below: a container the exit handler already reaped still resolved bookmarks
         // at create, and nothing else would ever hand them back.
         await self.hostDirectoryAccess.release(for: id)
+        // And the addresses held for it since create: the container is going away.
+        await self.networksService?.releaseAddresses(for: id)
 
         // Did the exit container handler win?
         if self.containers[id] == nil {

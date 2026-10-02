@@ -69,8 +69,19 @@ public actor DefaultNetworkService: NetworkService {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
         }
 
-        let macAddress = macAddress ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
-        let index = try await allocator.allocate(hostname: hostname)
+        // A session that already holds this hostname is asking again, not holding it twice.
+        let alreadyHeld = allocationsBySession[session]?.contains { $0.hostname == hostname } ?? false
+        let index: UInt32
+        if alreadyHeld, let held = try await allocator.lookup(hostname: hostname) {
+            index = held
+        } else {
+            index = try await allocator.allocate(hostname: hostname)
+        }
+        // The address a container was given at create is the one its runtime gets at start,
+        // with the same MAC unless one is asked for, and the aliases it was created with
+        // unless the request brings its own.
+        let macAddress = macAddress ?? macAddresses[index] ?? MACAddress((UInt64.random(in: 0...UInt64.max) & 0x0cff_ffff_ffff) | 0xf200_0000_0000)
+        let aliases = aliases.isEmpty ? (self.aliases[hostname] ?? []) : aliases
         let ipv6Address = try status.ipv6Subnet
             .map { try CIDRv6(macAddress.ipv6Address(network: $0.lower), prefix: $0.prefix) }
         let ip = IPv4Address(index)
@@ -102,7 +113,9 @@ public actor DefaultNetworkService: NetworkService {
         self.aliases[hostname] = aliases
 
         let isNewSession = allocationsBySession[session] == nil
-        allocationsBySession[session, default: []].append((hostname: hostname, index: index))
+        if !alreadyHeld {
+            allocationsBySession[session, default: []].append((hostname: hostname, index: index))
+        }
         if isNewSession {
             await session.onDisconnect { [weak self] in
                 await self?.releaseSession(session)
@@ -117,7 +130,9 @@ public actor DefaultNetworkService: NetworkService {
             return
         }
         for allocation in allocations {
-            _ = try? await allocator.deallocate(hostname: allocation.hostname)
+            // Freed only when this was the last holder: a container that stops keeps the
+            // address the engine reserved for it at create.
+            guard (try? await allocator.deallocate(hostname: allocation.hostname)) != nil else { continue }
             macAddresses.removeValue(forKey: allocation.index)
             aliases.removeValue(forKey: allocation.hostname)
         }

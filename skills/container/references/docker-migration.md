@@ -132,11 +132,16 @@ what ships now from planned work:
 Those later capabilities are plans, not commands available in the 1.3.0 binary. The user
 migration guide is at [siliconship.app/docker](https://siliconship.app/docker).
 
-On the `default` network, peer names are captured when the consuming container starts.
-Start dependencies first and wait for readiness before starting their consumers. If a peer
-restarts with a different address, recreate or restart its consumers after that peer is ready;
-existing guests do not receive a live name-to-address update. This limitation is tracked in
-[SiliconShip#188](https://github.com/devops-thiago/SiliconShip/issues/188).
+A container's hosts file is written when it starts, with the name and address of every
+container that exists on its networks, started or not. A container holds its address from
+create to delete, so stopping and starting one does not move it. Create the containers of a
+stack before starting any of them and the start order stops mattering for names; waiting for
+a dependency to be ready is still the script's job. A container created after its consumer
+started is unknown to that consumer until the consumer restarts: existing guests do not
+receive live updates, which is tracked in
+[SiliconShip#188](https://github.com/devops-thiago/SiliconShip/issues/188). Because a stopped
+container keeps its address, a network runs out when every address of its subnet belongs to
+a container that exists; `container create` then fails and says so.
 
 **Do not reach for `container network create` here.** Name lookup between containers works on
 the `default` network with a domain-qualified name. It does *not* work for containers on a
@@ -202,8 +207,9 @@ Mapping notes:
   `condition: service_healthy`; a hand-written script needs its own readiness checks and
   teardown/error handling to approximate that behavior.
 - The example references the dependency as `<name>.<domain>` (`db.test`). The fork also
-  installs bare peer hostnames for peers already running on the network at consumer startup.
-  Neither spelling makes those entries dynamic; dependency order and restart handling still matter.
+  installs the bare hostname of every container that exists on the network when the consumer
+  starts, on custom networks too. Neither spelling makes those entries dynamic; readiness and
+  restart handling still matter.
 - `ports:` → `-p`. Often unnecessary between containers, since each container has its own IP
   and is reachable without publishing. You need `-p` to reach a service from a host browser or
   a macOS-native tool.
