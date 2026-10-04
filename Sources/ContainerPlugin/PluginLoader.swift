@@ -21,7 +21,6 @@ import ContainerizationOS
 import Darwin
 import Foundation
 import Logging
-import Synchronization
 import SystemPackage
 
 public struct PluginLoader: Sendable {
@@ -463,18 +462,7 @@ extension PluginLoader {
 // MARK: - Spawned instances (sandboxed embedding)
 
 extension PluginLoader {
-    /// Live instance processes, keyed by launchd-style label. Holding the
-    /// Process keeps its terminationHandler (the reaper) alive.
-    private static let instances = Mutex<[String: Foundation.Process]>([:])
-
-    /// Set once teardown begins, and never cleared: the process is on its way out.
-    ///
-    /// Killing a helper is itself a reason for something to want it back — a network whose
-    /// helper just died looks exactly like one that needs provisioning, and the request that
-    /// notices arrives while we are still shutting down. Without this the sweep and the
-    /// respawn chase each other, and whichever helper is spawned after the sweep is orphaned
-    /// by the exit a moment later, holding the vmnet interface it just claimed.
-    private static let shuttingDown = Mutex<Bool>(false)
+    private static let instances = SpawnedInstances()
 
     static func spawnInstance(
         label: String,
@@ -483,10 +471,6 @@ extension PluginLoader {
         env: [String: String],
         log: Logger?
     ) throws {
-        guard !Self.shuttingDown.withLock({ $0 }) else {
-            log?.info("refusing to spawn instance during shutdown", metadata: ["label": "\(label)"])
-            throw ContainerizationError(.invalidState, message: "engine is shutting down")
-        }
         let process = Foundation.Process()
         process.executableURL = URL(fileURLWithPath: argv[0])
         process.arguments = Array(argv.dropFirst())
@@ -497,7 +481,7 @@ extension PluginLoader {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { proc in
-            Self.instances.withLock { _ = $0.removeValue(forKey: label) }
+            Self.instances.didExit(proc)
             log?.info(
                 "runtime instance exited",
                 metadata: [
@@ -505,8 +489,12 @@ extension PluginLoader {
                     "status": "\(proc.terminationStatus)",
                 ])
         }
-        try process.run()
-        Self.instances.withLock { $0[label] = process }
+        let replaced = try Self.instances.start(process, label: label)
+        // A stopped runtime can still be unwinding when its replacement starts. Keep every
+        // instance supervised until its own exit callback, and ask predecessors to leave.
+        for previous in replaced where previous.isRunning {
+            previous.terminate()
+        }
         log?.info(
             "spawned runtime instance",
             metadata: [
@@ -516,14 +504,13 @@ extension PluginLoader {
     }
 
     static func terminateInstance(label: String, log: Logger?) {
-        guard let process = Self.instances.withLock({ $0[label] }) else {
-            log?.debug("no spawned instance to terminate", metadata: ["label": "\(label)"])
-            return
+        let processes = Self.instances.processes(label: label)
+        for process in processes where process.isRunning {
+            log?.info(
+                "terminating runtime instance",
+                metadata: ["label": "\(label)", "pid": "\(process.processIdentifier)"])
+            process.terminate()
         }
-        log?.info(
-            "terminating runtime instance",
-            metadata: ["label": "\(label)", "pid": "\(process.processIdentifier)"])
-        process.terminate()
     }
 
     /// Kill helper processes left behind by a previous apiserver.
@@ -544,16 +531,13 @@ extension PluginLoader {
         let selfPid = getpid()
 
         var pids = [pid_t](repeating: 0, count: 4096)
-        let byteCount = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-        guard byteCount > 0 else { return [] }
-        let count = Int(byteCount) / MemoryLayout<pid_t>.size
-
+        // Unlike proc_listpids, proc_listallpids returns a process count, not bytes.
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        let candidates = orphanCandidates(pids: pids, count: Int(count), selfPID: selfPid) {
+            helperPath(of: $0, under: root)
+        }
         var victims: [pid_t] = []
-        for index in 0..<count {
-            let pid = pids[index]
-            guard pid > 0, pid != selfPid else { continue }
-            // Helpers only: never the app itself or the CLI the user may be running.
-            guard let path = helperPath(of: pid, under: root) else { continue }
+        for (pid, path) in candidates {
             log?.info(
                 "reaping orphaned instance",
                 metadata: ["pid": "\(pid)", "path": "\(path)"])
@@ -562,6 +546,16 @@ extension PluginLoader {
         }
 
         return victims
+    }
+
+    /// Bound the API's count to initialized storage and retain the helper ownership check.
+    static func orphanCandidates(
+        pids: [pid_t], count: Int, selfPID: pid_t, helperPath: (pid_t) -> String?
+    ) -> [(pid_t, String)] {
+        pids.prefix(max(0, min(count, pids.count))).compactMap { pid in
+            guard pid > 0, pid != selfPID, let path = helperPath(pid) else { return nil }
+            return (pid, path)
+        }
     }
 
     /// Follow up on `reapOrphanedInstances`: SIGKILL whatever ignored the SIGTERM.
@@ -619,7 +613,7 @@ extension PluginLoader {
 
     /// Labels of currently live spawned instances.
     public static func spawnedInstanceLabels() -> [String] {
-        Self.instances.withLock { Array($0.keys) }
+        Self.instances.labels
     }
 
     /// Quit path: SIGTERM every spawned instance (graceful container stop
@@ -634,8 +628,7 @@ extension PluginLoader {
     public static func terminateAllInstances(log: Logger? = nil, waitFor: Duration = .seconds(2)) {
         // Before the sweep, not after: anything asking for a helper from here on is asking for
         // one that would outlive us.
-        Self.shuttingDown.withLock { $0 = true }
-        let all = Self.instances.withLock { Array($0.values) }
+        let all = Self.instances.beginShutdown()
         var asked: [Process] = []
         for process in all where process.isRunning {
             log?.info("terminating instance", metadata: ["pid": "\(process.processIdentifier)"])
