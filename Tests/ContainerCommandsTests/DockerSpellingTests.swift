@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
+import ContainerResource
 import Testing
 
 @testable import ContainerCommands
@@ -116,13 +117,43 @@ struct DockerSpellingTests {
         let images: Application.ImagePrune = try parse(["image", "prune", "-f", "-a"])
         #expect(images.all && images.confirmation.force)
         let volumes: Application.VolumeCommand.VolumePrune = try parse(["volume", "prune", "--force"])
-        #expect(volumes.confirmation.force)
+        #expect(volumes.confirmation.force && !volumes.all)
+        let everyVolume: Application.VolumeCommand.VolumePrune = try parse(["volume", "prune", "-a", "-f"])
+        #expect(everyVolume.all)
+        #expect(try parse(["volume", "prune", "--all"], as: Application.VolumeCommand.VolumePrune.self).all)
         if #available(macOS 26, *) {
             _ = try parse(["network", "prune", "-f"], as: Application.NetworkCommand.NetworkPrune.self)
         }
         let plain: Application.ContainerPrune = try parse(["prune"])
         #expect(!plain.confirmation.force)
         #expect(!Application.ContainerPrune.helpMessage().contains("--force"), "the flag does nothing, so help does not list it")
+    }
+
+    /// A named volume has no container whenever its containers are removed and made again,
+    /// as `compose down` leaves it. `docker volume prune` keeps it unless `--all` is given,
+    /// and so does this one: with `-f` accepted, the Docker spelling runs here as typed.
+    @Test("volume prune removes anonymous volumes, and named ones only with --all")
+    func volumePruneKeepsNamedVolumes() {
+        typealias Prune = Application.VolumeCommand.VolumePrune
+        func volume(_ name: String, anonymous: Bool = false) -> VolumeConfiguration {
+            VolumeConfiguration(
+                name: name, source: "/volumes/\(name)",
+                labels: anonymous ? [VolumeConfiguration.anonymousLabel: ""] : [:])
+        }
+        let volumes = [
+            volume("shop_data"), volume("held"), volume("5a2f", anonymous: true), volume("9c1e", anonymous: true),
+        ]
+        let inUse: Set<String> = ["held", "9c1e"]
+
+        let plain = Prune.selection(from: volumes, inUse: inUse, all: false)
+        #expect(plain.prune.map(\.name) == ["5a2f"], "the anonymous volume nothing refers to, and nothing named")
+        #expect(plain.kept == 1, "shop_data: named, unreferenced, and said to have been kept")
+
+        let all = Prune.selection(from: volumes, inUse: inUse, all: true)
+        #expect(all.prune.map(\.name) == ["shop_data", "5a2f"])
+        #expect(all.kept == 0)
+
+        #expect(Prune.selection(from: volumes, inUse: Set(volumes.map(\.name)), all: true).prune.isEmpty, "a volume a container refers to is never pruned")
     }
 
     @Test("system prune is the prune commands in order, volumes only when asked")

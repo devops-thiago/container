@@ -98,10 +98,18 @@ container volume inspect foo
 A volume's image is sparse, so `sizeInBytes` reports the size the volume can grow to —
 512 GiB by default — rather than the space it currently occupies on disk.
 
-Remove every volume that has no container referencing it:
+Remove the [anonymous volumes](#anonymous-volumes) that no container refers to:
 
 ```bash
 container volume prune
+```
+
+Named volumes are kept, as `docker volume prune` keeps them: a named volume is one you
+chose to keep data in, and it has no container whenever its containers are removed and
+made again, after `container compose down` for instance. To remove those too:
+
+```bash
+container volume prune --all
 ```
 
 > [!WARNING]
@@ -147,7 +155,8 @@ container run -v $VOL:/data alpine
 
 > [!NOTE]
 > Unlike Docker, anonymous volumes aren't deleted automatically when the container is
-> removed with `--rm`. Delete them explicitly:
+> removed with `--rm`. Delete them explicitly, or let `container volume prune` remove the
+> ones no container refers to:
 >
 > ```bash
 > container volume delete $VOL

@@ -43,7 +43,14 @@ struct TestCLIVolumesSerial {
             let list = try f.run(["volume", "list", "--quiet"]).check().output
             #expect(list.contains(v1) && list.contains(v2))
 
-            let result = try f.run(["volume", "prune"]).check()
+            // Named volumes are kept without --all.
+            let kept = try f.run(["volume", "prune"]).check()
+            #expect(!kept.output.contains(v1) && !kept.output.contains(v2))
+            #expect(kept.error.contains("Kept"), "should say named volumes were kept")
+            let stillThere = try f.run(["volume", "list", "--quiet"]).check().output
+            #expect(stillThere.contains(v1) && stillThere.contains(v2))
+
+            let result = try f.run(["volume", "prune", "--all"]).check()
             #expect(result.output.contains(v1))
             #expect(result.output.contains(v2))
             #expect(result.error.contains("Reclaimed"))
@@ -71,7 +78,7 @@ struct TestCLIVolumesSerial {
             try f.doVolumeCreate(vUnused)
             try await f.doLongRun(name: c, image: image, args: ["-v", "\(vInUse):/data"], autoRemove: false, waitUntilRunning: true)
 
-            try f.run(["volume", "prune"]).check()
+            try f.run(["volume", "prune", "--all"]).check()
 
             let listAfter = try f.run(["volume", "list", "--quiet"]).check().output
             #expect(listAfter.contains(vInUse), "in-use volume should NOT be pruned")
@@ -98,11 +105,13 @@ struct TestCLIVolumesSerial {
             try f.doCreate(name: c, image: image, volumes: ["\(vol):/data"])
             try await Task.sleep(for: .seconds(1))
 
-            try f.run(["volume", "prune"]).check()
+            try f.run(["volume", "prune", "--all"]).check()
             #expect(try f.volumeExists(vol), "volume attached to stopped container should NOT be pruned")
 
             try? f.doRemoveIfExists(c, force: true, ignoreFailure: true)
             try f.run(["volume", "prune"]).check()
+            #expect(try f.volumeExists(vol), "a named volume is kept without --all")
+            try f.run(["volume", "prune", "--all"]).check()
             #expect(!(try f.volumeExists(vol)), "volume should be pruned after container is deleted")
         }
     }
