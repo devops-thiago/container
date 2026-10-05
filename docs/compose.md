@@ -174,6 +174,10 @@ A service with `profiles` is left out unless one of its profiles is turned on wi
 `--profile` or `COMPOSE_PROFILES`, or the service is named on the command line.
 `--profile "*"` turns on all of them.
 
+`--profile` replaces `COMPOSE_PROFILES`, as it does in `docker compose`: when a profile is
+named on the command line the variable is not read, whether it comes from the shell or
+from the project's `.env`. With no `--profile`, the variable decides.
+
 What is left out is not checked. A key this engine cannot honour, an env file that is not
 there, or a mistake in a service whose profiles are off does not stop the project, and
 nothing is said about it; the same goes for a network or a volume that only such services
