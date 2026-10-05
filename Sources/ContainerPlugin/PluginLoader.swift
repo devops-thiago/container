@@ -464,13 +464,22 @@ extension PluginLoader {
 extension PluginLoader {
     private static let instances = SpawnedInstances()
 
+    struct ProcessOperations {
+        var run: (Process) throws -> Void = { try $0.run() }
+        var isRunning: (Process) -> Bool = { $0.isRunning }
+        var terminate: (Process) -> Void = { $0.terminate() }
+    }
+
     static func spawnInstance(
         label: String,
         instanceId: String,
         argv: [String],
         env: [String: String],
-        log: Logger?
+        log: Logger?,
+        tracking: SpawnedInstances? = nil,
+        operations: ProcessOperations = ProcessOperations()
     ) throws {
+        let instances = tracking ?? Self.instances
         let process = Foundation.Process()
         process.executableURL = URL(fileURLWithPath: argv[0])
         process.arguments = Array(argv.dropFirst())
@@ -481,7 +490,7 @@ extension PluginLoader {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { proc in
-            Self.instances.didExit(proc)
+            instances.didExit(proc)
             log?.info(
                 "runtime instance exited",
                 metadata: [
@@ -489,11 +498,11 @@ extension PluginLoader {
                     "status": "\(proc.terminationStatus)",
                 ])
         }
-        let replaced = try Self.instances.start(process, label: label)
+        let replaced = try instances.start(process, label: label, run: operations.run)
         // A stopped runtime can still be unwinding when its replacement starts. Keep every
         // instance supervised until its own exit callback, and ask predecessors to leave.
-        for previous in replaced where previous.isRunning {
-            previous.terminate()
+        for previous in replaced where operations.isRunning(previous) {
+            operations.terminate(previous)
         }
         log?.info(
             "spawned runtime instance",
@@ -503,13 +512,16 @@ extension PluginLoader {
             ])
     }
 
-    static func terminateInstance(label: String, log: Logger?) {
-        let processes = Self.instances.processes(label: label)
-        for process in processes where process.isRunning {
+    static func terminateInstance(
+        label: String, log: Logger?, tracking: SpawnedInstances? = nil,
+        operations: ProcessOperations = ProcessOperations()
+    ) {
+        let processes = (tracking ?? Self.instances).processes(label: label)
+        for process in processes where operations.isRunning(process) {
             log?.info(
                 "terminating runtime instance",
                 metadata: ["label": "\(label)", "pid": "\(process.processIdentifier)"])
-            process.terminate()
+            operations.terminate(process)
         }
     }
 
@@ -527,21 +539,33 @@ extension PluginLoader {
     ///   whether it obeyed does not, and used to cost every start five seconds.
     @discardableResult
     public static func reapOrphanedInstances(installRoot: URL, log: Logger? = nil) -> [pid_t] {
+        reapOrphanedInstances(
+            installRoot: installRoot, log: log,
+            listAllPIDs: { proc_listallpids($0, $1) },
+            helperPath: { helperPath(of: $0, under: $1) },
+            signal: { _ = kill($0, $1) })
+    }
+
+    static func reapOrphanedInstances(
+        installRoot: URL, log: Logger? = nil,
+        listAllPIDs: (UnsafeMutableRawPointer?, Int32) -> Int32,
+        helperPath: (pid_t, String) -> String?, signal: (pid_t, Int32) -> Void
+    ) -> [pid_t] {
         let root = installRoot.resolvingSymlinksInPath().path(percentEncoded: false)
         let selfPid = getpid()
 
         var pids = [pid_t](repeating: 0, count: 4096)
         // Unlike proc_listpids, proc_listallpids returns a process count, not bytes.
-        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        let count = listAllPIDs(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
         let candidates = orphanCandidates(pids: pids, count: Int(count), selfPID: selfPid) {
-            helperPath(of: $0, under: root)
+            helperPath($0, root)
         }
         var victims: [pid_t] = []
         for (pid, path) in candidates {
             log?.info(
                 "reaping orphaned instance",
                 metadata: ["pid": "\(pid)", "path": "\(path)"])
-            kill(pid, SIGTERM)
+            signal(pid, SIGTERM)
             victims.append(pid)
         }
 
