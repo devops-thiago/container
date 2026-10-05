@@ -76,7 +76,9 @@ struct ComposeCommand: AsyncParsableCommand {
     @Option(name: .customLong("project-directory"), help: .init("What relative paths in the files are relative to (default: the first file's directory)", valueName: "path"))
     var projectDirectory: String?
 
-    @Option(name: .customLong("profile"), help: .init("Profile to turn on; repeat for several", valueName: "name"))
+    @Option(
+        name: .customLong("profile"),
+        help: .init("Profile to turn on; repeat for several. Given, COMPOSE_PROFILES is not read", valueName: "name"))
     var profiles: [String] = []
 
     @Option(name: .customLong("env-file"), help: .init("File of variables for the compose files, in place of .env", valueName: "path"))
@@ -92,7 +94,8 @@ struct ComposeCommand: AsyncParsableCommand {
             workingDirectory: workingDirectory,
             projectDirectory: projectDirectory,
             projectName: projectName,
-            profiles: profiles,
+            // None named is not "none wanted": it leaves the choice to COMPOSE_PROFILES.
+            profiles: profiles.isEmpty ? nil : profiles,
             envFiles: envFiles,
             // Sandboxed, only the folder compose was run in has been lent to this process.
             searchesParents: !ClientHostDirectory.isSandboxed)

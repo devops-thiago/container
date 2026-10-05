@@ -77,8 +77,10 @@ public enum ComposeLoader {
         public var projectDirectory: String?
         /// `-p`. nil takes `COMPOSE_PROJECT_NAME`, the files' `name:`, then the directory.
         public var projectName: String?
-        /// `--profile`, in addition to `COMPOSE_PROFILES`.
-        public var profiles: [String]
+        /// `--profile`. nil takes `COMPOSE_PROFILES`. Given, they are the whole set and the
+        /// variable is not read, as with `docker compose`; an empty list turns every profile
+        /// off, whatever a `.env` says.
+        public var profiles: [String]?
         /// `--env-file`. Empty reads `.env` in the project directory when there is one.
         public var envFiles: [String]
         /// The environment compose runs in. It wins over the env files.
@@ -93,7 +95,7 @@ public enum ComposeLoader {
             workingDirectory: String,
             projectDirectory: String? = nil,
             projectName: String? = nil,
-            profiles: [String] = [],
+            profiles: [String]? = nil,
             envFiles: [String] = [],
             environment: [String: String] = ProcessInfo.processInfo.environment,
             homeDirectory: String = ComposeLoader.userHomeDirectory(),
@@ -212,7 +214,9 @@ public enum ComposeLoader {
 
         let fromEnvironment = (variables["COMPOSE_PROFILES"] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         var profiles: [String] = []
-        for profile in options.profiles + fromEnvironment where !profile.isEmpty && !profiles.contains(profile) {
+        // The ones asked for replace the variable's; they are not added to it. Added, a
+        // profile a `.env` turns on could not be turned off by naming the ones wanted.
+        for profile in options.profiles ?? fromEnvironment where !profile.isEmpty && !profiles.contains(profile) {
             profiles.append(profile)
         }
 
