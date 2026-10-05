@@ -106,12 +106,12 @@ Two differences worth knowing:
 
 `container system prune` runs the prunes in a row: stopped containers, unused networks,
 then dangling images (`-a` for every unused image). Volumes hold data and are pruned only
-with `--volumes`. Each prune also runs on its own:
+with `--volumes`, and then only the anonymous ones. Each prune also runs on its own:
 
 ```bash
 container prune                 # stopped containers
 container image prune
-container volume prune
+container volume prune          # anonymous volumes; --all for named ones too, as in Docker
 container network prune
 ```
 
