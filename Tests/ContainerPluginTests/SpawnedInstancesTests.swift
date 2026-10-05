@@ -1,5 +1,5 @@
 //===----------------------------------------------------------------------===//
-// Copyright © 2025-2026 Apple Inc. and the container project authors.
+// Copyright © 2026 Apple Inc. and the container project authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,8 +68,11 @@ struct SpawnedInstancesTests {
     }
 
     @Test func shutdownRacingAnAdmittedLaunchIncludesIt() async throws {
-        let instances = SpawnedInstances()
         let process = Process()
+        let registeredAtUnlock = Mutex<[ObjectIdentifier]>([])
+        let instances = SpawnedInstances { processes in
+            registeredAtUnlock.withLock { $0 = processes.map(ObjectIdentifier.init) }
+        }
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         let launchDone = DispatchSemaphore(value: 0)
@@ -99,22 +102,32 @@ struct SpawnedInstancesTests {
         try await waitFor(launchDone)
         try await waitFor(shutdownDone)
         #expect(swept.withLock { $0?.first === process })
+        #expect(
+            registeredAtUnlock.withLock { $0 } == [ObjectIdentifier(process)],
+            "registration must be complete before the launch transaction releases its lock")
     }
 
     @Test func immediateExitCannotLeaveARegisteredDeadProcess() async throws {
-        let instances = SpawnedInstances()
-        for _ in 0..<8 {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
-            let reaped = DispatchSemaphore(value: 0)
-            process.terminationHandler = {
-                instances.didExit($0)
-                reaped.signal()
-            }
-            _ = try instances.start(process, label: "fast")
-            try await waitFor(reaped)
-            #expect(instances.labels.isEmpty)
+        let process = Process()
+        let registeredAtUnlock = Mutex<[ObjectIdentifier]>([])
+        let instances = SpawnedInstances { processes in
+            registeredAtUnlock.withLock { $0 = processes.map(ObjectIdentifier.init) }
         }
+        let exited = DispatchSemaphore(value: 0)
+        let exitAttempted = DispatchSemaphore(value: 0)
+        // Deliver the exit callback during run, before registration. It must wait for the
+        // launch transaction and then remove the entry, even for an already-exited child.
+        _ = try instances.start(process, label: "fast") { _ in
+            Thread.detachNewThread {
+                exitAttempted.signal()
+                instances.didExit(process)
+                exited.signal()
+            }
+            #expect(exitAttempted.wait(timeout: .now() + 5) == .success)
+        }
+        try await waitFor(exited)
+        #expect(registeredAtUnlock.withLock { $0 } == [ObjectIdentifier(process)])
+        #expect(instances.labels.isEmpty)
     }
 
     @Test func enumerationUsesEveryReturnedSlotAndChecksOwnership() {

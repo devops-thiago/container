@@ -1,5 +1,5 @@
 //===----------------------------------------------------------------------===//
-// Copyright © 2025-2026 Apple Inc. and the container project authors.
+// Copyright © 2026 Apple Inc. and the container project authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,11 @@ final class SpawnedInstances: Sendable {
     }
 
     private let state = Mutex(State())
+    private let launchTransactionDidFinish: (@Sendable ([Process]) -> Void)?
+
+    init(launchTransactionDidFinish: (@Sendable ([Process]) -> Void)? = nil) {
+        self.launchTransactionDidFinish = launchTransactionDidFinish
+    }
 
     /// Launch and registration share the shutdown lock. A fast exit callback waits for
     /// registration; a shutdown either includes this child or refuses its launch entirely.
@@ -38,6 +43,9 @@ final class SpawnedInstances: Sendable {
         _ process: Process, label: String, run: (Process) throws -> Void = { try $0.run() }
     ) throws -> [Process] {
         try state.withLock { state in
+            // Observe the transaction's final registry while it still owns the lock. This
+            // makes shutdown/registration ordering testable without racing thread timing.
+            defer { launchTransactionDidFinish?(state.entries.values.map(\.process)) }
             guard !state.shuttingDown else {
                 throw ContainerizationError(.invalidState, message: "engine is shutting down")
             }
