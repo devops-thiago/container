@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerResource
 import Foundation
 
 extension Application.VolumeCommand {
@@ -23,7 +24,10 @@ extension Application.VolumeCommand {
         public init() {}
         public static let configuration = CommandConfiguration(
             commandName: "prune",
-            abstract: "Remove volumes with no container references")
+            abstract: "Remove anonymous volumes with no container references")
+
+        @Flag(name: .shortAndLong, help: "Remove named volumes with no container references too")
+        var all = false
 
         @OptionGroup
         public var logOptions: Flags.Logging
@@ -46,9 +50,7 @@ extension Application.VolumeCommand {
                 }
             }
 
-            let volumesToPrune = allVolumes.filter { volume in
-                !volumesInUse.contains(volume.name)
-            }
+            let (volumesToPrune, kept) = Self.selection(from: allVolumes, inUse: volumesInUse, all: all)
 
             var prunedVolumes = [String]()
             var totalSize: UInt64 = 0
@@ -76,6 +78,24 @@ extension Application.VolumeCommand {
             let formatter = ByteCountFormatter()
             let freed = formatter.string(fromByteCount: Int64(totalSize))
             log.info("Reclaimed \(freed) in disk space")
+            if kept > 0 {
+                log.info("Kept \(kept) named volume(s) with no container references; --all removes them too")
+            }
+        }
+
+        /// What a prune removes: the volumes no container refers to, and of those the
+        /// anonymous ones unless `all`. A named volume is one somebody chose to keep data in,
+        /// and it has no container whenever its containers are removed and made again, as
+        /// `compose down` leaves it. `docker volume prune` draws the same line.
+        ///
+        /// - Returns: the volumes to remove, and how many unreferenced named ones were kept.
+        static func selection(
+            from volumes: [VolumeConfiguration], inUse: Set<String>, all: Bool
+        ) -> (prune: [VolumeConfiguration], kept: Int) {
+            let unreferenced = volumes.filter { !inUse.contains($0.name) }
+            guard !all else { return (unreferenced, 0) }
+            let anonymous = unreferenced.filter(\.isAnonymous)
+            return (anonymous, unreferenced.count - anonymous.count)
         }
     }
 }
