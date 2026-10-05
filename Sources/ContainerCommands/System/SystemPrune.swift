@@ -20,7 +20,8 @@ import Foundation
 
 extension Application {
     /// The prune commands in a row: stopped containers, networks nothing is attached to and
-    /// dangling images. Volumes hold data, so they are pruned only when asked for.
+    /// dangling images. Volumes hold data, so they are pruned only when asked for, and then
+    /// only the anonymous ones, as `volume prune` does without `--all`.
     public struct SystemPrune: AsyncLoggableCommand {
         public init() {}
 
@@ -31,7 +32,7 @@ extension Application {
         @Flag(name: .shortAndLong, help: "Remove all unused images, not just dangling ones")
         var all = false
 
-        @Flag(name: .long, help: "Remove volumes with no container references too")
+        @Flag(name: .long, help: "Remove anonymous volumes with no container references too")
         var volumes = false
 
         @OptionGroup
