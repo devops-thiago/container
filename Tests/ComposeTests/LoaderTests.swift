@@ -207,10 +207,27 @@ struct VariableTests {
         #expect(try project.load(environment: ["KEY": "k", "VALUE": "v"]).file.service("web")?.labels == ["$KEY": "v"])
     }
 
+    /// As `docker compose` has it: `--profile` replaces `COMPOSE_PROFILES`. Added to it, a
+    /// profile a `.env` turns on could not be turned off by naming the ones wanted.
     @Test
-    func profilesComeFromTheOptionAndTheEnvironment() throws {
-        let project = try TemporaryProject(["compose.yaml": "services:\n  web:\n    image: web:1\n"])
-        #expect(try project.load(profiles: ["debug"], environment: ["COMPOSE_PROFILES": "tools, debug,metrics"]).profiles == ["debug", "tools", "metrics"])
+    func profilesAskedForReplaceTheEnvironments() throws {
+        let project = try TemporaryProject([
+            "compose.yaml": "services:\n  web:\n    image: web:1\n  tools:\n    image: tools:1\n    profiles: [tools]\n  debug:\n    image: debug:1\n    profiles: [debug]\n",
+            ".env": "COMPOSE_PROFILES=tools\n",
+        ])
+        let environment = ["COMPOSE_PROFILES": "tools, debug,metrics"]
+        #expect(try project.load(environment: environment).profiles == ["tools", "debug", "metrics"])
+        #expect(try project.load(profiles: ["debug"], environment: environment).profiles == ["debug"])
+        #expect(try project.load(profiles: [], environment: environment).profiles.isEmpty)
+
+        // The same from the project's `.env`, which is where a project keeps it.
+        func running(_ profiles: [String]?) throws -> [String] {
+            let definition = try project.load(profiles: profiles)
+            return definition.file.services.filter { $0.isActive(in: definition.profiles) }.map(\.name).sorted()
+        }
+        #expect(try running(nil) == ["tools", "web"])
+        #expect(try running(["debug"]) == ["debug", "web"])
+        #expect(try running([]) == ["web"])
     }
 }
 
