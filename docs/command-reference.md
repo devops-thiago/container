@@ -1844,7 +1844,7 @@ These come before the subcommand.
 *   `-f, --file <path>`: Compose file to read; repeat to merge several, in order (default: `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` in the current directory, with its override file)
 *   `-p, --project-name <name>`: Project name (default: `COMPOSE_PROJECT_NAME`, the files' `name:`, then the directory's name)
 *   `--project-directory <path>`: What relative paths in the files are relative to (default: the first file's directory)
-*   `--profile <name>`: Profile to turn on; repeat for several
+*   `--profile <name>`: Profile to turn on; repeat for several. Given, `COMPOSE_PROFILES` is not read
 *   `--env-file <path>`: File of variables for the compose files, in place of `.env`
 
 ### `container compose up`

@@ -53,7 +53,7 @@ final class TemporaryProject {
     func load(
         files: [String] = [],
         name: String? = nil,
-        profiles: [String] = [],
+        profiles: [String]? = nil,
         envFiles: [String] = [],
         environment: [String: String] = [:],
         workingDirectory: String? = nil,
@@ -82,7 +82,7 @@ enum Fixture {
     }
 
     static func load(
-        _ name: String, files: [String] = [], profiles: [String] = [], environment: [String: String] = [:]
+        _ name: String, files: [String] = [], profiles: [String]? = nil, environment: [String: String] = [:]
     ) throws -> ComposeDefinition {
         try ComposeLoader.load(
             ComposeLoader.Options(
