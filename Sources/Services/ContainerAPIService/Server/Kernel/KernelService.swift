@@ -383,7 +383,7 @@ public actor KernelService {
         guard isLocalTar || expectedDigest != nil else {
             throw ContainerizationError(
                 .invalidArgument,
-                message: "kernel archive digest is required for remote URL '\(tar)'"
+                message: "a kernel archive fetched from a remote URL needs its digest; none was given"
             )
         }
         let expectedDigest = try expectedDigest.map(Self.parseExpectedDigest)

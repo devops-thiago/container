@@ -57,6 +57,12 @@ extension Application {
                 try Output.render(payload: status, format: format) {
                     Self.statusTable(status)
                 }
+                // Starting is not ready: a script that checks the exit status alone
+                // (`until container system status; do sleep 1; done`) must keep waiting,
+                // as it does for "not running".
+                if status.status == Self.startingStatus {
+                    Application.exit(withError: ExitCode(1))
+                }
             } catch {
                 try Output.render(payload: StatusPayload(status: "not running"), format: format) {
                     "apiserver is not running"
@@ -64,6 +70,10 @@ extension Application {
                 Application.exit(withError: ExitCode(1))
             }
         }
+
+        /// The API server answers but the default network is not up yet. Printed, and
+        /// exited from with status 1, since nothing can run yet.
+        static let startingStatus = "starting"
 
         /// Collects system-wide status from the CLI and the running daemon.
         /// Resource counts are populated best-effort and omitted when their
@@ -79,7 +89,7 @@ extension Application {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                return StatusPayload(status: "starting")
+                return StatusPayload(status: startingStatus)
             }
             let client = ClientInfo(
                 version: ReleaseVersion.version(),
@@ -150,7 +160,7 @@ extension Application {
             var rows: [[String]] = [["FIELD", "VALUE"]]
 
             rows.append(["status", status.status])
-            if status.status == "starting" { rows.append(["detail", "Waiting for the default network; retry after startup."]) }
+            if status.status == startingStatus { rows.append(["detail", "Waiting for the default network; retry after startup."]) }
 
             if let client = status.client {
                 rows.append(["client.version", client.version])
