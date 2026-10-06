@@ -229,6 +229,39 @@ struct VariableTests {
         #expect(try running(["debug"]) == ["debug", "web"])
         #expect(try running([]) == ["web"])
     }
+
+    /// A refused service may be in a profile that was turned on, by the `.env` as often as
+    /// not. The refusal carries the profiles, so whoever shows it can offer to turn that
+    /// one off; a refusal from planning did, and one from reading the files did not.
+    @Test
+    func aRefusalFromReadingCarriesTheProfiles() throws {
+        let project = try TemporaryProject([
+            "compose.yaml":
+                "services:\n  web:\n    image: web:1\n  debug:\n    image: debug:1\n    privileged: true\n    profiles: [debug]\n  tools:\n    image: tools:1\n    profiles: [tools]\n",
+            ".env": "COMPOSE_PROFILES=debug\n",
+        ])
+        #expect {
+            try project.load()
+        } throws: { error in
+            guard let refusal = error as? ComposeError else { return false }
+            return refusal.namedProfiles == ["debug", "tools"] && refusal.activeProfiles == ["debug"]
+                && refusal.diagnostics.map(\.path) == ["services.debug.privileged"]
+        }
+        #expect {
+            try project.load(profiles: ["debug", "tools"])
+        } throws: { error in
+            (error as? ComposeError)?.activeProfiles == ["debug", "tools"]
+        }
+        // With the profile off, the service is not read for what it asks, and nothing is refused.
+        #expect(try project.load(profiles: []).profiles.isEmpty)
+        // A refusal before the files are read that far carries nothing.
+        let missing = try TemporaryProject([:])
+        #expect {
+            try missing.load()
+        } throws: { error in
+            (error as? ComposeError)?.namedProfiles.isEmpty == true && (error as? ComposeError)?.activeProfiles == nil
+        }
+    }
 }
 
 struct MergeTests {

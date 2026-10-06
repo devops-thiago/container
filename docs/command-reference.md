@@ -1424,6 +1424,8 @@ container system stop [--prefix <prefix>] [--debug]
 
 Checks whether the container services are running and prints status information. It sends a health check request to the API server, which returns basic system information.
 
+The exit status says whether containers can run now: 0 with `status running`, and 1 otherwise, when the API server is `unregistered`, `not running`, or `starting` (answering, with its default network not up yet). A script that waits for the engine can loop on the exit status alone.
+
 **Usage**
 
 ```bash
