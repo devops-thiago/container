@@ -49,7 +49,16 @@ public struct ProcessIO: Sendable {
                 return nil
             }
             let current = try Terminal(descriptor: STDIN_FILENO)
-            try current.setraw()
+            do {
+                try current.setraw()
+            } catch let error as POSIXError where error.code == .EPERM {
+                // The App Sandbox denies the terminal ioctls to a sandboxed command line, so
+                // the terminal cannot be set raw. It stays as it is, in line mode: what is
+                // typed reaches the container a line at a time, with the terminal's own
+                // echo and editing, which is a shell that works rather than a run that
+                // fails with "Operation not permitted".
+                FileHandle.standardError.write(Data("the terminal stays in line mode: this command line may not set it raw\n".utf8))
+            }
             return current
         }()
 
@@ -174,10 +183,13 @@ public struct ProcessIO: Sendable {
             }
 
             if let current = console {
-                let size = try current.size
-                // It's supremely possible the process could've exited already. We shouldn't treat
-                // this as fatal.
-                try? await process.resize(size)
+                // The size is best effort too: the ioctl that reads it is denied where raw
+                // mode was, and a container that cannot be told its terminal's size still runs.
+                if let size = try? current.size {
+                    // It's supremely possible the process could've exited already. We shouldn't treat
+                    // this as fatal.
+                    try? await process.resize(size)
+                }
                 _ = group.addTaskUnlessCancelled {
                     let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
                     for await _ in winchHandler.signals {
@@ -235,7 +247,9 @@ public struct ProcessIO: Sendable {
     }
 
     public func close() throws {
-        try console?.reset()
+        // A terminal that was never set raw has nothing to put back, and the ioctl that
+        // would is the one that was denied.
+        try? console?.reset()
     }
 
     public func wait() async throws {
