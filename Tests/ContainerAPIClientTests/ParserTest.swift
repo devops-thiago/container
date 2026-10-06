@@ -854,7 +854,10 @@ struct ParserTest {
         let group = DispatchGroup()
 
         group.enter()
-        DispatchQueue.global().async {
+        // A thread of its own, not the global queue: this test blocks one of Swift's
+        // cooperative threads in open(2) until the writer opens the pipe, and with enough
+        // of those threads blocked the global queues get no thread to run the writer on.
+        Thread {
             do {
                 let handle = try FileHandle(forWritingTo: pipePath)
                 try handle.write(contentsOf: "SECRET_KEY=value123\n".data(using: .utf8)!)
@@ -863,7 +866,7 @@ struct ParserTest {
                 Issue.record(error)
             }
             group.leave()
-        }
+        }.start()
 
         // Read from pipe (blocks until writer connects)
         let lines = try Parser.envFile(path: pipePath.path)
