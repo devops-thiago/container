@@ -386,22 +386,7 @@ extension PluginLoader {
             try Self.spawnInstance(label: id, instanceId: instanceId, argv: argv, env: env, log: log)
             // Clients dial the instance as soon as this returns, so the child
             // must have announced its endpoint by then.
-            let waitStart = ContinuousClock.now
-            for service in machServices {
-                let attached = InstanceEndpoints.waitForAttach(label: service, timeout: 30)
-                log?.info(
-                    "instance announce wait",
-                    metadata: [
-                        "service": "\(service)",
-                        "attached": "\(attached)",
-                        "elapsed": "\(waitStart.duration(to: ContinuousClock.now))",
-                    ])
-                if !attached {
-                    log?.error(
-                        "runtime instance did not announce its endpoint",
-                        metadata: ["service": "\(service)"])
-                }
-            }
+            try Self.awaitAnnouncement(label: id, services: machServices, log: log)
             return
         }
 
@@ -512,6 +497,37 @@ extension PluginLoader {
             ])
     }
 
+    /// Wait for a spawned helper to announce every endpoint clients will dial. One that has
+    /// not within the wait is terminated and the registration fails, naming the service: a
+    /// helper left running unannounced surfaced later, at the first call to it, as a
+    /// connection error that said nothing of the cause.
+    static func awaitAnnouncement(
+        label: String, services: [String], timeout: TimeInterval = 30, log: Logger?,
+        tracking: SpawnedInstances? = nil, operations: ProcessOperations = ProcessOperations(),
+        waitForAttach: (String, TimeInterval) -> Bool = { InstanceEndpoints.waitForAttach(label: $0, timeout: $1) }
+    ) throws {
+        let waitStart = ContinuousClock.now
+        for service in services {
+            let attached = waitForAttach(service, timeout)
+            log?.info(
+                "instance announce wait",
+                metadata: [
+                    "service": "\(service)",
+                    "attached": "\(attached)",
+                    "elapsed": "\(waitStart.duration(to: ContinuousClock.now))",
+                ])
+            guard attached else {
+                log?.error(
+                    "runtime instance did not announce its endpoint; terminating it",
+                    metadata: ["label": "\(label)", "service": "\(service)"])
+                terminateInstance(label: label, log: log, tracking: tracking, operations: operations)
+                throw ContainerizationError(
+                    .timeout,
+                    message: "runtime helper \(label) did not announce \(service) within \(Int(timeout)) seconds and was terminated")
+            }
+        }
+    }
+
     static func terminateInstance(
         label: String, log: Logger?, tracking: SpawnedInstances? = nil,
         operations: ProcessOperations = ProcessOperations()
@@ -554,10 +570,8 @@ extension PluginLoader {
         let root = installRoot.resolvingSymlinksInPath().path(percentEncoded: false)
         let selfPid = getpid()
 
-        var pids = [pid_t](repeating: 0, count: 4096)
-        // Unlike proc_listpids, proc_listallpids returns a process count, not bytes.
-        let count = listAllPIDs(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
-        let candidates = orphanCandidates(pids: pids, count: Int(count), selfPID: selfPid) {
+        let (pids, count) = processInventory(listAllPIDs)
+        let candidates = orphanCandidates(pids: pids, count: count, selfPID: selfPid) {
             helperPath($0, root)
         }
         var victims: [pid_t] = []
@@ -570,6 +584,24 @@ extension PluginLoader {
         }
 
         return victims
+    }
+
+    /// Every process id, in a buffer sized from the live count rather than a fixed 4,096: on
+    /// a Mac with more processes than that, an orphan past the buffer was never seen. Asked
+    /// with no buffer, `proc_listallpids` answers with the count. Processes come and go
+    /// between the two calls, so there is room to spare, and a buffer that filled to its end
+    /// is grown and asked again.
+    static func processInventory(_ listAllPIDs: (UnsafeMutableRawPointer?, Int32) -> Int32) -> (pids: [pid_t], count: Int) {
+        var capacity = max(Int(listAllPIDs(nil, 0)), 0) + 256
+        while true {
+            var pids = [pid_t](repeating: 0, count: capacity)
+            // Unlike proc_listpids, proc_listallpids returns a process count, not bytes.
+            let count = Int(listAllPIDs(&pids, Int32(pids.count * MemoryLayout<pid_t>.size)))
+            if count < pids.count || capacity >= 1 << 20 {
+                return (pids, count)
+            }
+            capacity *= 2
+        }
     }
 
     /// Bound the API's count to initialized storage and retain the helper ownership check.
@@ -628,8 +660,14 @@ extension PluginLoader {
         var buffer = [UInt8](repeating: 0, count: 4096)
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
-        let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
-        guard path.hasPrefix(root), path.contains("/libexec/container/plugins/") else {
+        return ownedHelperPath(String(decoding: buffer[..<Int(length)], as: UTF8.self), under: root)
+    }
+
+    /// `path` when it is one of this install's plugin helpers: under `root` by whole path
+    /// components, so `…/Contents-old/libexec/…` is not taken for one under `…/Contents`,
+    /// which a comparison of the strings' beginnings did.
+    static func ownedHelperPath(_ path: String, under root: String) -> String? {
+        guard FilePath(path).starts(with: FilePath(root)), path.contains("/libexec/container/plugins/") else {
             return nil
         }
         return path

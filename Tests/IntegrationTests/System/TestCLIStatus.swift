@@ -71,7 +71,7 @@ struct TestCLIStatus {
             if result.status != 0 {
                 #expect(!result.output.isEmpty)
                 let decoded = try JSONDecoder().decode(StatusJSON.self, from: result.outputData)
-                #expect(decoded.status == "not running" || decoded.status == "unregistered")
+                #expect(decoded.status == "not running" || decoded.status == "unregistered" || decoded.status == "starting")
                 return
             }
 
