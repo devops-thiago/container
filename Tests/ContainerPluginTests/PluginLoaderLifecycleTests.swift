@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import Foundation
 import Testing
 
@@ -104,6 +105,87 @@ struct PluginLoaderLifecycleTests {
         #expect(tracking.processes(label: "web").first === current)
     }
 
+    /// A helper that never announces used to be left running, and its registration returned
+    /// as if it had; the failure showed later, at the first call, as a connection error.
+    @Test func aHelperThatNeverAnnouncesIsTerminatedAndTheRegistrationFails() throws {
+        let tracking = SpawnedInstances()
+        let child = Process()
+        _ = try tracking.start(child, label: "web", run: { _ in })
+        var terminated: [ObjectIdentifier] = []
+        let operations = PluginLoader.ProcessOperations(isRunning: { _ in true }, terminate: { terminated.append(ObjectIdentifier($0)) })
+        var asked: [String] = []
+
+        #expect {
+            try PluginLoader.awaitAnnouncement(
+                label: "web", services: ["runtime.web", "logs.web"], timeout: 0.01, log: nil, tracking: tracking,
+                operations: operations, waitForAttach: { service, _ in
+                    asked.append(service)
+                    return service == "runtime.web"
+                })
+        } throws: { error in
+            let failure = error as? ContainerizationError
+            return failure?.code == .timeout && failure?.message.contains("logs.web") == true && failure?.message.contains("web") == true
+        }
+        #expect(asked == ["runtime.web", "logs.web"], "the wait stops at the first service that never came")
+        #expect(terminated == [ObjectIdentifier(child)])
+
+        terminated.removeAll()
+        try PluginLoader.awaitAnnouncement(
+            label: "web", services: ["runtime.web"], timeout: 0.01, log: nil, tracking: tracking,
+            operations: operations, waitForAttach: { _, _ in true })
+        #expect(terminated.isEmpty, "one that announced is left alone")
+    }
+
+    @Test func aSiblingInstallWhoseNameStartsTheSameIsNotMatched() {
+        let root = "/Applications/SiliconShip.app/Contents"
+        let own = "/Applications/SiliconShip.app/Contents/libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux"
+        #expect(PluginLoader.ownedHelperPath(own, under: root) == own)
+        #expect(PluginLoader.ownedHelperPath(own, under: root + "/") == own)
+        let sibling = "/Applications/SiliconShip.app/Contents-old/libexec/container/plugins/container-runtime-linux/bin/container-runtime-linux"
+        #expect(PluginLoader.ownedHelperPath(sibling, under: root) == nil, "the string starts the same; the path does not lie under the root")
+        #expect(PluginLoader.ownedHelperPath("/Applications/SiliconShip.app/Contents/MacOS/container", under: root) == nil, "not a plugin helper")
+        #expect(PluginLoader.ownedHelperPath("/Applications/Other.app/Contents/libexec/container/plugins/x/bin/x", under: root) == nil)
+    }
+
+    /// The buffer used to hold 4,096 ids whatever the count, and an orphan past that was never seen.
+    @Test func anOrphanBeyondFourThousandEntriesIsFound() {
+        let total = 5_000
+        let orphan: pid_t = 70_000
+        var sizes: [Int] = []
+        var signalled: [pid_t] = []
+        let victims = PluginLoader.reapOrphanedInstances(
+            installRoot: URL(fileURLWithPath: "/fixture"),
+            listAllPIDs: { pointer, bytes in
+                guard let pointer else {
+                    #expect(bytes == 0, "the count is asked for with no buffer")
+                    return Int32(total)
+                }
+                sizes.append(bytes / MemoryLayout<pid_t>.size)
+                let buffer = pointer.assumingMemoryBound(to: pid_t.self)
+                for index in 0..<total { buffer[index] = index == 4_500 ? orphan : pid_t(1_000 + index) }
+                return Int32(total)
+            },
+            helperPath: { pid, _ in pid == orphan ? "/fixture/libexec/container/plugins/runtime" : nil },
+            signal: { pid, _ in signalled.append(pid) })
+        #expect(sizes == [total + 256], "sized from the count, with room for processes that start meanwhile")
+        #expect(victims == [orphan])
+        #expect(signalled == [orphan])
+    }
+
+    @Test func aBufferThatFillsIsGrownAndAskedAgain() {
+        var sizes: [Int] = []
+        let (pids, count) = PluginLoader.processInventory { pointer, bytes in
+            guard pointer != nil else { return 100 }
+            let slots = bytes / MemoryLayout<pid_t>.size
+            sizes.append(slots)
+            // More processes than the first buffer holds: the answer fills it to the end.
+            return Int32(slots < 500 ? slots : 500)
+        }
+        #expect(sizes == [356, 712])
+        #expect(count == 500)
+        #expect(pids.count == 712)
+    }
+
     @Test func orphanScanTreatsTheInventoryResultAsACount() {
         let last: pid_t = getpid() + 100
         let slots: [pid_t] = [0, -1, getpid(), last - 4, last - 3, last - 2, last - 1, last, last + 1]
@@ -112,8 +194,9 @@ struct PluginLoaderLifecycleTests {
         let victims = PluginLoader.reapOrphanedInstances(
             installRoot: URL(fileURLWithPath: "/fixture"),
             listAllPIDs: { pointer, bytes in
-                #expect(bytes == 4096 * MemoryLayout<pid_t>.size)
-                let buffer = pointer!.assumingMemoryBound(to: pid_t.self)
+                guard let pointer else { return 8 }
+                #expect(bytes == (8 + 256) * MemoryLayout<pid_t>.size)
+                let buffer = pointer.assumingMemoryBound(to: pid_t.self)
                 for (index, pid) in slots.enumerated() { buffer[index] = pid }
                 return 8
             },
