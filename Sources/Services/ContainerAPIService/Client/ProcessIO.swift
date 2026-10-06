@@ -42,7 +42,13 @@ public struct ProcessIO: Sendable {
 
     public let console: Terminal?
 
+    /// Whether the console was set raw. A raw terminal passes every key to the container,
+    /// Ctrl-C included, as bytes; one left in line mode turns Ctrl-C into a signal for this
+    /// process instead, which is then forwarded.
+    public let rawConsole: Bool
+
     public static func create(tty: Bool, interactive: Bool, detach: Bool) throws -> ProcessIO {
+        var rawConsole = false
         let current: Terminal? = try {
             if !tty || !interactive {
                 return nil
@@ -50,6 +56,7 @@ public struct ProcessIO: Sendable {
             let current = try Terminal(descriptor: STDIN_FILENO)
             do {
                 try current.setraw()
+                rawConsole = true
             } catch let error as POSIXError where error.code == .EPERM {
                 // The App Sandbox denies the terminal ioctls to a sandboxed command line, so
                 // the terminal cannot be set raw. It stays as it is, in line mode: what is
@@ -160,7 +167,8 @@ public struct ProcessIO: Sendable {
             stderr: stderr,
             ioTracker: ioTracker,
             stdio: stdio,
-            console: current
+            console: current,
+            rawConsole: rawConsole
         )
     }
 
@@ -205,7 +213,10 @@ public struct ProcessIO: Sendable {
                     }
                     return nil
                 }
-            } else {
+            }
+            // Without a raw console the terminal, or whoever runs the command, turns Ctrl-C
+            // and the rest into signals for this process; they are the container's.
+            if !rawConsole {
                 _ = group.addTaskUnlessCancelled {
                     for await sig in signals.signals {
                         do {
