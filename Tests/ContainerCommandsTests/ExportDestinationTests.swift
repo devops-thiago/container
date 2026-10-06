@@ -237,7 +237,10 @@ struct ExportDestinationTests {
 
         for input in [first, second] {
             group.enter()
-            DispatchQueue.global().async {
+            // A thread of its own for each exporter, not the global queue: the suites run in
+            // parallel, and when enough of them hold queue threads at a wait, the two blocks
+            // here never got one and the race never began.
+            Thread {
                 defer { group.leave() }
                 do {
                     var operations = ExportDestination.Operations()
@@ -260,14 +263,17 @@ struct ExportDestinationTests {
                 } catch {
                     outcomes.recordFailure(error)
                 }
-            }
+            }.start()
         }
 
-        #expect(ready.wait(timeout: .now() + 5) == .success)
-        #expect(ready.wait(timeout: .now() + 5) == .success)
+        // The semaphores are what order the race; the waits only bound a hang. Five seconds
+        // was not enough on a loaded machine, where the second exporter had not reached the
+        // rename when the first was released, and the outcome then read as a defect.
+        #expect(ready.wait(timeout: .now() + 60) == .success)
+        #expect(ready.wait(timeout: .now() + 60) == .success)
         release.signal()
         release.signal()
-        #expect(group.wait(timeout: .now() + 5) == .success)
+        #expect(group.wait(timeout: .now() + 60) == .success)
 
         let result = outcomes.value
         #expect(result.successes == 1)
