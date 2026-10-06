@@ -135,10 +135,16 @@ public struct ServiceManager {
         group: DispatchGroup
     ) {
         group.enter()
-        DispatchQueue.global(qos: .utility).async {
+        // A thread of its own, not the global queue. The caller blocks on the group, and
+        // when that caller is one of Swift's cooperative threads the global queues can go
+        // without a thread for as long as it waits; a capture queued there then never ran,
+        // and the wait never ended.
+        let capture = Thread {
             defer { group.leave() }
             storage.append(handle.readDataToEndOfFile())
         }
+        capture.name = "launchctl-capture"
+        capture.start()
     }
 
     /// Register a service by providing the path to a plist.
