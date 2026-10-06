@@ -118,7 +118,8 @@ struct PluginLoaderLifecycleTests {
         #expect {
             try PluginLoader.awaitAnnouncement(
                 label: "web", services: ["runtime.web", "logs.web"], timeout: 0.01, log: nil, tracking: tracking,
-                operations: operations, waitForAttach: { service, _ in
+                operations: operations,
+                waitForAttach: { service, _ in
                     asked.append(service)
                     return service == "runtime.web"
                 })
@@ -160,7 +161,7 @@ struct PluginLoaderLifecycleTests {
                     #expect(bytes == 0, "the count is asked for with no buffer")
                     return Int32(total)
                 }
-                sizes.append(bytes / MemoryLayout<pid_t>.size)
+                sizes.append(Int(bytes) / MemoryLayout<pid_t>.size)
                 let buffer = pointer.assumingMemoryBound(to: pid_t.self)
                 for index in 0..<total { buffer[index] = index == 4_500 ? orphan : pid_t(1_000 + index) }
                 return Int32(total)
@@ -176,7 +177,7 @@ struct PluginLoaderLifecycleTests {
         var sizes: [Int] = []
         let (pids, count) = PluginLoader.processInventory { pointer, bytes in
             guard pointer != nil else { return 100 }
-            let slots = bytes / MemoryLayout<pid_t>.size
+            let slots = Int(bytes) / MemoryLayout<pid_t>.size
             sizes.append(slots)
             // More processes than the first buffer holds: the answer fills it to the end.
             return Int32(slots < 500 ? slots : 500)

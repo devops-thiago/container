@@ -65,7 +65,10 @@ public struct ComposeProject: Sendable {
 
     public func up(_ plan: ProjectPlan, options: UpOptions = UpOptions()) async throws {
         try Task.checkCancellation()
+        // A run that was cancelled stops between items: the network or volume being made is
+        // finished, and no further one is begun.
         for network in plan.networks where !(try await engine.networkExists(network.name)) {
+            try Task.checkCancellation()
             guard !network.external else {
                 throw ComposeError(
                     "the network \(network.name) is declared external and does not exist; create it with: container network create \(network.name)")
@@ -75,6 +78,7 @@ public struct ComposeProject: Sendable {
             hooks.event(ComposeEvent(.network, network.name, .created))
         }
         for volume in plan.volumes where !(try await engine.volumeExists(volume.name)) {
+            try Task.checkCancellation()
             guard !volume.external else {
                 throw ComposeError(
                     "the volume \(volume.name) is declared external and does not exist; create it with: container volume create \(volume.name)")
@@ -264,6 +268,9 @@ public struct ComposeProject: Sendable {
             if try await hasDoneItsJob(container: service.containerName, service: service.service, for: waiting) { continue }
             try await start(container: service.containerName, service: service.service)
         }
+        // A cancel that landed during the last start is still a cancel: the start was
+        // finished, as every step under way is, and the run does not report success.
+        try Task.checkCancellation()
     }
 
     /// For each service that others wait on to finish, the services that wait.

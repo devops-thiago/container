@@ -128,6 +128,12 @@ public enum ComposePart: Sendable, Hashable, CustomStringConvertible {
 /// found, not the first: a file with three unsupported keys says so once.
 public struct ComposeError: Error, Sendable, CustomStringConvertible, LocalizedError {
     public let diagnostics: [ComposeDiagnostic]
+    /// Every profile the files name, when the refusal comes from reading them far enough to
+    /// know: a refused service may be in a profile that was turned on, and the way out is
+    /// to turn it off. Empty when the files were not read that far.
+    public var namedProfiles: [String] = []
+    /// The profiles that were on for that read, when it got far enough to know.
+    public var activeProfiles: [String]?
 
     public init(_ diagnostics: [ComposeDiagnostic]) {
         self.diagnostics = diagnostics
