@@ -80,10 +80,18 @@ struct ClientProcessImpl: ClientProcess, Sendable {
 
     /// Send a signal to the process.
     public func kill(_ signal: Int32) async throws {
+        // The service reads the signal as a string and the runtime parses it by name, so
+        // a signal is sent by its name on this platform: its number here is not its number
+        // in the container (SIGUSR1 is 30 on macOS and 10 on Linux). It used to be sent as
+        // a number, which the service never read: every forwarded signal failed with
+        // "missing signal in xpc message".
+        guard let name = Signal.platformName(signal) else {
+            throw ContainerizationError(.invalidArgument, message: "signal \(signal) has no name on this platform")
+        }
         let request = XPCMessage(route: .containerKill)
         request.set(key: .id, value: containerId)
         request.set(key: .processIdentifier, value: id)
-        request.set(key: .signal, value: Int64(signal))
+        request.set(key: .signal, value: name)
 
         try await xpcClient.send(request)
     }
