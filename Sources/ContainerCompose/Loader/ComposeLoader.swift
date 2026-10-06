@@ -222,7 +222,15 @@ public enum ComposeLoader {
 
         let used = file.parts(of: file.services.filter { $0.isActive(in: profiles) })
         let withheld = diagnostics.withhold { !used.contains($0) }
-        try diagnostics.throwIfFailed()
+        do {
+            try diagnostics.throwIfFailed()
+        } catch var error as ComposeError {
+            // Whoever shows the refusal can offer the profile that brought a refused service
+            // in, as a refusal from planning does.
+            error.namedProfiles = Set(file.services.flatMap(\.profiles)).sorted()
+            error.activeProfiles = profiles
+            throw error
+        }
         return ComposeDefinition(
             name: name,
             directory: directory.path,

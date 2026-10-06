@@ -52,7 +52,9 @@ public actor NetworksService {
     /// One open session per attachment of every container that exists, started or not. The
     /// network helper keeps an address for as long as a session holds its hostname, so the
     /// container has its address, and its peers have its name, from create to delete.
-    private var reservations = [String: [XPCClientSession]]()
+    /// The sessions holding a container's addresses, by container and then by network: a
+    /// network that was not up when the container was created is reserved on a later call.
+    private var reservations = [String: [String: XPCClientSession]]()
 
     public init(
         pluginLoader: PluginLoader,
@@ -145,20 +147,21 @@ public actor NetworksService {
     ///
     /// Called at create, and again for every container when the engine starts, since a
     /// helper that was restarted has forgotten what it handed out. Doing it twice for one
-    /// container is harmless.
+    /// container is harmless: what is held already is left as it is, and only an
+    /// attachment whose network was not up the first time is reserved now.
     public func reserveAddresses(for container: String, attachments: [AttachmentConfiguration]) async throws {
-        guard reservations[container] == nil, !attachments.isEmpty else { return }
-        var sessions: [XPCClientSession] = []
+        var held = reservations[container] ?? [:]
+        var sessions: [String: XPCClientSession] = [:]
         do {
-            for attachment in attachments {
+            for attachment in attachments where held[attachment.network] == nil {
                 // A network that is not up yet is not this container's failure: its runtime
-                // allocates at start, as it always has, and the next engine start reserves.
+                // allocates at start, as it always has, and the next call reserves.
                 guard let entry = serviceStates[attachment.network] else {
                     log.info("network not running; address not reserved", metadata: ["id": "\(container)", "network": "\(attachment.network)"])
                     continue
                 }
                 let session = entry.client.connect()
-                sessions.append(session)
+                sessions[attachment.network] = session
                 do {
                     _ = try await entry.client.allocate(
                         hostname: attachment.options.hostname,
@@ -174,17 +177,19 @@ public actor NetworksService {
                 }
             }
         } catch {
-            for session in sessions { session.close() }
+            for session in sessions.values { session.close() }
             throw error
         }
-        reservations[container] = sessions
-        log.info("reserved addresses", metadata: ["id": "\(container)", "attachments": "\(attachments.count)"])
+        guard !sessions.isEmpty else { return }
+        held.merge(sessions) { _, new in new }
+        reservations[container] = held
+        log.info("reserved addresses", metadata: ["id": "\(container)", "networks": "\(sessions.keys.sorted())", "held": "\(held.count)"])
     }
 
     /// Give back the addresses held for a container that no longer exists.
     public func releaseAddresses(for container: String) {
         guard let sessions = reservations.removeValue(forKey: container) else { return }
-        for session in sessions { session.close() }
+        for session in sessions.values { session.close() }
         log.info("released addresses", metadata: ["id": "\(container)"])
     }
 

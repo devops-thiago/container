@@ -624,6 +624,60 @@ struct LifecycleTests {
         #expect(!run.engine.calls.contains { $0.hasPrefix("start") })
     }
 
+    private static let twoOfEach = """
+        services:
+          web:
+            image: web:1
+            networks: [front, back]
+            volumes:
+              - a:/a
+              - b:/b
+        networks:
+          front:
+          back:
+        volumes:
+          a:
+          b:
+        """
+
+    /// A cancel used to be noticed only between containers: every network and volume was
+    /// still made, and a cancel during the last start reported the run as a success.
+    @Test
+    func aCancelBetweenNetworksOrVolumesStopsBeforeTheNextOne() async throws {
+        for (subject, made, notMade) in [
+            (ComposeEvent.Subject.network, "network create shop_back", "network create shop_front"),
+            (.volume, "volume create shop_a", "volume create shop_b"),
+        ] {
+            let run = ComposeRun()
+            let plan = try run.plan(Self.twoOfEach)
+            let recorder = Recorder()
+            var hooks = recorder.hooks()
+            hooks.event = { event in
+                if event.status == .created, event.subject == subject { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+            let project = ComposeProject(name: "shop", engine: run.engine, hooks: hooks)
+            await #expect(throws: CancellationError.self) { try await Task { try await project.up(plan) }.value }
+            #expect(run.engine.calls.contains(made), "\(subject): the one being made is finished")
+            #expect(!run.engine.calls.contains(notMade), "\(subject): the next is not begun")
+            #expect(!run.engine.calls.contains { $0.hasPrefix("create ") }, "\(subject): no container is made")
+        }
+    }
+
+    @Test
+    func aCancelDuringTheLastStartIsStillACancel() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan(Self.stack)
+        let recorder = Recorder()
+        var hooks = recorder.hooks()
+        // The last service to start is the worker; the cancel lands while it is starting.
+        hooks.event = { event in
+            if event.status == .starting, event.service == "worker" { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let project = ComposeProject(name: "shop", engine: run.engine, hooks: hooks)
+        await #expect(throws: CancellationError.self) { try await Task { try await project.up(plan) }.value }
+        #expect(run.engine.calls.contains("start shop-worker-1"), "the start under way is finished")
+    }
+
     @Test
     func theProjectsContainersAreListedByService() async throws {
         let run = try await running()

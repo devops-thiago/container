@@ -123,8 +123,11 @@ let package = Package(
         .testTarget(
             name: "RegistryTransportTests",
             dependencies: [
+                .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 "RegistryTransport",
             ]
         ),
