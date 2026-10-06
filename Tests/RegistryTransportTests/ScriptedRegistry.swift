@@ -60,9 +60,26 @@ final class ScriptedRegistry: Sendable {
         port = channel.localAddress!.port!
     }
 
-    func stop() {
-        try? channel.close().wait()
-        try? group.syncShutdownGracefully()
+    /// Runs `body` against a registry that answers with `reply`, and stops it after. The
+    /// stop is awaited, not waited for: the shutdown's callback comes by way of the global
+    /// queue, and a test thread of Swift's cooperative pool held at a semaphore for it is
+    /// one the pool cannot use for anything else, the callback included.
+    static func serving<T>(_ reply: Reply, _ body: (ScriptedRegistry) async throws -> T) async throws -> T {
+        let registry = try ScriptedRegistry(reply)
+        let result: T
+        do {
+            result = try await body(registry)
+        } catch {
+            await registry.stop()
+            throw error
+        }
+        await registry.stop()
+        return result
+    }
+
+    func stop() async {
+        try? await channel.close().get()
+        try? await group.shutdownGracefully()
     }
 
     private final class Handler: ChannelInboundHandler, Sendable {

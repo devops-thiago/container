@@ -19,6 +19,7 @@ import ContainerAPIClient
 import ContainerVersion
 import ContainerizationError
 import Foundation
+import Synchronization
 
 extension Application {
     /// Passes standard input and output on to a socket the embedding application listens on.
@@ -113,15 +114,35 @@ enum StreamRelay {
     /// Copy `input` to the socket and the socket to `output`, until the far end of the
     /// socket closes. The end of `input` is passed on as the end of what this side sends,
     /// and what the far end still has to say is copied out before returning.
+    ///
+    /// Once this returns the socket is the caller's to close. The sending thread may still
+    /// be in `read(2)` on `input` then, and when the input ends later it must not pass that
+    /// on to the socket's number, which by then can be another descriptor's: the end is
+    /// passed on only while the socket is still this relay's.
     static func run(input: Int32, output: Int32, socket: Int32) {
         // A reader that has gone away is an end like any other, not a signal to die on.
         signal(SIGPIPE, SIG_IGN)
+        let ownership = SocketOwnership()
         let sending = Thread {
             copy(from: input, to: socket)
-            shutdown(socket, SHUT_WR)
+            ownership.whileOwned { shutdown(socket, SHUT_WR) }
         }
         sending.start()
         copy(from: socket, to: output)
+        ownership.release()
+    }
+
+    /// Whether the relay still owns its socket; the caller takes it back when `run` returns.
+    private final class SocketOwnership: Sendable {
+        private let owned = Mutex(true)
+
+        func whileOwned(_ body: () -> Void) {
+            owned.withLock { if $0 { body() } }
+        }
+
+        func release() {
+            owned.withLock { $0 = false }
+        }
     }
 
     /// Copy until the source ends or the destination refuses more.

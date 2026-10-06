@@ -54,10 +54,20 @@ struct StreamRelayTests {
         #expect(write(descriptor, bytes, bytes.count) == bytes.count)
     }
 
+    /// Waits for `descriptor` to have something to read, or an end, for up to ten seconds.
+    /// A read that would wait longer is a hang, and a hang here held the whole suite once;
+    /// it is reported instead.
+    private func readable(_ descriptor: Int32, _ what: String) -> Bool {
+        var waiting = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let ready = poll(&waiting, 1, 10_000)
+        #expect(ready == 1, "nothing to read from \(what) within ten seconds")
+        return ready == 1
+    }
+
     private func receive(_ count: Int, from descriptor: Int32) -> String {
         var bytes = [UInt8](repeating: 0, count: count)
         var got = 0
-        while got < count {
+        while got < count, readable(descriptor, "the relay") {
             let result = bytes.withUnsafeMutableBytes { read(descriptor, $0.baseAddress! + got, count - got) }
             guard result > 0 else { break }
             got += result
@@ -86,7 +96,7 @@ struct StreamRelayTests {
         close(wiring.toInput)
         #expect(receive(10, from: wiring.application) == "last words")
         var byte: UInt8 = 0
-        #expect(read(wiring.application, &byte, 1) == 0, "the application reads the end of what the tool sent")
+        #expect(readable(wiring.application, "the application's end") && read(wiring.application, &byte, 1) == 0, "the application reads the end of what the tool sent")
 
         // The relay is still listening to the application, whose answer is copied out.
         send("goodbye", to: wiring.application)
@@ -107,7 +117,7 @@ struct StreamRelayTests {
         sender.start()
         var total = 0
         var buffer = [UInt8](repeating: 0, count: 1 << 16)
-        while true {
+        while readable(wiring.application, "the stream") {
             let count = read(wiring.application, &buffer, buffer.count)
             guard count > 0 else { break }
             total += count
