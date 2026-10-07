@@ -53,6 +53,7 @@ extension ComposeNode {
     /// Parse one compose document. An empty document is an empty mapping: an override file
     /// with nothing in it changes nothing.
     static func parse(yaml: String, file: String) throws -> ComposeNode {
+        try ComposeInput.validate(yaml, file: file)
         let root: Node?
         do {
             root = try Yams.compose(yaml: yaml)
@@ -88,6 +89,7 @@ extension ComposeNode {
     }
 
     private init(_ node: Node, file: String) throws {
+        try Task.checkCancellation()
         let location = SourceLocation(file: file, line: node.mark?.line ?? 1, column: node.mark?.column ?? 1)
         // Compose's own tags change how files merge. Reading past one would merge the
         // files differently from what the author asked for.
