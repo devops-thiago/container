@@ -195,10 +195,21 @@ public enum ComposeLoader {
             if !unset.contains(name) { unset.append(name) }
         }
         var merged = RawProject()
+        var expandedBytes = 0
         for document in documents {
-            let substituted = document.mapScalars { text, node in
+            let substituted = try document.mapScalars { text, node in
+                try Task.checkCancellation()
                 do {
-                    return try interpolator.interpolate(text)
+                    let value = try interpolator.interpolate(text)
+                    expandedBytes += value.utf8.count
+                    guard expandedBytes <= ComposeInput.maximumExpandedBytes else {
+                        throw ComposeError("interpolated project exceeds the 8 MiB compose input budget", at: node.location)
+                    }
+                    return value
+                } catch let error as ComposeError {
+                    throw error
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     diagnostics.error("", "\(error)", at: node.location)
                     return text
@@ -210,7 +221,9 @@ public enum ComposeLoader {
             diagnostics.warn("", "the variable \(variable) is not set; it reads as an empty string")
         }
 
+        try Task.checkCancellation()
         let file = Resolver(context: context, environment: variables).resolve(merged)
+        try Task.checkCancellation()
 
         let fromEnvironment = (variables["COMPOSE_PROFILES"] ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         var profiles: [String] = []
@@ -251,7 +264,9 @@ public enum ComposeLoader {
 
     private static func readText(_ path: String) throws -> String {
         do {
-            return try String(contentsOfFile: path, encoding: .utf8)
+            return try ComposeInput.read(path)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw ComposeError("\(path) could not be read: \(error.localizedDescription)")
         }
