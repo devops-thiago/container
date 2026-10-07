@@ -184,3 +184,7 @@ nothing is said about it; the same goes for a network or a volume that only such
 use, or that no service uses. Turning the profile on, or naming the service, checks it.
 `container compose --profile "*" config -q` checks every service. `config` leaves out of
 what it prints a part that is not checked and has something wrong with it, and says so.
+
+### Input limits
+
+Compose and environment files are limited to 1 MiB each. YAML documents may contain up to 100,000 expanded nodes, 64 levels of nesting, and 8 MiB of expanded scalar text. Anchors and merge keys count toward these limits after expansion. Files exceeding a limit are rejected with a diagnostic; they are never truncated or partially applied. Interpolated project text and expanded environment entries also share an 8 MiB budget, with interpolation nesting limited to 64 levels. Cancelling a load stops the parser at its next cancellation check.

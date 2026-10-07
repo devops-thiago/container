@@ -34,12 +34,15 @@ struct Interpolator {
         var description: String { message }
     }
 
-    func interpolate(_ text: String) throws -> String {
+    func interpolate(_ text: String, depth: Int = 0) throws -> String {
+        try Task.checkCancellation()
+        guard depth < 64 else { throw Failure(message: "interpolation nesting exceeds 64 levels") }
         guard text.contains("$") else { return text }
         var result = ""
         var rest = Substring(text)
         while let dollar = rest.firstIndex(of: "$") {
-            result += rest[..<dollar]
+            try append(rest[..<dollar], to: &result)
+            try Task.checkCancellation()
             rest = rest[rest.index(after: dollar)...]
             guard let next = rest.first else {
                 try literalDollar(in: text, into: &result)
@@ -57,22 +60,29 @@ struct Interpolator {
                     throw Failure(message: "invalid interpolation in \"\(text)\": '${' is never closed")
                 }
                 let body = rest[rest.index(after: rest.startIndex)..<close]
-                if let value = try substitute(braced: body, in: text) {
-                    result += value
+                if let value = try substitute(braced: body, in: text, depth: depth) {
+                    try append(value, to: &result)
                 } else {
-                    result += "${" + body + "}"
+                    try append("${" + body + "}", to: &result)
                 }
                 rest = rest[rest.index(after: close)...]
             } else if Self.startsName(next) {
                 let name = rest.prefix(while: Self.continuesName)
-                result += value(of: String(name))
+                try append(value(of: String(name)), to: &result)
                 rest = rest[name.endIndex...]
             } else {
                 try literalDollar(in: text, into: &result)
             }
         }
-        result += rest
+        try append(rest, to: &result)
         return result
+    }
+
+    private func append<S: StringProtocol>(_ value: S, to result: inout String) throws {
+        guard value.utf8.count <= ComposeInput.maximumExpandedBytes - result.utf8.count else {
+            throw Failure(message: "interpolated text exceeds the 8 MiB compose input budget")
+        }
+        result += value
     }
 
     private func literalDollar(in text: String, into result: inout String) throws {
@@ -91,7 +101,7 @@ struct Interpolator {
 
     /// The text for `${body}`; nil when the body is not a substitution and the caller is
     /// lenient, so the text stays as written.
-    private func substitute(braced body: Substring, in text: String) throws -> String? {
+    private func substitute(braced body: Substring, in text: String, depth: Int) throws -> String? {
         let name = body.prefix(while: Self.continuesName)
         guard let first = name.first, Self.startsName(first) else {
             guard strict else { return nil }
@@ -108,15 +118,15 @@ struct Interpolator {
             let isSet = current.map { !(emptyCountsAsUnset && $0.isEmpty) } ?? false
             switch symbol.last {
             case "-":
-                return isSet ? current : try interpolate(argument)
+                return isSet ? current : try interpolate(argument, depth: depth + 1)
             case "?":
                 guard isSet else {
-                    let reason = try interpolate(argument)
+                    let reason = try interpolate(argument, depth: depth + 1)
                     throw Failure(message: "required variable \(variable) is missing a value" + (reason.isEmpty ? "" : ": \(reason)"))
                 }
                 return current
             default:
-                return isSet ? try interpolate(argument) : ""
+                return isSet ? try interpolate(argument, depth: depth + 1) : ""
             }
         }
         guard strict else { return nil }

@@ -25,7 +25,7 @@ struct Resolver {
     /// a name without a value takes its value from.
     let environment: [String: String]
     /// Reads a file's text. A seam for tests; the default reads from disk.
-    var read: (String) throws -> String = { try String(contentsOfFile: $0, encoding: .utf8) }
+    var read: (String) throws -> String = { try ComposeInput.read($0) }
     var fileManager = FileManager.default
 
     private var diagnostics: DiagnosticCollector { context.diagnostics }

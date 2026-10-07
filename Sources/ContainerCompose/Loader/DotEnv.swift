@@ -34,6 +34,7 @@ enum DotEnv {
     static func parse(_ text: String, file: String, lookup: @escaping (String) -> String? = { _ in nil }) throws -> [Entry] {
         var entries: [Entry] = []
         var defined: [String: String] = [:]
+        var expandedBytes = 0
         var interpolator = Interpolator(lookup: { name in lookup(name) ?? defined[name] })
         interpolator.strict = false
 
@@ -63,28 +64,36 @@ enum DotEnv {
             let raw = Substring(line[line.index(after: equals)...].drop { $0 == " " || $0 == "\t" })
 
             let value: String
-            if let quote = raw.first, quote == "\"" || quote == "'" {
-                // A quoted value runs to its closing quote, on this line or a later one.
-                var body = String(raw.dropFirst())
-                var closed = closingQuote(quote, in: body)
-                while closed == nil, index < lines.count {
-                    body += "\n" + lines[index]
-                    index += 1
-                    closed = closingQuote(quote, in: body)
+            do {
+                if let quote = raw.first, quote == "\"" || quote == "'" {
+                    // A quoted value runs to its closing quote, on this line or a later one.
+                    var body = String(raw.dropFirst())
+                    var closed = closingQuote(quote, in: body)
+                    while closed == nil, index < lines.count {
+                        body += "\n" + lines[index]
+                        index += 1
+                        closed = closingQuote(quote, in: body)
+                    }
+                    guard let closed else {
+                        throw ComposeError(
+                            "the value of \(name) opens a quote that is never closed",
+                            at: SourceLocation(file: file, line: lineNumber, column: 1))
+                    }
+                    let quoted = String(body[..<closed])
+                    value = quote == "'" ? quoted : try interpolator.interpolate(unescape(quoted))
+                } else {
+                    var unquoted = String(raw)
+                    if let comment = unquoted.range(of: " #") ?? unquoted.range(of: "\t#") {
+                        unquoted = String(unquoted[..<comment.lowerBound])
+                    }
+                    value = try interpolator.interpolate(unquoted.trimmingCharacters(in: .whitespaces))
                 }
-                guard let closed else {
-                    throw ComposeError(
-                        "the value of \(name) opens a quote that is never closed",
-                        at: SourceLocation(file: file, line: lineNumber, column: 1))
-                }
-                let quoted = String(body[..<closed])
-                value = quote == "'" ? quoted : try interpolator.interpolate(unescape(quoted))
-            } else {
-                var unquoted = String(raw)
-                if let comment = unquoted.range(of: " #") ?? unquoted.range(of: "\t#") {
-                    unquoted = String(unquoted[..<comment.lowerBound])
-                }
-                value = try interpolator.interpolate(unquoted.trimmingCharacters(in: .whitespaces))
+            } catch let failure as Interpolator.Failure {
+                throw ComposeError(failure.message, at: SourceLocation(file: file, line: lineNumber, column: 1))
+            }
+            expandedBytes += value.utf8.count
+            guard expandedBytes <= ComposeInput.maximumExpandedBytes else {
+                throw ComposeError("expanded environment exceeds the 8 MiB compose input budget", at: SourceLocation(file: file, line: lineNumber, column: 1))
             }
             defined[name] = value
             entries.append(Entry(key: name, value: value))
