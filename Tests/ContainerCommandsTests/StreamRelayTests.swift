@@ -128,6 +128,76 @@ struct StreamRelayTests {
         close(wiring.fromOutput)
     }
 
+    @Test func peerClosureEndsASenderUnderBackpressure() throws {
+        var input: [Int32] = [0, 0]
+        var output: [Int32] = [0, 0]
+        var pair: [Int32] = [0, 0]
+        try #require(pipe(&input) == 0)
+        try #require(pipe(&output) == 0)
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        var size: Int32 = 1024
+        try #require(setsockopt(pair[0], SOL_SOCKET, SO_SNDBUF, &size, socklen_t(MemoryLayout<Int32>.size)) == 0)
+        let inputRead = input[0]
+        let inputWrite = input[1]
+        let outputWrite = output[1]
+        let socket = pair[0]
+        let finished = DispatchSemaphore(value: 0)
+        let produced = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            StreamRelay.run(input: inputRead, output: outputWrite, socket: socket)
+            finished.signal()
+        }
+        Thread.detachNewThread {
+            let bytes = [UInt8](repeating: 42, count: 1_048_576)
+            _ = write(inputWrite, bytes, bytes.count)
+            produced.signal()
+        }
+        // Seeing input at the peer proves the sender is running. Leave that data unread
+        // so the sender has to wait for room while the receiving direction ends.
+        try #require(readable(pair[1], "the blocked sender"))
+        shutdown(pair[1], SHUT_WR)
+        #expect(finished.wait(timeout: .now() + 5) == .success)
+        shutdown(pair[1], SHUT_RDWR)
+        close(inputRead)
+        close(inputWrite)
+        #expect(produced.wait(timeout: .now() + 5) == .success)
+        for fd in output + pair { close(fd) }
+    }
+
+    @Test func lateInputCannotWriteToAReusedSocketDescriptor() throws {
+        var input: [Int32] = [0, 0]
+        var output: [Int32] = [0, 0]
+        var pair: [Int32] = [0, 0]
+        var replacement: [Int32] = [0, 0]
+        try #require(pipe(&input) == 0)
+        try #require(pipe(&output) == 0)
+        try #require(pipe(&replacement) == 0)
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        let inputRead = input[0]
+        let outputWrite = output[1]
+        let socket = pair[0]
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            StreamRelay.run(input: inputRead, output: outputWrite, socket: socket)
+            finished.signal()
+        }
+        defer {
+            for fd in input + output + pair + replacement { close(fd) }
+        }
+        send("ready", to: input[1])
+        #expect(receive(5, from: pair[1]) == "ready")
+        shutdown(pair[1], SHUT_WR)
+        try #require(finished.wait(timeout: .now() + 5) == .success)
+        #expect(fcntl(socket, F_GETFL) & O_NONBLOCK == 0, "the caller receives its original socket flags")
+        // Reuse exactly the descriptor the caller is now allowed to close.
+        try #require(dup2(replacement[1], socket) == socket)
+        send("late", to: input[1])
+        var waiting = pollfd(fd: replacement[0], events: Int16(POLLIN), revents: 0)
+        #expect(poll(&waiting, 1, 250) == 0, "late input must not reach an unrelated descriptor")
+        var pending = pollfd(fd: input[0], events: Int16(POLLIN), revents: 0)
+        #expect(poll(&pending, 1, 250) == 1, "the sending worker must be gone, not merely dropping later input")
+    }
+
     @Test(arguments: [
         ("import.sock", true), ("a-b_c.1.sock", true), (".sock", false), (".hidden.sock", false), ("import", false), ("../import.sock", false), ("run/import.sock", false),
         ("", false), ("im port.sock", false),

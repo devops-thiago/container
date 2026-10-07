@@ -115,26 +115,34 @@ enum StreamRelay {
     /// socket closes. The end of `input` is passed on as the end of what this side sends,
     /// and what the far end still has to say is copied out before returning.
     ///
-    /// Once this returns the socket is the caller's to close. The sending thread may still
-    /// be in `read(2)` on `input` then, and when the input ends later it must not pass that
-    /// on to the socket's number, which by then can be another descriptor's: the end is
-    /// passed on only while the socket is still this relay's.
+    /// The sending worker is stopped and joined before the caller takes its descriptors
+    /// back. Idle input and a full socket are polled so peer closure can stop that worker.
     static func run(input: Int32, output: Int32, socket: Int32) {
         // A reader that has gone away is an end like any other, not a signal to die on.
         signal(SIGPIPE, SIG_IGN)
+        // Darwin's Unix-domain send can block under backpressure with MSG_DONTWAIT
+        // alone. Borrow the socket in nonblocking mode, restoring its flags on return.
+        let flags = fcntl(socket, F_GETFL)
+        guard flags >= 0, fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0 else { return }
+        defer { _ = fcntl(socket, F_SETFL, flags) }
         let ownership = SocketOwnership()
+        let sent = DispatchSemaphore(value: 0)
         let sending = Thread {
-            copy(from: input, to: socket)
+            defer { sent.signal() }
+            copyInput(from: input, to: socket, ownership: ownership)
             ownership.whileOwned { shutdown(socket, SHUT_WR) }
         }
         sending.start()
         copy(from: socket, to: output)
         ownership.release()
+        sent.wait()
     }
 
     /// Whether the relay still owns its socket; the caller takes it back when `run` returns.
     private final class SocketOwnership: Sendable {
         private let owned = Mutex(true)
+
+        var isOwned: Bool { owned.withLock { $0 } }
 
         func whileOwned(_ body: () -> Void) {
             owned.withLock { if $0 { body() } }
@@ -145,12 +153,59 @@ enum StreamRelay {
         }
     }
 
+    /// The relay is the sole reader of input. A ready pipe can be read without waiting;
+    /// socket sends are nonblocking, so backpressure never holds the ownership handoff.
+    private static func copyInput(from input: Int32, to socket: Int32, ownership: SocketOwnership) {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while waitFor(input, events: Int16(POLLIN), ownership: ownership) {
+            let count = read(input, &buffer, buffer.count)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { return }
+            var written = 0
+            while written < count, ownership.isOwned {
+                let result = buffer.withUnsafeBytes { send(socket, $0.baseAddress! + written, count - written, 0) }
+                if result < 0 {
+                    if errno == EINTR { continue }
+                    if errno == EAGAIN || errno == EWOULDBLOCK {
+                        guard waitFor(socket, events: Int16(POLLOUT), ownership: ownership) else { return }
+                        continue
+                    }
+                    return
+                }
+                guard result > 0 else { return }
+                written += result
+            }
+        }
+    }
+
+    private static func waitFor(_ descriptor: Int32, events: Int16, ownership: SocketOwnership) -> Bool {
+        guard descriptor >= 0 else { return false }
+        while ownership.isOwned {
+            var waiting = pollfd(fd: descriptor, events: events, revents: 0)
+            let ready = poll(&waiting, 1, 100)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            if ready > 0 {
+                guard waiting.revents & Int16(POLLNVAL) == 0 else { return false }
+                return ownership.isOwned
+            }
+        }
+        return false
+    }
+
     /// Copy until the source ends or the destination refuses more.
     private static func copy(from source: Int32, to destination: Int32) {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
             let count = read(source, &buffer, buffer.count)
             if count < 0 && errno == EINTR { continue }
+            if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                var waiting = pollfd(fd: source, events: Int16(POLLIN), revents: 0)
+                if poll(&waiting, 1, -1) < 0 && errno != EINTR { return }
+                continue
+            }
             guard count > 0 else { return }
             var written = 0
             while written < count {
