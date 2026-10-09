@@ -218,11 +218,10 @@ container cluster create --name temp-cluster --rm
 
 ### Recovering a stopped cluster
 
-If a cluster's control plane node stops (for example, after `container stop`), delete and re-create the cluster:
+If a cluster's nodes stop (for example, after `container stop` or a restart of the engine), start the cluster again:
 
 ```bash
-container cluster delete --name my-cluster
-container cluster create --name my-cluster
+container cluster start --name my-cluster
 ```
 
 ## Common workflows
