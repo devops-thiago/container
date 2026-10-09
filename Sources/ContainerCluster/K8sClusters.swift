@@ -105,6 +105,7 @@ public enum K8sClusters {
         cpus: Int64? = nil,
         memory: String? = nil,
         workers: Int = 0,
+        cniManifestPath: String? = nil,
         autoRemove: Bool = false,
         registry: Flags.Registry = Flags.Registry(scheme: "https"),
         imageFetch: Flags.ImageFetch = Flags.ImageFetch(maxConcurrentDownloads: 3),
@@ -119,6 +120,13 @@ public enum K8sClusters {
                 .invalidArgument,
                 message: "worker count must be between 0 and \(maximumWorkers)")
         }
+        if let cniManifestPath {
+            guard FileManager.default.fileExists(atPath: cniManifestPath) else {
+                throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
+            }
+        }
+        // Fail before provisioning any node VM.
+        _ = try K8sHelper.kubernetesVersion(nodeImage: nodeImage)
 
         let workerNames = workers == 0 ? [] : (1...workers).map { "\(name)-worker-\($0)" }
         guard workerNames.allSatisfy({ nameValid($0) }) else {
@@ -171,9 +179,11 @@ public enum K8sClusters {
                     nodeID: controlPlaneName, client: client, log: log)
                 try await K8sHelper.bootstrapControlPlane(
                     nodeID: controlPlaneName,
+                    nodeImage: nodeImage,
                     apiServerSANs: sans,
                     advertiseAddress: vmIP,
                     schedulable: !hasWorkers,
+                    cniManifestPath: cniManifestPath,
                     client: client,
                     log: log)
 
