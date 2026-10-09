@@ -454,6 +454,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerResource",
+                "ContainerVersion",
                 "ContainerXPC",
             ],
             path: "Sources/Services/Network/Client"
