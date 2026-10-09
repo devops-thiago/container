@@ -1693,6 +1693,30 @@ container cluster create --name my-cluster --cpus 2 --memory 4g \
 container cluster create --shared-image-store
 ```
 
+### `container cluster start`
+
+Starts a stopped Kubernetes cluster and refreshes its entry in `~/.kube/config` (the container IP can change between starts).
+
+**Usage**
+
+```bash
+container cluster start [--name <name>] [--debug]
+```
+
+**Options**
+
+*   `--name <name>`: Cluster name (default: `cluster-dev`)
+
+**Examples**
+
+```bash
+# start the default cluster
+container cluster start
+
+# start a named cluster
+container cluster start --name my-cluster
+```
+
 ### `container cluster delete (rm)`
 
 Stops and deletes a Kubernetes cluster container, including any worker nodes, and removes its entry from `~/.kube/config`.
@@ -1749,7 +1773,7 @@ container cluster ls -q
 
 ### `container cluster write-config`
 
-Fetches the current kubeconfig from a running cluster and merges its context into a kubeconfig file. Use this to write to an alternate config file.
+Fetches the current kubeconfig from a running cluster and merges its context into a kubeconfig file. Use this to refresh credentials after a cluster restart or to write to an alternate config file.
 
 **Usage**
 
