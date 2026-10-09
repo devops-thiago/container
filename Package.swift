@@ -192,6 +192,7 @@ let package = Package(
         .testTarget(
             name: "K8sPluginTests",
             dependencies: [
+                "ContainerAPIClient",
                 "ContainerK8s",
                 "ContainerResource",
                 "Yams",
@@ -453,6 +454,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerResource",
+                "ContainerVersion",
                 "ContainerXPC",
             ],
             path: "Sources/Services/Network/Client"
