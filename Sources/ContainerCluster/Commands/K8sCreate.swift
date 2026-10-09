@@ -54,6 +54,9 @@ public struct K8sCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Number of worker nodes, 0...\(K8sClusters.maximumWorkers) (default: 0)")
     var workers: Int = 0
 
+    @Option(name: .long, help: "Optional path to a CNI manifest to apply.")
+    var cni: String?
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: K8sHelper.pluginName)
@@ -79,6 +82,7 @@ public struct K8sCreate: AsyncParsableCommand {
             cpus: resourceFlags.cpus,
             memory: resourceFlags.memory,
             workers: workers,
+            cniManifestPath: cni,
             autoRemove: remove,
             registry: registryFlags,
             imageFetch: imageFetchFlags,
