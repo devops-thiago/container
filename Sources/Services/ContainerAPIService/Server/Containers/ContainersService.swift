@@ -785,7 +785,7 @@ public actor ContainersService {
             state.snapshot.startedDate = Date()
             state.snapshot.restartError = nil
             // The runtime checks the container's health from now on; this side follows it.
-            if state.snapshot.configuration.healthCheck != nil, let run = state.run {
+            if state.snapshot.configuration.healthCheck?.command != nil, let run = state.run {
                 let earlierLog = state.snapshot.health?.log ?? []
                 state.snapshot.health = HealthWatch.starting(after: state.snapshot.health)
                 state.healthWatch?.cancel()
