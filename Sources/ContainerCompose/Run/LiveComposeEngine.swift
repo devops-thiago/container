@@ -65,7 +65,8 @@ public struct LiveComposeEngine: ComposeEngine {
         switch snapshot.status {
         case .running: state = .running
         case .stopped: state = .stopped
-        default: state = .changing
+        case .restarting: state = .restarting
+        case .unknown, .stopping: state = .changing
         }
         let ports = snapshot.configuration.publishedPorts.map { port -> String in
             let range = { (start: UInt16) in port.count > 1 ? "\(start)-\(start + port.count - 1)" : "\(start)" }
@@ -136,7 +137,7 @@ public struct LiveComposeEngine: ComposeEngine {
     public func startContainer(_ id: String) async throws {
         let client = ContainerClient()
         let snapshot = try await client.get(id: id)
-        guard snapshot.status != .running else { return }
+        guard snapshot.status != .running, snapshot.status != .restarting else { return }
         do {
             let io = try ProcessIO.create(tty: snapshot.configuration.initProcess.terminal, interactive: false, detach: true)
             defer { try? io.close() }

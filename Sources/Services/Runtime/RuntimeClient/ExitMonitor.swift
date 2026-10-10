@@ -25,6 +25,16 @@ public actor ExitMonitor {
     /// A callback that receives the client identifier and exit code.
     public typealias ExitCallback = @Sendable (String, ExitStatus) async throws -> Void
 
+    /// How tracked work ended: with the status it reported, or with the wait for it failing,
+    /// in which case nothing is known about how the work itself ended.
+    public enum Outcome: Sendable {
+        case exited(ExitStatus)
+        case waitFailed(any Error)
+    }
+
+    /// A callback that receives the client identifier and how the work ended.
+    public typealias OutcomeCallback = @Sendable (String, Outcome) async throws -> Void
+
     /// A function that waits for work to complete, returning an exit code.
     public typealias WaitHandler = @Sendable () async throws -> ExitStatus
 
@@ -36,7 +46,7 @@ public actor ExitMonitor {
         self.log = log
     }
 
-    private var exitCallbacks: [String: ExitCallback] = [:]
+    private var exitCallbacks: [String: OutcomeCallback] = [:]
     private var runningTasks: [String: Task<Void, Never>] = [:]
     private let log: Logger?
 
@@ -59,10 +69,30 @@ public actor ExitMonitor {
     ///   - id: The client identifier for the work.
     ///   - onExit: The callback to invoke when the work completes.
     public func registerProcess(id: String, onExit: @escaping ExitCallback) async throws {
+        // A failed wait is reported as exit code -1, as it always was.
+        try await registerProcess(
+            id: id,
+            onOutcome: { id, outcome in
+                switch outcome {
+                case .exited(let status):
+                    try await onExit(id, status)
+                case .waitFailed:
+                    try await onExit(id, ExitStatus(exitCode: -1))
+                }
+            })
+    }
+
+    /// Register long running work so that the monitor invokes a callback when the work
+    /// completes, telling a failed wait apart from an exit.
+    ///
+    /// - Parameters:
+    ///   - id: The client identifier for the work.
+    ///   - onOutcome: The callback to invoke when the work completes or the wait fails.
+    public func registerProcess(id: String, onOutcome: @escaping OutcomeCallback) async throws {
         guard self.exitCallbacks[id] == nil else {
             throw ContainerizationError(.invalidState, message: "ExitMonitor already setup for process \(id)")
         }
-        self.exitCallbacks[id] = onExit
+        self.exitCallbacks[id] = onOutcome
     }
 
     /// Await the completion of previously registered item of work.
@@ -81,10 +111,10 @@ public actor ExitMonitor {
         self.runningTasks[id] = Task {
             do {
                 let exitStatus = try await waitingOn()
-                try await onExit(id, exitStatus)
+                try await onExit(id, .exited(exitStatus))
             } catch {
                 self.log?.error("WaitHandler for \(id) threw error \(String(describing: error))")
-                try? await onExit(id, ExitStatus(exitCode: -1))
+                try? await onExit(id, .waitFailed(error))
             }
         }
     }

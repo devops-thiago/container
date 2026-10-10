@@ -420,8 +420,9 @@ struct LoweringTests {
         #expect(label(ComposeLabels.stopGracePeriod) == "90")
         #expect(service.stopTimeout == 90)
         #expect(service.stopSignal == "SIGINT")
-        #expect(warnings.count == 1)
-        #expect(warnings.first?.contains("restart policies are stored with each container") == true)
+        // The engine honours the policy now, so nothing is said about it.
+        #expect(warnings.isEmpty)
+        #expect(service.options.contains("--restart"))
     }
 
     @Test

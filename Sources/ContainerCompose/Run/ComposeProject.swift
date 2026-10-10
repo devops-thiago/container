@@ -344,7 +344,11 @@ public struct ComposeProject: Sendable {
     }
 
     private func start(container: String, service: String) async throws {
-        if try await engine.container(named: container)?.state == .running {
+        // One the engine is about to restart is up as far as compose is concerned, as Docker
+        // counts a restarting container as running: starting it by hand would reset its
+        // restart count and skip the delay.
+        let state = try await engine.container(named: container)?.state
+        if state == .running || state == .restarting {
             hooks.event(ComposeEvent(.container, container, service: service, .running))
             return
         }

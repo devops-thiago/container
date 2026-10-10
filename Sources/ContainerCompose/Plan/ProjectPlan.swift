@@ -242,16 +242,10 @@ extension ProjectPlan {
             diagnostics: diagnostics)
         let services = planned.map { ServiceLowering.plan($0, dependencies: dependencies[$0.name] ?? [], in: context) }
 
-        // Two services cannot have one container, and a restart policy says less here
-        // than a compose file means by it.
+        // Two services cannot have one container.
         for (name, sharing) in Dictionary(grouping: services, by: \.containerName) where sharing.count > 1 {
             diagnostics.error(
                 "", "the services \(sharing.map(\.service).sorted().joined(separator: " and ")) would both be the container '\(name)'")
-        }
-        if planned.contains(where: { $0.restart != nil && $0.restart != "no" }) {
-            diagnostics.warn(
-                "",
-                "restart policies are stored with each container and applied when SiliconShip starts the engine; a container that exits is not started again")
         }
         try diagnostics.throwIfFailed()
 

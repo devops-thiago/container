@@ -52,7 +52,8 @@ extension Application {
             let client = ContainerClient()
 
             let filters = try Self.filters(for: filter, all: all).withoutMachines()
-            let containers = try await client.list(filters: filters)
+            let hidesStopped = Self.hidesStopped(for: filter, all: all)
+            let containers = try await client.list(filters: filters).filter { !hidesStopped || $0.status != .stopped }
             let items = containers.map { ManagedContainer($0) }
             try Output.render(payload: items, display: items, format: format, quiet: quiet)
         }
@@ -108,6 +109,13 @@ extension Application.ContainerList {
         }
     }
 
+    /// Whether the listing leaves stopped containers out, which it does unless `--all` or a
+    /// status condition says otherwise. Everything else is listed, so a container waiting to
+    /// be restarted shows, as Docker's `ps` shows one.
+    static func hidesStopped(for conditions: [Filter], all: Bool) -> Bool {
+        !all && !conditions.contains { if case .status = $0 { true } else { false } }
+    }
+
     /// The engine's filters for `conditions`, all of which a listed container satisfies.
     /// A status condition takes the place of the default that hides stopped containers,
     /// so `status=stopped` lists them without `--all`.
@@ -139,6 +147,6 @@ extension Application.ContainerList {
                 status = value
             }
         }
-        return ContainerListFilters(status: status ?? (all ? nil : .running), labels: labels, name: name, labelConditions: labelConditions.isEmpty ? nil : labelConditions)
+        return ContainerListFilters(status: status, labels: labels, name: name, labelConditions: labelConditions.isEmpty ? nil : labelConditions)
     }
 }
