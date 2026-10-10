@@ -58,4 +58,7 @@ public enum RuntimeKeys: String {
 
     /// Per-network connection info passed to the runtime so it can allocate directly.
     case networkBootstrapInfos
+
+    /// The running containers a guest shares a network with, for its hosts file.
+    case peers
 }

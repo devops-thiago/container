@@ -35,6 +35,8 @@ public enum RuntimeRoutes: String {
     case statistics = "com.apple.container.runtime/statistics"
     /// Open a vsock connection to a port inside the sandbox.
     case dial = "com.apple.container.runtime/dial"
+    /// Rewrite the running guest's `/etc/hosts` with the peers it shares a network with now.
+    case refreshHosts = "com.apple.container.runtime/refreshHosts"
 
     // MARK: - Process management
 
