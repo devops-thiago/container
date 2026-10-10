@@ -67,7 +67,10 @@ extension K8sClusters {
         // Resolve the nodes before saving, so a wrong name fails fast and leaves no archive.
         let nodes = try await nodesToLoad(cluster: name, containers: client)
 
-        let archive = FilePath(FileManager.default.temporaryDirectory.path(percentEncoded: false))
+        // The images service writes the archive, not this process, so it goes where both can
+        // reach: in a sandboxed CLI or app, this process's own temporary directory is closed
+        // to the engine, as `image save` already allows for.
+        let archive = FilePath(try PathUtils.sharedTemporaryDirectory().path(percentEncoded: false))
             .appending("k8s-image-\(UUID().uuidString).tar")
         defer { try? FileManager.default.removeItem(atPath: archive.string) }
 
