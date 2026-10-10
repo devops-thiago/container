@@ -177,6 +177,33 @@ public actor RuntimeService {
         return hostsEntries
     }
 
+    /// What a guest's hosts file says about the container itself: kept from its boot, so the
+    /// file can be written again with the peers of the moment, built by the same rules.
+    struct GuestHosts: Sendable {
+        let hostname: String
+        let aliases: [String]
+        let primaryAddress: String?
+        let searchDomain: String
+        let extraHosts: [ContainerConfiguration.ExtraHost]
+        let gateway: String?
+
+        func entries(peers: [Attachment]) throws -> [Hosts.Entry] {
+            try RuntimeService.hostsEntries(
+                hostname: hostname, aliases: aliases, primaryAddress: primaryAddress, peers: peers,
+                searchDomain: searchDomain, extraHosts: extraHosts, gateway: gateway)
+        }
+    }
+
+    /// The name the guest calls itself. A hostname of the container's own beats the one its
+    /// attachment carries: the guest sees the name asked for, while the network keeps
+    /// resolving the container's name.
+    static func guestHostname(for config: ContainerConfiguration) -> String {
+        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
+        return hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map { String($0) } ?? config.id
+    }
+
     @Sendable
     public func createEndpoint(_ message: XPCMessage) async throws -> XPCMessage {
         self.log.debug("enter", metadata: ["func": "\(#function)"])
@@ -295,8 +322,8 @@ public actor RuntimeService {
                     // /etc/resolver file on the host (macOS refuses unprivileged binds to
                     // port 53 anywhere, so the resolver cannot sit where a stub looks), and
                     // the hosts file is the one name table a guest consults that this side
-                    // fully controls. Peers that join later are not in it; a stack started
-                    // in dependency order sees the names it needs.
+                    // fully controls. Peers that join or leave later reach it through
+                    // `refreshHosts`, which the engine sends every running peer.
                     if let peers = try? await client.attachments() {
                         peerAttachments.append(
                             contentsOf: peers.filter { $0.hostname != attachment.hostname })
@@ -369,18 +396,18 @@ public actor RuntimeService {
                 cpus: config.resources.cpus + config.resources.cpuOverhead,
                 memoryInBytes: config.resources.memoryInBytes + VMResources.guestMemoryOverhead
             )
+            let guestHosts = GuestHosts(
+                hostname: Self.guestHostname(for: config), aliases: attachments.flatMap(\.aliases),
+                primaryAddress: interfaces.first?.ipv4Address.address.description,
+                searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
+                extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description)
             let container = try LinuxContainer(id, rootfs: rootfs, vmm: vmm, vm: vmResources, logger: self.log) { czConfig in
                 try Self.configureContainer(czConfig: &czConfig, config: config, dynamicEnv: dynamicEnv, log: self.log)
                 czConfig.interfaces = interfaces
                 czConfig.process.stdout = stdout
                 czConfig.process.stderr = stderr
                 czConfig.process.stdin = stdin
-                czConfig.hosts = Hosts(
-                    entries: try Self.hostsEntries(
-                        hostname: czConfig.hostname ?? id, aliases: attachments.flatMap(\.aliases),
-                        primaryAddress: interfaces.first?.ipv4Address.address.description,
-                        peers: peerAttachments, searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
-                        extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description))
+                czConfig.hosts = Hosts(entries: try guestHosts.entries(peers: peerAttachments))
                 czConfig.bootLog = BootLog.file(path: bundle.bootlog, append: true)
             }
 
@@ -388,6 +415,7 @@ public actor RuntimeService {
                 container: container,
                 config: config,
                 attachments: attachments,
+                guestHosts: guestHosts,
                 bundle: bundle,
                 io: (in: stdin, out: stdout, err: stderr)
             )
@@ -1046,6 +1074,52 @@ public actor RuntimeService {
         }
     }
 
+    /// Rewrite the running guest's `/etc/hosts` with the peers it shares a network with now.
+    ///
+    /// The engine sends this to every running container on a network whenever one there
+    /// starts, stops, or goes away, so a container learns peers that start after it. The file
+    /// is built by the rules the boot-time one is, around the container's own entry and its
+    /// explicit hosts; the guest agent writes it atomically, and libc reads /etc/hosts afresh
+    /// on every lookup. It takes no lock: it changes nothing a stop or a start depends on. A
+    /// guest that is not running, or is already going down, has nothing to write, and the
+    /// request is answered as done.
+    ///
+    /// - Parameters:
+    ///   - message: An XPC message with the following parameters:
+    ///     - peers: JSON serialization of the peers' `[Attachment]`, in file order.
+    ///
+    /// - Returns: An XPC message with no parameters.
+    @Sendable
+    public func refreshHosts(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.debug("enter", metadata: ["func": "\(#function)"])
+        defer { self.log.debug("exit", metadata: ["func": "\(#function)"]) }
+
+        switch self.state {
+        case .running, .booted:
+            let peers = try message.peers()
+            let ctr = try getContainer()
+            let hosts = Hosts(entries: try ctr.guestHosts.entries(peers: peers))
+            // Where the guest agent mounted the container's root filesystem; the same path
+            // `LinuxContainer` hands it at boot (its `guestRootfsPath`, which is not public).
+            let location = "/run/container/\(ctr.container.id)/rootfs"
+            try await ctr.container.withVirtualMachineInstance { vm in
+                let agent = try await vm.dialAgent()
+                do {
+                    try await agent.configureHosts(config: hosts, location: location)
+                } catch {
+                    try? await agent.close()
+                    throw error
+                }
+                try await agent.close()
+            }
+            self.log.info("refreshed hosts file", metadata: ["peers": "\(peers.count)"])
+            return message.reply()
+        default:
+            self.log.debug("hosts file not refreshed: container is not running", metadata: ["state": "\(self.state)"])
+            return message.reply()
+        }
+    }
+
     private func startInitProcess(lock: AsyncLock.Context) async throws {
         let info = try self.getContainer()
         let container = info.container
@@ -1301,13 +1375,7 @@ public actor RuntimeService {
             czConfig.sockets.append(socketConfig)
         }
 
-        // A hostname of the container's own beats the one its attachment carries: the guest
-        // sees the name asked for, while the network keeps resolving the container's name.
-        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
-        czConfig.hostname =
-            hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
-            .first
-            .map { String($0) } ?? config.id
+        czConfig.hostname = Self.guestHostname(for: config)
 
         if let dns = config.dns {
             czConfig.dns = DNS(
@@ -1756,6 +1824,7 @@ extension RuntimeService {
         let container: LinuxContainer
         let config: ContainerConfiguration
         let attachments: [Attachment]
+        let guestHosts: GuestHosts
         let bundle: ContainerResource.Bundle
         let io: (in: FileHandle?, out: MultiWriter?, err: MultiWriter?)
     }

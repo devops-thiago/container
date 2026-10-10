@@ -380,6 +380,22 @@ extension RuntimeClient {
         return try JSONDecoder().decode(ContainerStats.self, from: data)
     }
 
+    /// Rewrite the running guest's `/etc/hosts` so it lists `peers`, the running containers
+    /// it shares a network with, beside its own entry and its explicit hosts.
+    public func refreshHosts(peers: [Attachment], responseTimeout: Duration? = nil) async throws {
+        let request = XPCMessage(route: RuntimeRoutes.refreshHosts.rawValue)
+        do {
+            request.set(key: RuntimeKeys.peers.rawValue, value: try JSONEncoder().encode(peers))
+            try await self.client.send(request, responseTimeout: responseTimeout)
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to refresh the hosts file of container \(self.id)",
+                cause: error
+            )
+        }
+    }
+
     public func clean(id: String) async throws {
         let request = XPCMessage(route: RuntimeRoutes.clean.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)
@@ -424,5 +440,12 @@ extension XPCMessage {
             throw ContainerizationError(.invalidArgument, message: "missing networkBootstrapInfos in bootstrap message")
         }
         return try JSONDecoder().decode([NetworkBootstrapInfo].self, from: data)
+    }
+
+    public func peers() throws -> [Attachment] {
+        guard let data = self.dataNoCopy(key: RuntimeKeys.peers.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "missing peers in refreshHosts message")
+        }
+        return try JSONDecoder().decode([Attachment].self, from: data)
     }
 }
