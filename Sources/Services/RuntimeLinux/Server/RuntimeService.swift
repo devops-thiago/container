@@ -51,6 +51,8 @@ public actor RuntimeService {
     private var processes: [String: ProcessInfo] = [:]
     private var socketForwarders: [SocketForwarderResult] = []
     private var networkSessions: [XPCClientSession] = []
+    /// Runs the container's health check while its process runs, when it has one.
+    private var healthMonitor: HealthMonitor?
 
     private static let sshAuthSocketGuestPath = "/var/host-services/ssh-auth.sock"
     private static let sshAuthSocketEnvVar = "SSH_AUTH_SOCK"
@@ -464,6 +466,7 @@ public actor RuntimeService {
             if id == containerId {
                 try await self.startInitProcess(lock: lock)
                 await self.setState(.running)
+                await self.startHealthMonitor()
             } else {
                 try await self.startExecProcess(processId: id, lock: lock)
             }
@@ -660,6 +663,8 @@ public actor RuntimeService {
             switch await self.state {
             case .running, .booted:
                 await self.setState(.stopping)
+                // No check runs into a stop: a failure it caused would not be the workload's.
+                await self.stopHealthMonitor()
 
                 let ctr = try await self.getContainer()
                 let exitStatus = try await self.gracefulStopContainer(
@@ -1118,6 +1123,111 @@ public actor RuntimeService {
             self.log.debug("hosts file not refreshed: container is not running", metadata: ["state": "\(self.state)"])
             return message.reply()
         }
+    }
+
+    /// Wait for the container's health to move past a point, and return it.
+    ///
+    /// The engine keeps one of these waiting for each running container with a health
+    /// check, and asks again with the generation each answer carries, so it learns of every
+    /// check as it is recorded without asking about containers that have nothing new. It
+    /// takes no lock: it waits on the monitor, which a stop ends, and which answers every
+    /// wait as it ends. A container with no check, or no longer running, is answered at once
+    /// as finished.
+    ///
+    /// - Parameters:
+    ///   - message: An XPC message with the following parameters:
+    ///     - healthGeneration: the generation of the last answer, or 0.
+    ///
+    /// - Returns: An XPC message with the following parameters:
+    ///   - health: JSON serialization of the `HealthUpdate`.
+    @Sendable
+    public func waitHealth(_ message: XPCMessage) async throws -> XPCMessage {
+        self.log.trace("enter", metadata: ["func": "\(#function)"])
+        defer { self.log.trace("exit", metadata: ["func": "\(#function)"]) }
+
+        let after = message.uint64(key: RuntimeKeys.healthGeneration.rawValue)
+        let update: HealthUpdate
+        if let monitor = self.healthMonitor {
+            update = await monitor.wait(after: after)
+        } else {
+            update = HealthUpdate(health: nil, generation: after, finished: true)
+        }
+        let reply = message.reply()
+        reply.set(key: RuntimeKeys.health.rawValue, value: try JSONEncoder().encode(update))
+        return reply
+    }
+
+    /// Start the container's health check, if it has one, now that its process runs.
+    private func startHealthMonitor() async {
+        guard self.healthMonitor == nil, let info = self.container, let check = info.config.healthCheck else { return }
+        let started = ContinuousClock.now
+        guard
+            let monitor = HealthMonitor(
+                check: check,
+                probe: { [weak self] command, timeout in
+                    guard let self else { return .init(exitCode: -1, output: "the container is going away") }
+                    return await self.runHealthCheck(command: command, timeout: timeout)
+                },
+                elapsed: { started.duration(to: .now) })
+        else {
+            self.log.warning("health check has nothing to run", metadata: ["test": "\(check.test)"])
+            return
+        }
+        self.healthMonitor = monitor
+        await monitor.start()
+        self.log.info("health check started", metadata: ["command": "\(check.command ?? [])"])
+    }
+
+    private func stopHealthMonitor() async {
+        guard let monitor = self.healthMonitor else { return }
+        self.healthMonitor = nil
+        await monitor.stop()
+    }
+
+    /// Run one health check in the guest, as `docker exec` would run it: the container's
+    /// user, working directory and environment, no terminal, output and errors together.
+    /// Whatever happens, the guest's record of the process is deleted afterwards, so checks
+    /// do not pile up there one per interval.
+    private func runHealthCheck(command: [String], timeout: Duration) async -> HealthMonitor.Outcome {
+        guard self.state == .running, let info = self.container, let executable = command.first else {
+            return .init(exitCode: -1, output: "the container is not running")
+        }
+        var processConfig = info.config.initProcess
+        processConfig.executable = executable
+        processConfig.arguments = Array(command.dropFirst())
+        processConfig.terminal = false
+        let output = HealthOutput()
+        let process: LinuxProcess
+        do {
+            var czConfig = try self.configureProcessConfig(config: processConfig, stdio: [nil, nil, nil], containerConfig: info.config)
+            czConfig.stdout = output
+            czConfig.stderr = output
+            process = try await info.container.exec("health-\(UUID().uuidString.lowercased())", configuration: czConfig)
+        } catch {
+            return .init(exitCode: -1, output: "the health check could not be run: \(error)")
+        }
+        let outcome: HealthMonitor.Outcome
+        do {
+            try await process.start()
+            let status = try await HealthProbe.wait(
+                timeout: timeout,
+                sleep: { try await Task.sleep(for: $0) },
+                for: { try await process.wait() },
+                onTimeout: { try? await process.kill(.kill) })
+            if let status {
+                outcome = .init(exitCode: status.exitCode, output: output.text)
+            } else {
+                outcome = .init(exitCode: -1, output: HealthProbe.timeoutOutput(timeout, output: output.text))
+            }
+        } catch {
+            outcome = .init(exitCode: -1, output: "the health check could not be run: \(error)")
+        }
+        do {
+            try await process.delete()
+        } catch {
+            self.log.debug("could not delete a health check process", metadata: ["error": "\(error)"])
+        }
+        return outcome
     }
 
     private func startInitProcess(lock: AsyncLock.Context) async throws {
@@ -1582,6 +1692,9 @@ public actor RuntimeService {
     private func cleanUpContainer(containerInfo: ContainerInfo, exitStatus: ExitStatus? = nil) async throws {
         let container = containerInfo.container
         let id = container.id
+
+        // Every way a run ends comes through here: a stop, the process exiting, a failed start.
+        await self.stopHealthMonitor()
 
         do {
             try await container.stop()

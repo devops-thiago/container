@@ -42,12 +42,19 @@ exited container again, with Docker's growing delay, and starts `always` and `un
 containers when it starts. `container ls` shows a container waiting to be restarted as
 `restarting`, with a `RESTARTS` column; `inspect` has `restartCount`.
 
+Health checks behave as Docker's: the image's `HEALTHCHECK` runs without any flag,
+`--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`,
+`--health-start-period` and `--health-start-interval` adjust it, and `--no-healthcheck` turns it
+off. `container ls` has a `HEALTH` column (`starting`, `healthy`, `unhealthy`, or `none`), and
+`inspect` has `status.health` with `failingStreak` and the last results, where `docker inspect`
+has `State.Health`.
+
 The 1.3.0 fork also accepts `--hostname`, `--sysctl key=value`, `--add-host name:address`
 (including `host-gateway`), and `--pull always|missing|never`. A host service reached through
 `host-gateway` must listen on an address accessible from the guest, not only host loopback.
 
 Flags this engine has no equivalent for, such as `--privileged`, `--device`, `--pid`, `--ipc`,
-`--security-opt`, `--gpus`, the `--log-*` and `--health-*` families, are accepted by `container run`
+`--security-opt`, `--gpus` and the `--log-*` family, are accepted by `container run`
 and `container create`, reported on stderr as `Warning! --privileged is not supported by this
 engine and was ignored`, and ignored: a command copied from elsewhere still runs, without them.
 
@@ -132,7 +139,7 @@ container compose down       # containers and networks; volumes stay unless -v
 
 What carries over as written: `image`, `build`, `command`, `entrypoint`, `environment`,
 `env_file`, `${VAR:-default}` substitution with `.env`, `ports`, `volumes` for folders and
-named volumes, `depends_on` with its three conditions, `healthcheck` as what
+named volumes, `depends_on` with its three conditions, `healthcheck` (over the image's `HEALTHCHECK`, which the engine runs) as what
 `service_healthy` waits for, `networks` with aliases, `profiles`, override files and `-f`
 merges, YAML anchors, and the resource, capability, DNS and `extra_hosts` settings.
 
@@ -148,8 +155,6 @@ What to change in a file written for another engine:
   `security_opt`, `expose`, `links` and the CPU-scheduling keys are ignored with a warning.
 - `restart` is applied by the engine as Docker applies it, on exits and when the engine
   starts.
-- A health check built into an image is not read. Put a `healthcheck` on the service that
-  others wait for.
 
 `container compose config --commands` prints the `container` commands a project comes to.
 For this file:

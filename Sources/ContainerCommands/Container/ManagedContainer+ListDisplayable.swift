@@ -19,7 +19,7 @@ import Foundation
 
 extension ManagedContainer: ListDisplayable {
     public static var tableHeader: [String] {
-        ["ID", "IMAGE", "OS", "ARCH", "STATE", "IP", "CPUS", "MEMORY", "STARTED", "RESTARTS"]
+        ["ID", "IMAGE", "OS", "ARCH", "STATE", "HEALTH", "IP", "CPUS", "MEMORY", "STARTED", "RESTARTS"]
     }
 
     public var tableRow: [String] {
@@ -29,6 +29,7 @@ extension ManagedContainer: ListDisplayable {
             configuration.platform.os,
             configuration.platform.architecture,
             status.state.rawValue,
+            healthValue,
             status.networks.map { $0.ipv4Address.description }.joined(separator: ","),
             "\(configuration.resources.cpus)",
             "\(configuration.resources.memoryInBytes / (1024 * 1024)) MB",
@@ -38,4 +39,13 @@ extension ManagedContainer: ListDisplayable {
     }
 
     public var quietValue: String { configuration.id }
+
+    /// The HEALTH column, in the words of Docker's container list: `starting`, `healthy` or
+    /// `unhealthy` for a container whose check has run, and `none` for one without a check
+    /// or not yet started with it. Never empty, so a script counting columns from the left
+    /// stays in step, and placed left of IP, which can be empty, so one counting from the
+    /// right does too.
+    public var healthValue: String {
+        status.health?.status.rawValue ?? "none"
+    }
 }

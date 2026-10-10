@@ -66,7 +66,8 @@ public struct ManagedContainer: ManagedResource {
             exitCode: snapshot.exitCode,
             exitedAt: snapshot.exitedAt,
             restartCount: snapshot.restartCount,
-            restartError: snapshot.restartError
+            restartError: snapshot.restartError,
+            health: snapshot.health
         )
     }
 }

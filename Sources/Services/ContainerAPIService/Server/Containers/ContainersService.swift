@@ -61,12 +61,22 @@ public actor ContainersService {
         var pendingRestartTask: Task<Void, Never>? = nil
         /// What the last start passed to the runtime, for the engine's own starts of it.
         var dynamicEnv: [String: String] = [:]
+        /// Follows the runtime's health check for this run, when the container has one.
+        var healthWatch: Task<Void, Never>? = nil
 
         /// Forget the restart waiting out its delay, if there is one.
         mutating func cancelPendingRestart() {
             pendingRestartTask?.cancel()
             pendingRestartTask = nil
             pendingRestart = nil
+        }
+
+        /// The run is over: stop following its health check, and leave the health as Docker
+        /// leaves a stopped container's.
+        mutating func endHealthWatch() {
+            healthWatch?.cancel()
+            healthWatch = nil
+            snapshot.health = HealthWatch.ended(snapshot.health)
         }
 
         func getClient() throws -> RuntimeClient {
@@ -774,6 +784,14 @@ public actor ContainersService {
             state.snapshot.networks = sandboxSnapshot.networks
             state.snapshot.startedDate = Date()
             state.snapshot.restartError = nil
+            // The runtime checks the container's health from now on; this side follows it.
+            if state.snapshot.configuration.healthCheck != nil, let run = state.run {
+                let earlierLog = state.snapshot.health?.log ?? []
+                state.snapshot.health = HealthWatch.starting(after: state.snapshot.health)
+                state.healthWatch?.cancel()
+                state.healthWatch = self.watchHealth(
+                    id: id, incarnation: state.snapshot.incarnation, run: run, client: client, earlierLog: earlierLog)
+            }
             let firstStart = !state.restartRecord.hasBeenStarted
             state.restartRecord.hasBeenStarted = true
             await self.setContainerState(id, state, context: context)
@@ -1455,6 +1473,7 @@ public actor ContainersService {
         }
         state.client = nil
         state.run = nil
+        state.endHealthWatch()
 
         // Decided before auto-remove, which applies only to a container that stays stopped.
         let end: ContainerRunEnd = waitFailed ? .lost : code.map { .exited($0.exitCode) } ?? .stopped
@@ -1541,6 +1560,51 @@ public actor ContainersService {
         }
     }
 
+    // MARK: Health checks
+
+    /// Follow the health check the runtime runs for this run of the container, keeping the
+    /// snapshot's health current until the run ends.
+    private func watchHealth(
+        id: String, incarnation: String, run: UUID, client: RuntimeClient, earlierLog: [HealthCheckResult]
+    ) -> Task<Void, Never> {
+        // Holds the service only as long as the run it follows: the wait fails when the
+        // run's helper goes away, and the task is cancelled when the run ends.
+        Task {
+            await HealthWatch.follow(
+                wait: { try await client.waitHealth(after: $0) },
+                apply: { update in
+                    await self.applyHealth(update, id: id, incarnation: incarnation, run: run, earlierLog: earlierLog)
+                })
+        }
+    }
+
+    /// Take a health update for a run, if that run is still the container's and still
+    /// running. Under the lock, so that an operation that read the state before it cannot
+    /// write the old health back. Returns whether the run is still worth following.
+    private func applyHealth(
+        _ update: HealthUpdate, id: String, incarnation: String, run: UUID, earlierLog: [HealthCheckResult]
+    ) async -> Bool {
+        await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { _ in
+            await self.setHealth(update, id: id, incarnation: incarnation, run: run, earlierLog: earlierLog)
+        }
+    }
+
+    private func setHealth(
+        _ update: HealthUpdate, id: String, incarnation: String, run: UUID, earlierLog: [HealthCheckResult]
+    ) -> Bool {
+        guard var state = self.containers[id] else { return false }
+        let before = state.snapshot.health?.status
+        guard
+            HealthWatch.apply(
+                update, to: &state.snapshot, currentRun: state.run, run: run, incarnation: incarnation, earlierLog: earlierLog)
+        else { return false }
+        if let after = state.snapshot.health?.status, after != before {
+            self.log.info("health status changed", metadata: ["id": "\(id)", "status": "\(after.rawValue)"])
+        }
+        self.containers[id]?.snapshot.health = state.snapshot.health
+        return true
+    }
+
     // MARK: Restart policies
 
     /// Start the container again once `delay` has passed, unless something ends the wait
@@ -1607,6 +1671,7 @@ public actor ContainersService {
         state.client = nil
         state.run = nil
         state.exitRequested = false
+        state.endHealthWatch()
         state.snapshot.status = .stopped
         state.snapshot.networks = []
         state.snapshot.restartError = String(describing: error)
@@ -1745,8 +1810,10 @@ public actor ContainersService {
         if self.containers[id] == nil {
             return
         }
-        // A restart waiting out its delay is for a container that is going away.
+        // A restart waiting out its delay is for a container that is going away, and so is
+        // the health check it was following.
         self.containers[id]?.cancelPendingRestart()
+        self.containers[id]?.endHealthWatch()
 
         // To be pedantic. This is only needed if something in the "launch
         // the init process" lifecycle fails before actually fork+exec'ing
