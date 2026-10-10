@@ -95,13 +95,27 @@ struct ContainerListFilterFlagTests {
         #expect(try filters([]).name == nil)
     }
 
-    @Test("a status condition replaces the default of running containers only, so it needs no --all")
+    @Test("a status condition replaces the default of leaving stopped containers out, so it needs no --all")
     func status() throws {
-        #expect(try filters([]).status == .running)
+        #expect(try filters([]).status == nil)
         #expect(try filters(["--all"]).status == nil)
         #expect(try filters(["--filter", "status=stopped"]).status == .stopped)
         #expect(try filters(["--all", "--filter", "status=running"]).status == .running)
         #expect(try filters(["--filter", "status=stopping"]).status == .stopping)
+    }
+
+    @Test("without --all or a status condition only stopped containers are left out, so restarting ones show")
+    func hidesStopped() throws {
+        func hides(_ arguments: [String]) throws -> Bool {
+            let command = try Command.parse(arguments)
+            return Command.hidesStopped(for: command.filter, all: command.all)
+        }
+        #expect(try hides([]))
+        #expect(try hides(["--filter", "name=web"]))
+        #expect(try !hides(["--all"]))
+        #expect(try !hides(["--filter", "status=stopped"]))
+        #expect(try !hides(["--filter", "status=restarting"]))
+        #expect(try filters(["--filter", "status=restarting"]).status == .restarting)
     }
 
     @Test("an unknown key is refused naming the known ones")

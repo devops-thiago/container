@@ -44,10 +44,9 @@ public struct ContainerConfiguration: Sendable, Codable {
     public var extraHosts: [ExtraHost] = []
     /// What should happen to the container when it exits or the engine starts.
     ///
-    /// Kept on the container so that every client sees the same answer. Nothing in the
-    /// engine acts on it yet: the runtime does not restart a process that exited, and it is
-    /// the embedding app that starts `always` and `unlessStopped` containers with the engine.
-    /// Absent means `no`.
+    /// The engine applies it with Docker's rules: a process that exits is started again
+    /// after a delay that grows while it keeps failing, and `always` and `unless-stopped`
+    /// containers that were running start with the engine. Absent means `no`.
     public var restartPolicy: RestartPolicy? = nil
     /// The DNS configuration for the container.
     public var dns: DNSConfiguration? = nil

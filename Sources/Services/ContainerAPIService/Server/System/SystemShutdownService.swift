@@ -182,6 +182,8 @@ public actor SystemShutdownService {
         if await !shutdownGate.quiesce(until: cleanupDeadline) {
             log.warning("timed out waiting for active API mutations during shutdown")
         }
+        // The engine going down: these stops are not a person's, and nothing restarts.
+        await containersService.beginEngineShutdown()
         await stopContainers(until: cleanupDeadline)
         await stopPlugins(until: cleanupDeadline)
         await sweepGenerationJobs(excluding: apiServerJobLabel, until: cleanupDeadline)

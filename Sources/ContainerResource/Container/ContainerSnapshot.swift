@@ -55,6 +55,13 @@ public struct ContainerSnapshot: Codable, Sendable {
     public var exitCode: Int32?
     /// When the container's initial process exited.
     public var exitedAt: Date?
+    /// How many times the engine has started the container again under its restart policy
+    /// since it was last started by hand, as Docker's `RestartCount` counts.
+    public var restartCount: Int
+    /// Why the engine could not start the container again, at an exit or when the engine
+    /// started, when its restart policy asked it to. Nil once the container starts. Kept by
+    /// this apiserver only: the next engine start tries again.
+    public var restartError: String?
 
     public init(
         configuration: ContainerConfiguration,
@@ -63,7 +70,9 @@ public struct ContainerSnapshot: Codable, Sendable {
         networks: [Attachment],
         startedDate: Date? = nil,
         exitCode: Int32? = nil,
-        exitedAt: Date? = nil
+        exitedAt: Date? = nil,
+        restartCount: Int = 0,
+        restartError: String? = nil
     ) {
         self.configuration = configuration
         self.incarnation = incarnation
@@ -72,6 +81,8 @@ public struct ContainerSnapshot: Codable, Sendable {
         self.startedDate = startedDate
         self.exitCode = exitCode
         self.exitedAt = exitedAt
+        self.restartCount = restartCount
+        self.restartError = restartError
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -82,6 +93,8 @@ public struct ContainerSnapshot: Codable, Sendable {
         case startedDate
         case exitCode
         case exitedAt
+        case restartCount
+        case restartError
     }
 
     public init(from decoder: any Decoder) throws {
@@ -95,5 +108,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         startedDate = try container.decodeIfPresent(Date.self, forKey: .startedDate)
         exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
         exitedAt = try container.decodeIfPresent(Date.self, forKey: .exitedAt)
+        restartCount = try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
+        restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
     }
 }

@@ -24,6 +24,9 @@ public struct ComposeContainer: Sendable, Equatable {
         case stopped
         /// Between the two: being started or being stopped.
         case changing
+        /// Its process exited and the engine is about to start it again, as its restart
+        /// policy asks.
+        case restarting
     }
 
     public let id: String

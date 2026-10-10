@@ -37,10 +37,10 @@ an equivalent: `ps`, `container <verb>`, `restart`, `logs --tail`, `images`, `pu
 | `docker commit` | — | build an image from a Dockerfile instead |
 | `docker rename`, `pause`, `unpause`, `wait`, `diff`, `update` | — | no equivalent |
 
-The SiliconShip 1.3.0 engine accepts `--restart no|always|unless-stopped|on-failure[:N]`
-and stores the policy for `inspect`. The app applies `always` and `unless-stopped` when it
-starts the engine; the standalone engine does not yet supervise policies. Process-exit
-restarts arrive with the engine supervisor planned for 1.5.0. See the roadmap below.
+`--restart no|always|unless-stopped|on-failure[:N]` behaves as Docker's: the engine starts an
+exited container again, with Docker's growing delay, and starts `always` and `unless-stopped`
+containers when it starts. `container ls` shows a container waiting to be restarted as
+`restarting`, with a `RESTARTS` column; `inspect` has `restartCount`.
 
 The 1.3.0 fork also accepts `--hostname`, `--sysctl key=value`, `--add-host name:address`
 (including `host-gateway`), and `--pull always|missing|never`. A host service reached through
@@ -146,9 +146,8 @@ What to change in a file written for another engine:
 - `privileged`, `devices`, `network_mode`, `pid`, `ipc`, `secrets`, `configs`, `extends` and
   `volumes_from` stop the command, which names the key and its line. `logging`,
   `security_opt`, `expose`, `links` and the CPU-scheduling keys are ignored with a warning.
-- `restart` is recorded with the container and applied by the SiliconShip app when it starts
-  the engine. A container that exits is not started again until the engine supervisor
-  planned for 1.5.0.
+- `restart` is applied by the engine as Docker applies it, on exits and when the engine
+  starts.
 - A health check built into an image is not read. Put a `healthcheck` on the service that
   others wait for.
 

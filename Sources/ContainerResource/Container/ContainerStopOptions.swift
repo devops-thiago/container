@@ -19,14 +19,34 @@ import Foundation
 public struct ContainerStopOptions: Sendable, Codable {
     public var timeoutInSeconds: Int32
     public var signal: String?
+    /// The stop is the engine going down (its app quitting or stopping it), not a person
+    /// stopping this container. Such a stop does not count as the user's for the restart
+    /// policy: an `unless-stopped` container stopped this way starts again with the engine,
+    /// as Docker's do when its daemon restarts. Either kind of stop ends any restart in
+    /// progress.
+    public var engineShutdown: Bool
 
     public static let `default` = ContainerStopOptions(
         timeoutInSeconds: 5,
         signal: nil
     )
 
-    public init(timeoutInSeconds: Int32, signal: String?) {
+    public init(timeoutInSeconds: Int32, signal: String?, engineShutdown: Bool = false) {
         self.timeoutInSeconds = timeoutInSeconds
         self.signal = signal
+        self.engineShutdown = engineShutdown
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case timeoutInSeconds
+        case signal
+        case engineShutdown
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        timeoutInSeconds = try container.decode(Int32.self, forKey: .timeoutInSeconds)
+        signal = try container.decodeIfPresent(String.self, forKey: .signal)
+        engineShutdown = try container.decodeIfPresent(Bool.self, forKey: .engineShutdown) ?? false
     }
 }
