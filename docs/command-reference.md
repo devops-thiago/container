@@ -1816,7 +1816,7 @@ container cluster ls
 
 ### `container cluster load-image`
 
-Exports an image from the local `container` image store and imports it into every node's containerd (in the `k8s.io` namespace) so that Kubernetes can schedule pods that reference it on any node.
+Exports an image from the local `container` image store and imports it into the containerd (in the `k8s.io` namespace) of every node of the cluster, the control plane and each worker, so that Kubernetes can schedule pods that reference it on any node. The command prints each node the image reached and exits non-zero, naming every node it did not reach and why, if any node failed or was not running.
 
 **Usage**
 
