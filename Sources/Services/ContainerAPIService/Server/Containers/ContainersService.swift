@@ -105,6 +105,11 @@ public actor ContainersService {
 
     // FIXME: Find a better mechanism for services running on the APIServer to work with each other
     private weak var networksService: NetworksService?
+    /// Rewrites running peers' hosts files; made on the first change that needs it.
+    private var peerHosts: PeerHostsRefresher?
+    /// How long one guest has to take its new hosts file. The operation that caused the
+    /// rewrite waits for it, so a wedged guest must not hold that up for long.
+    private static let peerHostsResponseTimeout: Duration = .seconds(5)
 
     public init(
         appRoot: URL,
@@ -727,6 +732,10 @@ public actor ContainersService {
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)", "processId": "\(processID)"]) { context in
             try await self.startProcessLocked(id: id, processID: processID, context: context)
         }
+        // As Docker's resolver does: by the time a start returns, its peers know the name.
+        if Self.isInitProcess(id: id, processID: processID) {
+            await self.settlePeerHosts()
+        }
     }
 
     private func startProcessLocked(id: String, processID: String, context: AsyncLock.Context) async throws {
@@ -822,6 +831,7 @@ public actor ContainersService {
         if processID == id, (try? Signal(signal)) == .kill, let run = state.run {
             try await handleContainerExit(
                 id: id, expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
+            await self.settlePeerHosts()
         }
     }
 
@@ -949,6 +959,8 @@ public actor ContainersService {
             expectedIncarnation: state.snapshot.incarnation,
             expectedRun: run
         )
+        // And by the time a stop returns, its peers no longer list it.
+        await self.settlePeerHosts()
     }
 
     public func dial(id: String, port: UInt32) async throws -> FileHandle {
@@ -1283,6 +1295,7 @@ public actor ContainersService {
                 try await self.cleanUp(id: id, context: context)
             }
         }
+        await self.settlePeerHosts()
     }
 
     public func containerDiskUsage(id: String) async throws -> UInt64 {
@@ -1784,7 +1797,8 @@ public actor ContainersService {
                 ])
         }
 
-        self.containers.removeValue(forKey: id)
+        let removed = self.containers.removeValue(forKey: id)
+        await self.peerMembershipChanged(old: removed?.snapshot, new: nil)
     }
 
     private func cleanUp(id: String, context: AsyncLock.Context) async throws {
@@ -1995,7 +2009,52 @@ public actor ContainersService {
     }
 
     private func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {
+        let old = self.containers[id]?.snapshot
         self.containers[id] = state
+        await self.peerMembershipChanged(old: old, new: state.snapshot)
+    }
+
+    // MARK: Peer hosts files
+
+    /// Every change to what runs where passes through here: when a container starts running
+    /// on its networks, stops running there, or goes away, the running containers on those
+    /// networks have their hosts files rewritten. Not while the engine goes down, when
+    /// everything stops and nobody is left to read them.
+    private func peerMembershipChanged(old: ContainerSnapshot?, new: ContainerSnapshot?) async {
+        guard !self.engineShuttingDown else { return }
+        let networks = PeerHosts.networksToRefresh(old: old, new: new)
+        guard !networks.isEmpty else { return }
+        await self.peerHostsRefresher().request(networks: networks)
+    }
+
+    private func peerHostsRefresher() -> PeerHostsRefresher {
+        if let peerHosts {
+            return peerHosts
+        }
+        let refresher = PeerHostsRefresher(
+            log: self.log,
+            members: { [weak self] in await self?.peerHostsMembers() ?? [] },
+            apply: { [weak self] rewrite in try await self?.applyPeerHosts(rewrite) })
+        self.peerHosts = refresher
+        return refresher
+    }
+
+    /// Wait for the rewrites asked for so far. Never fails: a guest that could not take its
+    /// file was logged, and the operation that caused it stands.
+    private func settlePeerHosts() async {
+        await self.peerHosts?.settle()
+    }
+
+    private func peerHostsMembers() -> [PeerHosts.Member] {
+        self.containers.values.compactMap { PeerHosts.member(of: $0.snapshot) }
+    }
+
+    private func applyPeerHosts(_ rewrite: PeerHosts.Rewrite) async throws {
+        // Gone or stopped since the pass read it: nothing to write.
+        guard let state = self.containers[rewrite.id], state.snapshot.status == .running, let client = state.client else {
+            return
+        }
+        try await client.refreshHosts(peers: rewrite.peers, responseTimeout: Self.peerHostsResponseTimeout)
     }
 
     private func getContainerState(id: String, context: AsyncLock.Context) throws -> ContainerState {
