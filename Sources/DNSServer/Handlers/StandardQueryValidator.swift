@@ -29,6 +29,11 @@ public struct StandardQueryValidator: DNSHandler {
     /// - Returns: the delegate response if the query is valid, and an
     ///   error response otherwise
     public func answer(query: Message) async throws -> Message? {
+        try await answer(query: query, from: .other)
+    }
+
+    /// Ensures the query is valid before forwarding it, with its source, to the delegate.
+    public func answer(query: Message, from source: DNSQuerySource) async throws -> Message? {
         // Reject response messages.
         guard query.type == .query else {
             return Message(
@@ -59,6 +64,6 @@ public struct StandardQueryValidator: DNSHandler {
             )
         }
 
-        return try await handler.answer(query: query)
+        return try await handler.answer(query: query, from: source)
     }
 }

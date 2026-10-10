@@ -45,6 +45,25 @@ extension DNSServer {
             }
         }
 
+        let responseData = try await response(to: data, from: DNSQuerySource(packet.remoteAddress))
+
+        self.log?.debug("sending response")
+        let rData = ByteBuffer(bytes: responseData)
+        do {
+            try await outbound.write(AddressedEnvelope(remoteAddress: packet.remoteAddress, data: rData))
+        } catch {
+            self.log?.error("failed to send DNS response: \(error)")
+        }
+
+        self.log?.debug("processing done")
+
+    }
+
+    /// The wire response to one wire query: what `handle` sends back, without the socket.
+    /// - Parameters:
+    ///   - data: the query as received
+    ///   - source: who sent it
+    func response(to data: Data, from source: DNSQuerySource) async throws -> Data {
         self.log?.debug("deserializing message")
 
         // always send response
@@ -55,7 +74,7 @@ extension DNSServer {
 
             self.log?.debug("awaiting processing")
             var response =
-                try await handler.answer(query: query)
+                try await handler.answer(query: query, from: source)
                 ?? Message(
                     id: query.id,
                     type: .response,
@@ -67,7 +86,9 @@ extension DNSServer {
             // Only set NXDOMAIN if handler didn't explicitly set noError (NODATA response).
             // This preserves NODATA responses for AAAA queries when A record exists,
             // which prevents musl libc from treating empty AAAA as "domain doesn't exist".
-            if response.answers.isEmpty && response.returnCode != .noError {
+            // A refusal is kept as one too: it says "not for you", where NXDOMAIN would
+            // tell a sender this server does not serve that the name does not exist.
+            if response.answers.isEmpty && response.returnCode != .noError && response.returnCode != .refused {
                 response.returnCode = .nonExistentDomain
             }
 
@@ -107,16 +128,6 @@ extension DNSServer {
             )
             responseData = try response.serialize()
         }
-
-        self.log?.debug("sending response")
-        let rData = ByteBuffer(bytes: responseData)
-        do {
-            try await outbound.write(AddressedEnvelope(remoteAddress: packet.remoteAddress, data: rData))
-        } catch {
-            self.log?.error("failed to send DNS response: \(error)")
-        }
-
-        self.log?.debug("processing done")
-
+        return responseData
     }
 }

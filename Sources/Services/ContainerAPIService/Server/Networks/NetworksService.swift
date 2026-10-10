@@ -384,19 +384,51 @@ public actor NetworksService {
         }
     }
 
-    /// Perform a hostname lookup on all networks.
+    /// Look a name up the way a container's DNS question is answered: a container's own name
+    /// first, then an alias. Two containers may share an alias; the first in hostname order
+    /// answers, as it does in the hosts file a guest is seeded with.
     ///
-    /// - Parameter hostname: A canonical DNS hostname with a trailing dot (e.g. `"example.com."`).
-    public func lookup(hostname: String) async throws -> Attachment? {
+    /// - Parameters:
+    ///   - name: A registered name, with no trailing dot.
+    ///   - network: The network the asker is on, or nil to search every network.
+    public func lookup(name: String, network: String?) async throws -> Attachment? {
         try await self.stateLock.withLock { _ in
-            for state in await self.serviceStates.values {
-                guard let allocation = try await state.client.lookup(hostname: hostname) else {
-                    continue
-                }
-                return allocation
-            }
-            return nil
+            let states = await self.serviceStates
+            let ids = network.map { [$0] } ?? states.keys.sorted()
+            return try await Self.lookup(name: name, on: ids.compactMap { states[$0]?.client })
         }
+    }
+
+    /// Every network's container names before any network's aliases, so an alias never
+    /// shadows a container that is called that.
+    static func lookup(name: String, on networks: [any NetworkAttachmentTable]) async throws -> Attachment? {
+        for network in networks {
+            if let attachment = try await network.lookup(hostname: name) {
+                return attachment
+            }
+        }
+        for network in networks {
+            if let attachment = Self.attachment(answering: name, in: try await network.attachments()) {
+                return attachment
+            }
+        }
+        return nil
+    }
+
+    /// The running network whose subnet holds `address`, which is the network a query sent
+    /// from that address was sent from.
+    public func network(containing address: IPv4Address) -> String? {
+        Self.network(containing: address, among: serviceStates.mapValues(\.status.ipv4Subnet))
+    }
+
+    /// The attachment `name` resolves to among one network's attachments: the container it
+    /// names, or else the first one holding it as an alias.
+    static func attachment(answering name: String, in attachments: [Attachment]) -> Attachment? {
+        attachments.first { $0.hostname == name } ?? attachments.first { $0.aliases.contains(name) }
+    }
+
+    static func network(containing address: IPv4Address, among subnets: [String: CIDRv4]) -> String? {
+        subnets.keys.sorted().first { subnets[$0]?.contains(address) == true }
     }
 
     public func plugin(for id: String) throws -> String {
@@ -509,3 +541,11 @@ extension NetworksService {
         self.serviceStates[key] = value
     }
 }
+
+/// The two questions a name lookup asks one network's helper.
+protocol NetworkAttachmentTable: Sendable {
+    func lookup(hostname: String) async throws -> Attachment?
+    func attachments() async throws -> [Attachment]
+}
+
+extension ContainerNetworkClient.NetworkClient: NetworkAttachmentTable {}

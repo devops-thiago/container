@@ -83,6 +83,41 @@ container stop http-server
 > reach a container on a custom network by its IP address instead (`container inspect
 > <name>` to find it).
 
+## Container names from inside a guest
+
+The engine's container-name resolver listens on UDP port 2053 on every host address, so a
+guest reaches it at its network's gateway (`<gateway>:2053`) as well as the Mac reaching it
+at `127.0.0.1:2053`. It answers from the networks as they are at the moment of the query,
+so a container started after the asker is found too. Who asks decides what is answered:
+
+| Sender | Answered from |
+|--------|---------------|
+| `127.0.0.1` (the Mac, and anything `/etc/resolver` routes here) | every network |
+| an address inside a running network's subnet (a container) | that network only |
+| anyone else | refused (`REFUSED`) |
+
+A name is a container's name or one of its network aliases, bare (`web`) or qualified by a
+search domain (`web.container.internal`); a container's own name wins over another's alias,
+and a shared alias answers with the first holder in name order. A name it does not know is
+`NXDOMAIN`; a known name without an IPv6 address answers AAAA with no records (`NODATA`).
+The resolver is authoritative for container names only: it never forwards.
+
+A guest's stub resolver cannot use it directly, because `resolv.conf` cannot name a port and
+port 53 on the host belongs to mDNSResponder on every address. Reaching it from a guest takes a
+resolver inside the guest that listens on port 53 and forwards to the engine — the contract
+for that resolver:
+
+- listen on `127.0.0.11:53` (UDP and TCP) and point `resolv.conf` at it, keeping the search
+  domain;
+- send single-label names and names under the search domain to `<gateway>:2053` over UDP
+  (answers never exceed 512 bytes);
+- send everything else, and any container-name query the engine answers `NXDOMAIN` or does
+  not answer, to the nameserver the guest had before (the gateway's port 53), so public
+  names resolve exactly as they did.
+
+Until a guest runs such a resolver, peers come from the `/etc/hosts` entries written when the
+container boots, and that file stays the fallback afterwards.
+
 ## Forward traffic from `localhost` to your container
 
 Use the `--publish` option to forward TCP or UDP traffic from your loopback IP to the container you run. The option value has the form `[host-ip:]host-port:container-port[/protocol]`, where protocol may be `tcp` or `udp`, case insensitive.

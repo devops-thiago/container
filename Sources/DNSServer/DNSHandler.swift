@@ -22,4 +22,21 @@ public protocol DNSHandler {
     /// - Returns: The response message for the query, or nil if the request
     ///   is not within the scope of the handler.
     func answer(query: Message) async throws -> Message?
+
+    /// Attempt to answer a DNS query, knowing who asked.
+    ///
+    /// A resolver that serves more than one audience answers differently depending on the
+    /// asker: the container-name resolver scopes a guest's question to the network the guest
+    /// is on and refuses an address it does not serve at all. Handlers that answer everyone
+    /// alike keep the default, which ignores the source.
+    /// - Parameters:
+    ///   - query: the query message
+    ///   - source: where the query came from
+    func answer(query: Message, from source: DNSQuerySource) async throws -> Message?
+}
+
+extension DNSHandler {
+    public func answer(query: Message, from source: DNSQuerySource) async throws -> Message? {
+        try await answer(query: query)
+    }
 }

@@ -290,13 +290,15 @@ public actor RuntimeService {
                     interfaces.append(interface)
 
                     // The names of everything already on this network, gathered while the
-                    // helper is on the line. They become /etc/hosts entries below: the guest
-                    // has no way to reach the engine's DNS resolver without a root-owned
-                    // /etc/resolver file on the host (macOS refuses unprivileged binds to
-                    // port 53 anywhere, so the resolver cannot sit where a stub looks), and
-                    // the hosts file is the one name table a guest consults that this side
-                    // fully controls. Peers that join later are not in it; a stack started
-                    // in dependency order sees the names it needs.
+                    // helper is on the line. They become /etc/hosts entries below: a guest's
+                    // stub resolver only speaks to port 53, which on the host belongs to
+                    // mDNSResponder on every address, so the engine's resolver (at the
+                    // gateway, port 2053) is reachable only by a resolver inside the guest
+                    // that forwards to it — see "Container names from inside a guest" in
+                    // docs/networking.md. The hosts file is the one name table a guest
+                    // consults that this side fully controls, and stays the fallback. Peers
+                    // that join later are not in it; a stack started in dependency order
+                    // sees the names it needs.
                     if let peers = try? await client.attachments() {
                         peerAttachments.append(
                             contentsOf: peers.filter { $0.hostname != attachment.hostname })

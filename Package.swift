@@ -318,6 +318,7 @@ let package = Package(
                 "container-apiserver",
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationEXT4", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 .product(name: "Logging", package: "swift-log"),
                 "ContainerAPIService",
@@ -329,6 +330,7 @@ let package = Package(
                 "ContainerRuntimeClient",
                 "ContainerTestSupport",
                 "ContainerXPC",
+                "DNSServer",
             ]
         ),
         .target(
@@ -653,7 +655,9 @@ let package = Package(
         .testTarget(
             name: "DNSServerTests",
             dependencies: [
-                "DNSServer"
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                "DNSServer",
             ]
         ),
         .target(

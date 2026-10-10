@@ -39,6 +39,12 @@ extension APIServer {
         static let listenAddress = "127.0.0.1"
         static let localhostDNSPort = 1053
         static let dnsPort = 2053
+        /// The container-name resolver listens on every address, not just loopback, so a guest
+        /// can reach it at its network's gateway. A specific gateway bind would race the
+        /// networks, which come and go after this starts; who may ask what is decided per
+        /// query by `ContainerNameTable` instead, and anyone outside loopback and the running
+        /// networks' subnets is refused.
+        static let containerDNSListenAddress = "0.0.0.0"
 
         @Flag(name: .long, help: "Enable debug logging")
         var debug = false
@@ -275,20 +281,16 @@ extension APIServer {
 
                     // start up host table DNS
                     group.addTask {
-                        let hostsResolver = ContainerDNSHandler(networkService: networkService)
-                        let nxDomainResolver = NxDomainResolver()
-                        let compositeResolver = CompositeResolver(handlers: [hostsResolver, nxDomainResolver])
-                        let hostsQueryValidator = StandardQueryValidator(handler: compositeResolver)
-                        let dnsServer: DNSServer = DNSServer(handler: hostsQueryValidator, log: log)
+                        let dnsServer = DNSServer(handler: ContainerNameTable.resolver(networks: networkService), log: log)
                         log.info(
                             "starting DNS resolver for container hostnames",
                             metadata: [
-                                "host": "\(Self.listenAddress)",
+                                "host": "\(Self.containerDNSListenAddress)",
                                 "port": "\(Self.dnsPort)",
                             ]
                         )
                         do {
-                            try await dnsServer.run(host: Self.listenAddress, port: Self.dnsPort)
+                            try await dnsServer.run(host: Self.containerDNSListenAddress, port: Self.dnsPort)
                             return .success(())
                         } catch {
                             return .failure(error)
