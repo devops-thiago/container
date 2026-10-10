@@ -96,4 +96,46 @@ struct HostsEntriesTests {
         #expect(entries.filter { $0.hostnames.contains("db") }.map(\.ipAddress) == ["192.0.2.99"])
         #expect(entries.contains { $0.rendered == "192.0.2.30 shop-db-1 shop-db-1.container.internal" })
     }
+    @Test func aRefreshBuildsTheFileByTheBootRules() throws {
+        let guest = RuntimeService.GuestHosts(
+            hostname: "api", aliases: ["backend", "api"], primaryAddress: "192.0.2.10", searchDomain: "example.test",
+            extraHosts: [.init(name: "registry", address: "192.0.2.99")], gateway: "192.0.2.1")
+        #expect(
+            try guest.entries(peers: []).map(\.rendered) == [
+                "127.0.0.1 localhost",
+                "192.0.2.10 api backend",
+                "192.0.2.99 registry",
+            ])
+        let later = try ContainerResource.Attachment(
+            network: "test", hostname: "worker", ipv4Address: CIDRv4("192.0.2.40/24"),
+            ipv4Gateway: IPv4Address("192.0.2.1"), ipv6Address: nil, macAddress: nil, aliases: ["jobs"])
+        #expect(
+            try guest.entries(peers: [later, peer("cache")]).map(\.rendered) == [
+                "127.0.0.1 localhost",
+                "192.0.2.10 api backend",
+                "192.0.2.40 worker worker.example.test jobs",
+                "192.0.2.20 cache cache.example.test",
+                "192.0.2.99 registry",
+            ])
+        #expect(
+            try guest.entries(peers: [later]).map(\.rendered)
+                == RuntimeService.hostsEntries(
+                    hostname: "api", aliases: ["backend", "api"], primaryAddress: "192.0.2.10", peers: [later], searchDomain: "example.test",
+                    extraHosts: [.init(name: "registry", address: "192.0.2.99")], gateway: "192.0.2.1"
+                ).map(\.rendered))
+    }
+
+    @Test func theGuestCallsItselfByItsOwnHostnameFirst() {
+        var config = ContainerConfiguration(
+            id: "c0ffee",
+            image: .init(
+                reference: "fixture:latest",
+                descriptor: .init(mediaType: "application/vnd.oci.image.manifest.v1+json", digest: "sha256:" + String(repeating: "0", count: 64), size: 0)),
+            process: .init(executable: "/bin/true", arguments: [], environment: []))
+        #expect(RuntimeService.guestHostname(for: config) == "c0ffee")
+        config.networks = [.init(network: "default", options: .init(hostname: "shop-web-1.example.test"))]
+        #expect(RuntimeService.guestHostname(for: config) == "shop-web-1")
+        config.hostname = "web"
+        #expect(RuntimeService.guestHostname(for: config) == "web")
+    }
 }
