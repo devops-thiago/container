@@ -168,6 +168,22 @@ An image name without a registry, such as `my-app:dev`, is looked up in the loca
 > - Sharing is set when the cluster is created. To change it, delete the cluster and create it again.
 > - After rebuilding a tag, use `imagePullPolicy: Always` or a new tag so the node picks up the new image. With `IfNotPresent`, a node keeps the image it already has.
 
+### Load an image into a cluster
+
+A cluster created without `--shared-image-store` can still run a local image: load it into the cluster first. The image is placed in the `k8s.io` namespace of every node, the control plane and each worker, making it available to pods on any node:
+
+```bash
+container build -t my-app:latest .
+
+# Load the image into every node of the cluster
+container cluster load-image my-app:latest
+
+# Load the image into specific nodes only
+container cluster load-image --node cluster-dev-worker-1 --node cluster-dev-worker-2 my-app:latest
+```
+
+Reference a loaded image with `imagePullPolicy: Never` or `IfNotPresent`, so the node uses its copy rather than pulling from a registry.
+
 ## Kubernetes node image
 
 By default, clusters use `kindest/node:v1.35.5`, a Kubernetes-in-Docker image optimized for local development. You can use a different node image when creating a cluster:

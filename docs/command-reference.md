@@ -1837,6 +1837,45 @@ container cluster ls --format json
 container cluster ls -q
 ```
 
+### `container cluster load-image`
+
+Exports an image from the local `container` image store and imports it into the containerd (in the `k8s.io` namespace) of every node of the cluster, the control plane and each worker, so that Kubernetes can schedule pods that reference it on any node. The command prints each node the image reached and exits non-zero, naming every node it did not reach and why, if any node failed or was not running.
+
+**Usage**
+
+```bash
+container cluster load-image [--name <name>] [--platform <platform>] [--node <node> ...] <image> [--debug]
+```
+
+**Arguments**
+
+*   `<image>`: Image reference to load (e.g. `my-app:latest`)
+
+**Options**
+
+*   `--name <name>`: Cluster name (default: `cluster-dev`)
+*   `--platform <platform>`: Platform of the image variant to load from a multi-arch image (format: os/arch[/variant], default: `linux/<host-arch>`). Use this when the local store contains a multi-arch manifest list and you want to select a specific variant.
+*   `--node <node>`: Load into specific nodes instead of every node in the cluster. Repeat to target multiple nodes.
+
+**Examples**
+
+```bash
+# load an image into every node of the default cluster
+container cluster load-image my-app:latest
+
+# load an image into every node of a named cluster
+container cluster load-image --name my-cluster my-app:latest
+
+# load the amd64 variant of a multi-arch image
+container cluster load-image --platform linux/amd64 my-app:latest
+
+# load an image into a single worker node only
+container cluster load-image --node cluster-dev-worker-1 my-app:latest
+
+# load an image into specific worker nodes only
+container cluster load-image --node cluster-dev-worker-1 --node cluster-dev-worker-2 my-app:latest
+```
+
 ### `container cluster write-config`
 
 Fetches the current kubeconfig from a running cluster and merges its context into a kubeconfig file. Use this to refresh credentials after a cluster restart or to write to an alternate config file.
