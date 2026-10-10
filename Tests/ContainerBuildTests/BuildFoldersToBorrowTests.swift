@@ -17,52 +17,52 @@
 import Foundation
 import Testing
 
-@testable import ContainerCommands
+@testable import ContainerBuild
 
 struct BuildFoldersToBorrowTests {
     @Test func contextAlone() {
-        let folders = Application.BuildCommand.foldersToBorrow(contextDir: "/Users/x/proj", file: nil)
+        let folders = Builder.foldersToBorrow(contextDir: "/Users/x/proj", file: nil)
         #expect(folders == ["/Users/x/proj"])
     }
 
     @Test func dockerfileInsideTheContextAddsNothing() {
-        let folders = Application.BuildCommand.foldersToBorrow(
+        let folders = Builder.foldersToBorrow(
             contextDir: "/Users/x/proj", file: "/Users/x/proj/docker/Dockerfile.dev")
         #expect(folders == ["/Users/x/proj"])
     }
 
     @Test func dockerfileOutsideTheContextAddsItsFolder() {
-        let folders = Application.BuildCommand.foldersToBorrow(
+        let folders = Builder.foldersToBorrow(
             contextDir: "/Users/x/proj", file: "/Users/x/dockerfiles/Dockerfile")
         #expect(folders == ["/Users/x/proj", "/Users/x/dockerfiles"])
     }
 
     @Test func aSiblingWithTheSamePrefixIsOutside() {
-        let folders = Application.BuildCommand.foldersToBorrow(
+        let folders = Builder.foldersToBorrow(
             contextDir: "/Users/x/proj", file: "/Users/x/proj-infra/Dockerfile")
         #expect(folders == ["/Users/x/proj", "/Users/x/proj-infra"])
     }
 
     @Test func stdinBorrowsOnlyTheContext() {
-        let folders = Application.BuildCommand.foldersToBorrow(contextDir: "/Users/x/proj", file: "-")
+        let folders = Builder.foldersToBorrow(contextDir: "/Users/x/proj", file: "-")
         #expect(folders == ["/Users/x/proj"])
     }
 
     @Test func relativePathsResolveAgainstTheShellsDirectory() {
         let env = ["PWD": "/Users/x/proj"]
-        #expect(Application.BuildCommand.foldersToBorrow(contextDir: ".", file: nil, environment: env) == ["/Users/x/proj"])
+        #expect(Builder.foldersToBorrow(contextDir: ".", file: nil, environment: env) == ["/Users/x/proj"])
         #expect(
-            Application.BuildCommand.foldersToBorrow(contextDir: "../other", file: "build/Dockerfile", environment: env)
+            Builder.foldersToBorrow(contextDir: "../other", file: "build/Dockerfile", environment: env)
                 == ["/Users/x/other", "/Users/x/proj/build"])
     }
 
     @Test func withoutAShellDirectoryTheProcessOneIsUsed() {
-        let folders = Application.BuildCommand.foldersToBorrow(contextDir: ".", file: nil, environment: [:])
+        let folders = Builder.foldersToBorrow(contextDir: ".", file: nil, environment: [:])
         #expect(folders == [URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL.path])
     }
 
     @Test func aRelativeShellDirectoryIsIgnored() {
-        let folders = Application.BuildCommand.foldersToBorrow(contextDir: ".", file: nil, environment: ["PWD": "relative"])
+        let folders = Builder.foldersToBorrow(contextDir: ".", file: nil, environment: ["PWD": "relative"])
         #expect(folders == [URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL.path])
     }
 }

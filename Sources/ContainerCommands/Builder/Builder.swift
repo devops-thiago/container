@@ -16,12 +16,13 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerBuild
 
 extension Application {
     public struct BuilderCommand: AsyncLoggableCommand {
         public init() {}
 
-        public static let builderResourceDir = "builder"
+        public static let builderResourceDir = Builder.resourceDirectory
         public static let configuration = CommandConfiguration(
             commandName: "builder",
             abstract: "Manage an image builder instance",
