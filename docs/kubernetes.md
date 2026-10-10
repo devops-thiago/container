@@ -109,7 +109,7 @@ container build -t my-app:latest .
 container k8s load-image my-app:latest
 ```
 
-The image is placed in the `k8s.io` namespace, making it available for pod scheduling:
+The image is placed in the `k8s.io` namespace of every node, the control plane and each worker, making it available to pods on any node:
 
 ```yaml
 apiVersion: v1
