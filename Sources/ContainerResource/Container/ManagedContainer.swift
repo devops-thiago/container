@@ -64,7 +64,9 @@ public struct ManagedContainer: ManagedResource {
             networks: snapshot.networks,
             startedDate: snapshot.startedDate,
             exitCode: snapshot.exitCode,
-            exitedAt: snapshot.exitedAt
+            exitedAt: snapshot.exitedAt,
+            restartCount: snapshot.restartCount,
+            restartError: snapshot.restartError
         )
     }
 }

@@ -149,9 +149,10 @@ The differences worth knowing:
   same named volume cannot run together; `compose` warns when a project has such a pair.
   Services that run together share files through a folder mounted into each. A job that
   prepares a volume and exits before the service that uses it starts is fine.
-- **`restart` is stored, not supervised.** The policy is recorded with the container, and
-  the SiliconShip app applies `always` and `unless-stopped` when it starts the engine. A
-  container that exits is not started again.
+- **`restart` is applied by the engine, as Docker applies it.** A container that exits is
+  started again by its policy, after a delay that grows while it keeps failing, and `always`
+  and `unless-stopped` containers start with the engine. `compose stop` and `down` count as
+  stopping them by hand.
 - **CPUs are whole, and memory has a floor.** `cpus: 1.5` becomes 2, and a memory limit
   under 200 MiB becomes 200 MiB, which is the least a container boots with.
 - **Networks need macOS 26.** A project's network is its own, which earlier systems

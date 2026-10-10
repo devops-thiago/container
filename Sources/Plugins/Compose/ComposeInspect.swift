@@ -84,6 +84,7 @@ struct ComposePs: AsyncParsableCommand {
         switch container.state {
         case .running: return "running"
         case .changing: return "stopping"
+        case .restarting: return "restarting"
         case .stopped: return container.exitCode.map { "exited (\($0))" } ?? "stopped"
         }
     }

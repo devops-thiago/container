@@ -22,11 +22,12 @@ import Testing
 
 struct ManagedContainerDisplayTests {
     @Test
-    func tableHeaderHasNineColumns() {
-        #expect(ManagedContainer.tableHeader.count == 9)
+    func tableHeaderHasTenColumns() {
+        #expect(ManagedContainer.tableHeader.count == 10)
         #expect(ManagedContainer.tableHeader[0] == "ID")
         #expect(ManagedContainer.tableHeader[4] == "STATE")
         #expect(ManagedContainer.tableHeader[8] == "STARTED")
+        #expect(ManagedContainer.tableHeader[9] == "RESTARTS")
     }
 }
 

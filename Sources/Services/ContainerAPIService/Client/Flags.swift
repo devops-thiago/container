@@ -385,7 +385,7 @@ public struct Flags {
         @Option(
             name: .long,
             help: .init(
-                "Policy stored on the container: no, always, unless-stopped or on-failure[:<n>]. SiliconShip applies always/unless-stopped at app-managed engine start: always includes manually stopped containers; unless-stopped restores the last app shutdown's running set. Standalone engine starts and process exits do not apply this policy yet",
+                "Restart policy, as Docker's: no, always, unless-stopped or on-failure[:<n>]. The engine starts an exited container again after a growing delay, and starts always and unless-stopped containers with the engine; a container you stopped stays stopped until you start it, or, with always, until the engine restarts",
                 valueName: "policy"
             )
         )

@@ -151,6 +151,11 @@ extension Builder {
                     .invalidState,
                     message: "builder is stopping, please wait until it is fully stopped before proceeding"
                 )
+            case .restarting:
+                throw ContainerizationError(
+                    .invalidState,
+                    message: "builder is restarting, please stop it or wait until it is running before proceeding"
+                )
             case .unknown:
                 break
             }

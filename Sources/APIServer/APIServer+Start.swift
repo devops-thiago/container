@@ -253,6 +253,9 @@ extension APIServer {
                         // The networks are up and know nothing yet: every container that exists
                         // gets its address back before anything can start and take it.
                         await containersService.reserveAddressesForExistingContainers()
+                        // Then what Docker's daemon does once it is up: start the containers
+                        // whose restart policy says they come back with the engine.
+                        await containersService.startContainersWithEngine()
                         return .success(())
                     }
 
@@ -346,6 +349,8 @@ extension APIServer {
         /// runs on the path where it never got the chance. A container that will not stop in
         /// time is left to `terminateAllInstances`, which is not graceful but does not leak.
         private static func stopContainersOnOwnerLoss(containersService: ContainersService, log: Logger) async {
+            // The engine going down: these stops are not a person's, and nothing restarts.
+            await containersService.beginEngineShutdown()
             guard let snapshots = try? await containersService.list(), !snapshots.isEmpty else { return }
             log.info("stopping containers before engine exit", metadata: ["count": "\(snapshots.count)"])
             let options = ContainerStopOptions(timeoutInSeconds: 5, signal: nil)
