@@ -19,7 +19,7 @@ import Foundation
 
 extension ManagedContainer: ListDisplayable {
     public static var tableHeader: [String] {
-        ["ID", "IMAGE", "OS", "ARCH", "STATE", "IP", "CPUS", "MEMORY", "STARTED"]
+        ["ID", "IMAGE", "OS", "ARCH", "STATE", "IP", "CPUS", "MEMORY", "STARTED", "RESTARTS"]
     }
 
     public var tableRow: [String] {
@@ -33,6 +33,7 @@ extension ManagedContainer: ListDisplayable {
             "\(configuration.resources.cpus)",
             "\(configuration.resources.memoryInBytes / (1024 * 1024)) MB",
             status.startedDate?.ISO8601Format() ?? "",
+            "\(status.restartCount)",
         ]
     }
 

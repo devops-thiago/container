@@ -333,6 +333,21 @@ struct UpTests {
     }
 
     @Test
+    func aContainerTheEngineIsRestartingIsLeftToIt() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan("services:\n  web:\n    image: web:1\n    restart: always\n")
+        try await run.project().up(plan)
+        let up = try #require(try await run.engine.container(named: "shop-web-1"))
+        run.engine.add(
+            ComposeContainer(
+                id: up.id, image: up.image, imageDigest: up.imageDigest, state: .restarting, exitCode: 1, labels: up.labels, ports: up.ports))
+        run.engine.clearCalls()
+        try await run.project().up(plan)
+        #expect(!run.engine.calls.contains("start shop-web-1"), "a start by hand would reset its restart count")
+        #expect(run.engine.state(of: "shop-web-1") == .restarting)
+    }
+
+    @Test
     func aContainerThatIsSomeoneElsesIsNotTakenOver() async throws {
         let run = ComposeRun()
         run.engine.add(ComposeContainer(id: "shop-web-1", image: "nginx", state: .running, labels: [:]))

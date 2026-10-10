@@ -73,7 +73,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
-*   `--restart <policy>`: Policy stored on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Only SiliconShip app-managed starts apply `always`/`unless-stopped`; standalone starts and process exits do not. See [Restart policy behavior](#restart-policy-behavior)
+*   `--restart <policy>`: Restart policy, as Docker's: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. The engine starts an exited container again and starts `always`/`unless-stopped` containers with the engine. See [Restart policy behavior](#restart-policy-behavior)
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)
 *   `--ssh`: Forward SSH agent socket to container
@@ -123,21 +123,26 @@ container run --init-image local/custom-init:latest ubuntu:latest
 
 #### Restart policy behavior
 
-In SiliconShip 1.3.0, the app applies the stored policy after it starts or restarts the engine:
+The engine applies the policy with Docker's rules, when the container's process exits and
+when the engine starts:
 
-| Policy | App-managed engine start |
-|---|---|
-| `no` or unset | No automatic start. |
-| `always` | Start the container if stopped, including after a manual stop. |
-| `unless-stopped` | Start only if it was recorded as running at the last app Stop or Quit; preserve manual stops before that shutdown. |
-| `on-failure[:N]` | Stored only; no automatic start or exit-driven retry yet. |
+| Policy | When the process exits | When the engine starts |
+|---|---|---|
+| `no` or unset | Stays stopped. | Stays stopped. |
+| `always` | Started again. | Started if it was ever started, even after `container stop`. |
+| `unless-stopped` | Started again. | Started unless `container stop` (or `kill`) stopped it. |
+| `on-failure[:N]` | Started again after a non-zero exit, at most N times. | Stays stopped. |
 
-Already-running containers are unchanged. Adopting an already-running engine does not perform
-the app's startup pass. The embedded CLI refuses `container system stop` and `container system
-start`; use the app's engine controls instead. A standalone engine stores the policy but does
-not yet apply it at startup. Restarting exited processes and engine-owned startup supervision
-are tracked for SiliconShip v1.5.0 in
-[SiliconShip #223](https://github.com/devops-thiago/SiliconShip/issues/223).
+A restart waits 100 ms, then twice as long after each further exit, up to a minute; a run of
+10 seconds or more starts the delays over. While it waits, the container's state is
+`restarting`, and `container ls` shows it with its `RESTARTS` count; `container inspect` has
+`restartCount`, and `restartError` when a restart could not start the container.
+`container stop`, `kill` and `delete --force` end the wait. A container stopped by hand is not
+started again by the engine until it is started by hand, or, with `always`, until the engine
+restarts; the engine stopping its containers as it shuts down does not count as that stop. A
+start by hand resets the count, which is what `on-failure:N` compares with N. The engine never
+asks for folder access when it starts a container by itself: a container whose folders are not
+granted stays stopped, with the reason in `restartError`.
 
 ### `container build`
 
@@ -265,7 +270,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `--read-only`: Mount the container's root filesystem as read-only
 *   `--read-only-path <path>`: **Experimental.** Mark a path inside the container read-only, in addition to the runtime defaults (or `NONE` to clear prior values and the defaults)
 *   `--rm, --remove`: Remove the container after it stops
-*   `--restart <policy>`: Policy stored on the container: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. Only SiliconShip app-managed starts apply `always`/`unless-stopped`; standalone starts and process exits do not. See [Restart policy behavior](#restart-policy-behavior)
+*   `--restart <policy>`: Restart policy, as Docker's: `no`, `always`, `unless-stopped` or `on-failure[:<n>]`. The engine starts an exited container again and starts `always`/`unless-stopped` containers with the engine. See [Restart policy behavior](#restart-policy-behavior)
 *   `--rosetta`: Enable Rosetta in the container
 *   `--runtime`: Set the runtime handler for the container (default: container-runtime-linux)  
 *   `--ssh`: Forward SSH agent socket to container

@@ -30,6 +30,7 @@ public struct Bundle: Sendable {
     /// answer survives an apiserver restart — in memory only, every stopped
     /// container looks alike after a restart.
     public static let exitStatusFilename = "exit.json"
+    public static let restartRecordFilename = "restart.json"
 
     /// The path to the bundle.
     public let path: URL
@@ -166,6 +167,22 @@ extension Bundle {
 
     public func setExitStatus(_ record: ExitRecord) throws {
         try write(filename: Self.exitStatusFilename, value: record)
+    }
+
+    /// What the restart policy needs to remember about the container across engine
+    /// restarts. A bundle written before the engine kept one has no record, and a
+    /// container that has run, which is what its recorded exit shows, is taken to have
+    /// been started and not stopped by the user (see `RestartRecord.legacy`).
+    public var restartRecord: RestartRecord {
+        if let record: RestartRecord = try? load(filename: Self.restartRecordFilename) {
+            return record
+        }
+        return .legacy(hasExitRecord: exitStatus != nil)
+    }
+
+    public func setRestartRecord(_ record: RestartRecord) throws {
+        let data = try JSONEncoder().encode(record)
+        try data.write(to: self.path.appendingPathComponent(Self.restartRecordFilename), options: .atomic)
     }
 
     public func write(filename: String, value: Encodable) throws {

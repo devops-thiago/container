@@ -34,10 +34,40 @@ import SystemPackage
 
 private struct IncarnationMigrationFailure: Error {}
 
+/// A folder the container mounts that nothing grants, met by a start the engine makes by
+/// itself, which never asks the user for one.
+struct HostDirectoryNotGranted: Error, CustomStringConvertible {
+    let source: String
+
+    var description: String {
+        "cannot mount \(source): no permission for that folder, and the engine does not ask for one when it starts a container by itself. Start the container from SiliconShip, or from the command line while SiliconShip is open, to grant it."
+    }
+}
+
 public actor ContainersService {
     struct ContainerState {
         var snapshot: ContainerSnapshot
         var client: RuntimeClient? = nil
+        /// What the restart policy remembers across engine restarts; mirrored on disk.
+        var restartRecord = RestartRecord()
+        var backoff = RestartBackoff()
+        /// Identifies the runtime the current bootstrap made. An exit or a stop completion is
+        /// for the run it observed, and must not end a later run of the same incarnation.
+        var run: UUID? = nil
+        /// A stop or a kill was asked for this run, so its end does not start it again.
+        var exitRequested = false
+        /// The restart waiting out its delay, while the status is `.restarting`.
+        var pendingRestart: UUID? = nil
+        var pendingRestartTask: Task<Void, Never>? = nil
+        /// What the last start passed to the runtime, for the engine's own starts of it.
+        var dynamicEnv: [String: String] = [:]
+
+        /// Forget the restart waiting out its delay, if there is one.
+        mutating func cancelPendingRestart() {
+            pendingRestartTask?.cancel()
+            pendingRestartTask = nil
+            pendingRestart = nil
+        }
 
         func getClient() throws -> RuntimeClient {
             guard let client else {
@@ -58,6 +88,11 @@ public actor ContainersService {
     private let runtimePlugins: [Plugin]
     private let exitMonitor: ExitMonitor
     private let containerSystemConfig: ContainerSystemConfig
+    /// Waits out a restart delay. Injected so that tests do not wait.
+    private let restartDelay: @Sendable (Duration) async throws -> Void
+    /// Set once the engine starts going down: nothing ending from then on is restarted, and
+    /// no stop from then on is a person's.
+    private var engineShuttingDown = false
 
     private static let hostDirectoryBookmarksFilename = "host-directory-bookmarks.json"
     /// Persisted beside, but never inside, the user-supplied container configuration.
@@ -76,7 +111,8 @@ public actor ContainersService {
         pluginLoader: PluginLoader,
         containerSystemConfig: ContainerSystemConfig,
         log: Logger,
-        debugHelpers: Bool = false
+        debugHelpers: Bool = false,
+        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) throws {
         let containerRoot = appRoot.appendingPathComponent("containers")
         try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)
@@ -87,6 +123,7 @@ public actor ContainersService {
         self.containerSystemConfig = containerSystemConfig
         self.log = log
         self.debugHelpers = debugHelpers
+        self.restartDelay = restartDelay
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.hostDirectoryAccess = HostDirectoryAccess(log: log)
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
@@ -150,7 +187,9 @@ public actor ContainersService {
                         message: "failed to find runtime plugin \(config.runtimeHandler); restore the plugin and restart the engine"
                     )
                 }
-                let exit = ContainerResource.Bundle(path: dir).exitStatus
+                let bundle = ContainerResource.Bundle(path: dir)
+                let exit = bundle.exitStatus
+                let restartRecord = bundle.restartRecord
                 let incarnation: String
                 do {
                     incarnation = try Self.loadOrCreateIncarnation(at: dir)
@@ -170,8 +209,10 @@ public actor ContainersService {
                         networks: [],
                         startedDate: nil,
                         exitCode: exit?.exitCode,
-                        exitedAt: exit?.exitedAt
+                        exitedAt: exit?.exitedAt,
+                        restartCount: restartRecord.restartCount
                     ),
+                    restartRecord: restartRecord
                 )
                 results[config.id] = state
             } catch is IncarnationMigrationFailure {
@@ -251,7 +292,9 @@ public actor ContainersService {
                 let containerSize = FileManager.default.allocatedSize(of: bundlePath)
                 totalSize += containerSize
 
-                if state.snapshot.status == .running {
+                // A container waiting to be restarted is about to run again, and prune
+                // leaves it alone, so it is not reclaimable.
+                if state.snapshot.status == .running || state.snapshot.status == .restarting {
                     activeCount += 1
                 } else {
                     // Stopped containers are reclaimable
@@ -427,6 +470,9 @@ public actor ContainersService {
                     let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
                     try Self.persistIncarnation(incarnation, at: path)
                     try Self.persistHostDirectoryBookmarks(requiredHostDirectoryBookmarks, at: path)
+                    // A record from the start, so that only bundles older than it are read
+                    // as legacy ones.
+                    try ContainerResource.Bundle(path: path).setRestartRecord(RestartRecord())
 
                     let snapshot = ContainerSnapshot(
                         configuration: configuration,
@@ -499,73 +545,124 @@ public actor ContainersService {
 
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
             var state = try await self.getContainerState(id: id, context: context)
-
-            // We've already bootstrapped this container. Ideally we should be able to
-            // return some sort of error code from the sandbox svc to check here, but this
-            // is also a very simple check and faster than doing an rpc to get the same result.
             if state.client != nil {
                 return
             }
-
-            let path = self.containerRoot.appendingPathComponent(id)
-            let (config, _) = try Self.getContainerConfiguration(at: path)
-            if let held = Self.volumeInUse(by: await self.containers.values.map(\.snapshot), neededBy: config) {
-                throw ContainerizationError(
-                    .invalidState,
-                    message:
-                        "volume \(held.volume) is in use by container \(held.container): a volume is a disk, and one running container holds it at a time. Stop \(held.container) first, or give this container a volume of its own"
-                )
+            // A start by hand, which is where Docker starts the restart bookkeeping over:
+            // the person's stop no longer holds, the count and the delays begin again, and a
+            // restart that was waiting is this start now.
+            state.cancelPendingRestart()
+            if state.snapshot.status == .restarting {
+                state.snapshot.status = .stopped
             }
-            try await self.restoreHostDirectoryAccess(
-                for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks)
+            state.restartRecord.stoppedByUser = false
+            state.restartRecord.restartCount = 0
+            state.backoff.reset()
+            state.snapshot.restartCount = 0
+            state.snapshot.restartError = nil
+            state.dynamicEnv = dynamicEnv
+            await self.setContainerState(id, state, context: context)
+            await self.persistRestartRecord(state.restartRecord, for: id)
 
-            var networkBootstrapInfos = [NetworkBootstrapInfo]()
-            for n in config.networks {
-                guard let plugin = try await self.networksService?.plugin(for: n.network) else {
-                    throw ContainerizationError(.internalError, message: "failed to get plugin for network \(n.network)")
-                }
-                networkBootstrapInfos.append(NetworkBootstrapInfo(plugin: plugin))
+            try await self.bootstrapLocked(
+                id: id,
+                stdio: stdio,
+                dynamicEnv: dynamicEnv,
+                hostDirectoryBookmarks: hostDirectoryBookmarks,
+                askEmbedder: true,
+                context: context)
+        }
+    }
+
+    /// Bootstrap under the lock. `askEmbedder` is false for the engine's own starts, which
+    /// never put a folder panel in front of the user: a folder nothing grants fails them.
+    private func bootstrapLocked(
+        id: String,
+        stdio: [FileHandle?],
+        dynamicEnv: [String: String],
+        hostDirectoryBookmarks: [Data],
+        askEmbedder: Bool,
+        context: AsyncLock.Context
+    ) async throws {
+        var state = try self.getContainerState(id: id, context: context)
+
+        // We've already bootstrapped this container. Ideally we should be able to
+        // return some sort of error code from the sandbox svc to check here, but this
+        // is also a very simple check and faster than doing an rpc to get the same result.
+        if state.client != nil {
+            return
+        }
+
+        let path = self.containerRoot.appendingPathComponent(id)
+        let (config, _) = try Self.getContainerConfiguration(at: path)
+        if let held = Self.volumeInUse(by: self.containers.values.map(\.snapshot), neededBy: config) {
+            throw ContainerizationError(
+                .invalidState,
+                message:
+                    "volume \(held.volume) is in use by container \(held.container): a volume is a disk, and one running container holds it at a time. Stop \(held.container) first, or give this container a volume of its own"
+            )
+        }
+        try await self.restoreHostDirectoryAccess(
+            for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks, askEmbedder: askEmbedder)
+
+        var networkBootstrapInfos = [NetworkBootstrapInfo]()
+        for n in config.networks {
+            guard let plugin = try await self.networksService?.plugin(for: n.network) else {
+                throw ContainerizationError(.internalError, message: "failed to get plugin for network \(n.network)")
             }
+            networkBootstrapInfos.append(NetworkBootstrapInfo(plugin: plugin))
+        }
 
-            do {
-                try Self.registerService(
-                    plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
-                    loader: self.pluginLoader,
-                    configuration: config,
-                    path: path,
-                    debug: self.debugHelpers
-                )
+        do {
+            try Self.registerService(
+                plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
+                loader: self.pluginLoader,
+                configuration: config,
+                path: path,
+                debug: self.debugHelpers
+            )
 
-                let runtime = state.snapshot.configuration.runtimeHandler
-                // RuntimeClient.create resolves a brokered endpoint when the
-                // instance was spawned (sandboxed embedding), else dials the
-                // instance's mach service as upstream does.
-                let runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
-                try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
+            let runtime = state.snapshot.configuration.runtimeHandler
+            // RuntimeClient.create resolves a brokered endpoint when the
+            // instance was spawned (sandboxed embedding), else dials the
+            // instance's mach service as upstream does.
+            let runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
+            try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
 
-                let incarnation = state.snapshot.incarnation
-                try await self.exitMonitor.registerProcess(
-                    id: id,
-                    onExit: { [self] exitedID, code in
+            let incarnation = state.snapshot.incarnation
+            let run = UUID()
+            try await self.exitMonitor.registerProcess(
+                id: id,
+                onOutcome: { [self] exitedID, outcome in
+                    switch outcome {
+                    case .exited(let code):
                         try await handleContainerExit(
-                            id: exitedID, code: code, expectedIncarnation: incarnation)
+                            id: exitedID, code: code, expectedIncarnation: incarnation, expectedRun: run)
+                    case .waitFailed:
+                        // Recorded as -1, as it always was; but how the process ended is not
+                        // known, and the restart policy is told so.
+                        try await handleContainerExit(
+                            id: exitedID, code: ExitStatus(exitCode: -1), waitFailed: true,
+                            expectedIncarnation: incarnation, expectedRun: run)
                     }
-                )
-
-                state.client = runtimeClient
-                await self.setContainerState(id, state, context: context)
-            } catch {
-                let label = try? self.pluginLoader.fullLaunchdLabel(
-                    pluginName: config.runtimeHandler,
-                    instanceId: id
-                )
-
-                await self.exitMonitor.stopTracking(id: id)
-                if let label {
-                    try? ServiceManager.deregister(fullServiceLabel: label)
                 }
-                throw error
+            )
+
+            state.client = runtimeClient
+            state.run = run
+            state.exitRequested = false
+            await self.setContainerState(id, state, context: context)
+        } catch {
+            let label = try? self.pluginLoader.fullLaunchdLabel(
+                pluginName: config.runtimeHandler,
+                instanceId: id
+            )
+
+            await self.exitMonitor.stopTracking(id: id)
+            if let label {
+                try? ServiceManager.deregister(fullServiceLabel: label)
             }
+            throw error
         }
     }
 
@@ -628,46 +725,56 @@ public actor ContainersService {
         }
 
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)", "processId": "\(processID)"]) { context in
-            var state = try await self.getContainerState(id: id, context: context)
+            try await self.startProcessLocked(id: id, processID: processID, context: context)
+        }
+    }
 
-            let isInit = Self.isInitProcess(id: id, processID: processID)
-            if state.snapshot.status == .running && isInit {
-                return
+    private func startProcessLocked(id: String, processID: String, context: AsyncLock.Context) async throws {
+        var state = try self.getContainerState(id: id, context: context)
+
+        let isInit = Self.isInitProcess(id: id, processID: processID)
+        if state.snapshot.status == .running && isInit {
+            return
+        }
+
+        let client = try state.getClient()
+        try await client.startProcess(processID)
+
+        guard isInit else {
+            return
+        }
+
+        do {
+            let log = self.log
+            let waitFunc: ExitMonitor.WaitHandler = {
+                log.info("registering container with exit monitor")
+                let code = try await client.wait(id)
+                log.info(
+                    "container finished in exit monitor",
+                    metadata: [
+                        "id": "\(id)",
+                        "rc": "\(code)",
+                    ])
+
+                return code
             }
+            try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
 
-            let client = try state.getClient()
-            try await client.startProcess(processID)
-
-            guard isInit else {
-                return
+            let sandboxSnapshot = try await client.state()
+            state.snapshot.status = .running
+            state.snapshot.networks = sandboxSnapshot.networks
+            state.snapshot.startedDate = Date()
+            state.snapshot.restartError = nil
+            let firstStart = !state.restartRecord.hasBeenStarted
+            state.restartRecord.hasBeenStarted = true
+            await self.setContainerState(id, state, context: context)
+            if firstStart {
+                await self.persistRestartRecord(state.restartRecord, for: id)
             }
-
-            do {
-                let log = self.log
-                let waitFunc: ExitMonitor.WaitHandler = {
-                    log.info("registering container with exit monitor")
-                    let code = try await client.wait(id)
-                    log.info(
-                        "container finished in exit monitor",
-                        metadata: [
-                            "id": "\(id)",
-                            "rc": "\(code)",
-                        ])
-
-                    return code
-                }
-                try await self.exitMonitor.track(id: id, waitingOn: waitFunc)
-
-                let sandboxSnapshot = try await client.state()
-                state.snapshot.status = .running
-                state.snapshot.networks = sandboxSnapshot.networks
-                state.snapshot.startedDate = Date()
-                await self.setContainerState(id, state, context: context)
-            } catch {
-                await self.exitMonitor.stopTracking(id: id)
-                try? await client.stop(options: ContainerStopOptions.default)
-                throw error
-            }
+        } catch {
+            await self.exitMonitor.stopTracking(id: id)
+            try? await client.stop(options: ContainerStopOptions.default)
+            throw error
         }
     }
 
@@ -693,18 +800,75 @@ public actor ContainersService {
             )
         }
 
-        let state = try self._getContainerState(id: id)
+        var state = try self._getContainerState(id: id)
+        if processID == id, let parsed = try? Signal(signal) {
+            // A signal to the container's own process is a person acting on the container,
+            // which Docker counts as their stop for the restart policy — marked before the
+            // signal is sent, because the exit it causes can be handled before this returns.
+            let observed = try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+                try await self.markStopRequested(id: id, byUser: true, signal: parsed, context: context)
+            }
+            guard let observed else { return }
+            state = observed
+        }
         let client = try state.getClient()
         try await client.kill(processID, signal: signal)
 
         // SIGKILL is guaranteed to terminate the target. When directed at the
         // container's init process, follow up with the same API-server cleanup
         // that `stop` performs. The captured incarnation keeps an old kill completion from
-        // stopping a replacement that reused the ID.
-        if processID == id, (try? Signal(signal)) == .kill {
+        // stopping a replacement that reused the ID, and the captured run one from ending
+        // a restart of this one.
+        if processID == id, (try? Signal(signal)) == .kill, let run = state.run {
             try await handleContainerExit(
-                id: id, expectedIncarnation: state.snapshot.incarnation)
+                id: id, expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
         }
+    }
+
+    /// Record, before a stop or a kill is sent, that this run was asked to end, and whether a
+    /// person asked. Returns the state to act on, or nil when the request is done with: a
+    /// container waiting out a restart delay is stopped right here, by ending the wait.
+    ///
+    /// - Parameters:
+    ///   - byUser: the request is a person's, not the engine going down.
+    ///   - signal: for a kill, the signal sent. Only SIGKILL, the container's stop signal,
+    ///     or any signal for a container without one ends its restarts; any signal counts
+    ///     as a person's stop. A stop always ends them.
+    private func markStopRequested(
+        id: String,
+        byUser: Bool,
+        signal: Signal? = nil,
+        context: AsyncLock.Context
+    ) async throws -> ContainerState? {
+        var state = try self.getContainerState(id: id, context: context)
+        let waiting = state.client == nil && state.snapshot.status == .restarting
+        // A container that is not running and not about to be is left as it is.
+        guard state.client != nil || waiting else { return state }
+
+        let ends = signal.map { RestartRules.signalEndsRestarts($0, stopSignal: state.snapshot.configuration.stopSignal) } ?? true
+        if byUser && !self.engineShuttingDown && !state.restartRecord.stoppedByUser {
+            state.restartRecord.stoppedByUser = true
+            await self.persistRestartRecord(state.restartRecord, for: id)
+        }
+        guard waiting else {
+            if ends {
+                state.exitRequested = true
+            }
+            await self.setContainerState(id, state, context: context)
+            return state
+        }
+        guard ends else {
+            await self.setContainerState(id, state, context: context)
+            return nil
+        }
+        state.cancelPendingRestart()
+        state.snapshot.status = .stopped
+        await self.setContainerState(id, state, context: context)
+        self.log.info("restart cancelled by a stop", metadata: ["id": "\(id)"])
+        if (try? self.getContainerCreationOptions(id: id))?.autoRemove == true {
+            try await self.cleanUp(id: id, context: context)
+        }
+        return nil
     }
 
     /// Stop all containers inside the sandbox, aborting any processes currently
@@ -735,7 +899,7 @@ public actor ContainersService {
 
         let clock = ContinuousClock()
         let responseDeadline = responseTimeout.map { clock.now.advanced(by: $0) }
-        let state = try await self.lock.withLock(
+        let observed = try await self.lock.withLock(
             logMetadata: ["acquirer": "\(#function)-precondition", "id": "\(id)"]
         ) { context in
             let state = try await self.getContainerState(id: id, context: context)
@@ -744,13 +908,18 @@ public actor ContainersService {
                 incarnation: expectedIncarnation,
                 on: state,
                 id: id)
-            return state
+            // Before the stop is sent: the exit it causes is usually handled first, and must
+            // already know that it was asked for, and by whom.
+            return try await self.markStopRequested(id: id, byUser: !options.engineShutdown, context: context)
         }
         // From here the stop goes through this state's own runtime client, not through the
         // ID again, so what is stopped is what was just checked. Post-stop cleanup carries
         // this state's generated incarnation and refuses a same-ID replacement.
 
         // Stop should be idempotent.
+        guard let state = observed, let run = state.run else {
+            return
+        }
         let client: RuntimeClient
         do {
             client = try state.getClient()
@@ -777,7 +946,8 @@ public actor ContainersService {
             id: id,
             code: nil,
             responseTimeout: remainingResponseTimeout,
-            expectedIncarnation: state.snapshot.incarnation
+            expectedIncarnation: state.snapshot.incarnation,
+            expectedRun: run
         )
     }
 
@@ -1045,12 +1215,18 @@ public actor ContainersService {
         let state = try await self.lock.withLock(
             logMetadata: ["acquirer": "\(#function)-precondition", "id": "\(id)"]
         ) { context in
-            let state = try await self.getContainerState(id: id, context: context)
+            var state = try await self.getContainerState(id: id, context: context)
             try Self.require(
                 labels: requiredLabels,
                 incarnation: expectedIncarnation,
                 on: state,
                 id: id)
+            if force, state.snapshot.status == .running || state.snapshot.status == .restarting {
+                // Gone either way: the exit the kill below causes must not start it again.
+                state.exitRequested = true
+                state.cancelPendingRestart()
+                await self.setContainerState(id, state, context: context)
+            }
             return state
         }
         switch state.snapshot.status {
@@ -1088,6 +1264,11 @@ public actor ContainersService {
                     ]
                 )
             }
+        case .restarting where !force:
+            throw ContainerizationError(
+                .invalidState,
+                message: "container \(id) is restarting and can not be deleted: stop it first, or delete it with force"
+            )
         case .stopping:
             throw ContainerizationError(
                 .invalidState,
@@ -1164,37 +1345,52 @@ public actor ContainersService {
     private func handleContainerExit(
         id: String,
         code: ExitStatus? = nil,
-        expectedIncarnation: String
+        waitFailed: Bool = false,
+        expectedIncarnation: String,
+        expectedRun: UUID
     ) async throws {
         try await handleContainerExit(
             id: id,
             code: code,
+            waitFailed: waitFailed,
             responseTimeout: nil,
-            expectedIncarnation: expectedIncarnation)
+            expectedIncarnation: expectedIncarnation,
+            expectedRun: expectedRun)
     }
 
     private func handleContainerExit(
         id: String,
         code: ExitStatus?,
+        waitFailed: Bool = false,
         responseTimeout: Duration?,
-        expectedIncarnation: String
+        expectedIncarnation: String,
+        expectedRun: UUID
     ) async throws {
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { [self] context in
             try await handleContainerExit(
                 id: id,
                 code: code,
+                waitFailed: waitFailed,
                 responseTimeout: responseTimeout,
                 expectedIncarnation: expectedIncarnation,
+                expectedRun: expectedRun,
                 context: context
             )
         }
     }
 
+    /// - Parameters:
+    ///   - code: the exit the runtime reported; nil when a stop or a kill ended the run and
+    ///     nothing was reported.
+    ///   - waitFailed: the wait on the runtime failed, and `code` is a stand-in.
+    ///   - expectedRun: the run this exit is for; an exit of an earlier run is ignored.
     private func handleContainerExit(
         id: String,
         code: ExitStatus?,
+        waitFailed: Bool,
         responseTimeout: Duration?,
         expectedIncarnation: String,
+        expectedRun: UUID,
         context: AsyncLock.Context
     ) async throws {
         if let code {
@@ -1213,6 +1409,10 @@ public actor ContainersService {
             // observed. A replacement can reuse the ID while either awaits, but it must not
             // be stopped, deregistered, or auto-removed by the predecessor's completion.
             guard state.snapshot.incarnation == expectedIncarnation else { return }
+            // The same holds within one incarnation: once the run this was for has been torn
+            // down, a later run of the container, or a restart waiting to make one, is not
+            // this exit's to end.
+            guard state.run == expectedRun else { return }
             if state.snapshot.status == .stopped {
                 return
             }
@@ -1221,6 +1421,68 @@ public actor ContainersService {
             return
         }
 
+        try await self.tearDownRuntime(id: id, client: state.client, responseTimeout: responseTimeout)
+
+        let path = self.containerRoot.appendingPathComponent(id)
+        let bundle = ContainerResource.Bundle(path: path)
+        state.snapshot.networks = []
+        // Keep why it stopped, not just that it did — in memory for this apiserver, and
+        // on disk so the answer survives a restart.
+        if let code {
+            state.snapshot.exitCode = code.exitCode
+            state.snapshot.exitedAt = code.exitedAt
+            do {
+                try bundle.setExitStatus(
+                    ExitRecord(exitCode: code.exitCode, exitedAt: code.exitedAt))
+            } catch {
+                self.log.warning(
+                    "failed to record exit status",
+                    metadata: ["id": "\(id)", "error": "\(error)"])
+            }
+        }
+        state.client = nil
+        state.run = nil
+
+        // Decided before auto-remove, which applies only to a container that stays stopped.
+        let end: ContainerRunEnd = waitFailed ? .lost : code.map { .exited($0.exitCode) } ?? .stopped
+        let restarts = RestartRules.restartsAfterExit(
+            policy: state.snapshot.configuration.restartPolicy,
+            end: end,
+            exitRequested: state.exitRequested,
+            stoppedByUser: state.restartRecord.stoppedByUser,
+            engineShuttingDown: self.engineShuttingDown,
+            restartCount: state.restartRecord.restartCount)
+        state.exitRequested = false
+        if restarts {
+            let ranFor = state.snapshot.startedDate.map { Duration.seconds(max(0, (code?.exitedAt ?? Date()).timeIntervalSince($0))) } ?? .zero
+            let delay = state.backoff.next(ranFor: ranFor)
+            state.restartRecord.restartCount += 1
+            state.snapshot.restartCount = state.restartRecord.restartCount
+            state.snapshot.status = .restarting
+            self.scheduleRestart(of: id, after: delay, in: &state)
+            await self.setContainerState(id, state, context: context)
+            await self.persistRestartRecord(state.restartRecord, for: id)
+            self.log.info(
+                "restarting container",
+                metadata: [
+                    "id": "\(id)",
+                    "restartCount": "\(state.restartRecord.restartCount)",
+                    "delay": "\(delay)",
+                ])
+            return
+        }
+
+        state.snapshot.status = .stopped
+        await self.setContainerState(id, state, context: context)
+
+        let options = try getContainerCreationOptions(id: id)
+        if options.autoRemove {
+            try await self.cleanUp(id: id, context: context)
+        }
+    }
+
+    /// Stop watching a run, and shut down and deregister its runtime helper.
+    private func tearDownRuntime(id: String, client: RuntimeClient?, responseTimeout: Duration?) async throws {
         await self.exitMonitor.stopTracking(id: id)
 
         // Shutdown and deregister the runtime service
@@ -1237,7 +1499,7 @@ public actor ContainersService {
         // Try to shutdown the client gracefully, but if the runtime service
         // is already dead (e.g., killed externally), we should still continue
         // with state cleanup.
-        if let client = state.client {
+        if let client {
             do {
                 try await client.shutdown(responseTimeout: responseTimeout)
             } catch {
@@ -1264,29 +1526,180 @@ public actor ContainersService {
                     "error": "\(error)",
                 ])
         }
+    }
 
-        state.snapshot.status = .stopped
-        state.snapshot.networks = []
-        // Keep why it stopped, not just that it did — in memory for this apiserver, and
-        // on disk so the answer survives a restart.
-        if let code {
-            state.snapshot.exitCode = code.exitCode
-            state.snapshot.exitedAt = code.exitedAt
+    // MARK: Restart policies
+
+    /// Start the container again once `delay` has passed, unless something ends the wait
+    /// first: a stop, a start by hand, a delete, or the engine going down.
+    private func scheduleRestart(of id: String, after delay: Duration, in state: inout ContainerState) {
+        let token = UUID()
+        let incarnation = state.snapshot.incarnation
+        let wait = self.restartDelay
+        state.cancelPendingRestart()
+        state.pendingRestart = token
+        state.pendingRestartTask = Task { [weak self] in
             do {
-                try bundle.setExitStatus(
-                    ExitRecord(exitCode: code.exitCode, exitedAt: code.exitedAt))
+                try await wait(delay)
             } catch {
-                self.log.warning(
-                    "failed to record exit status",
-                    metadata: ["id": "\(id)", "error": "\(error)"])
+                return
+            }
+            await self?.restartAfterDelay(id: id, incarnation: incarnation, token: token)
+        }
+    }
+
+    private func restartAfterDelay(id: String, incarnation: String, token: UUID) async {
+        await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            guard var state = try? await self.getContainerState(id: id, context: context),
+                state.snapshot.incarnation == incarnation,
+                state.snapshot.status == .restarting,
+                state.pendingRestart == token,
+                !(await self.engineShuttingDown)
+            else { return }
+            state.pendingRestart = nil
+            state.pendingRestartTask = nil
+            await self.setContainerState(id, state, context: context)
+            do {
+                try await self.startByEngine(id: id, dynamicEnv: state.dynamicEnv, context: context)
+            } catch {
+                await self.engineStartFailed(id: id, error: error, context: context)
             }
         }
-        state.client = nil
-        await self.setContainerState(id, state, context: context)
+    }
 
-        let options = try getContainerCreationOptions(id: id)
-        if options.autoRemove {
-            try await self.cleanUp(id: id, context: context)
+    /// Start a container the engine decided to start, under the lock: detached, with what it
+    /// already holds for its folders, and without asking anyone for more.
+    private func startByEngine(id: String, dynamicEnv: [String: String], context: AsyncLock.Context) async throws {
+        try await self.bootstrapLocked(
+            id: id,
+            stdio: [nil, nil, nil],
+            dynamicEnv: dynamicEnv,
+            hostDirectoryBookmarks: [],
+            askEmbedder: false,
+            context: context)
+        try await self.startProcessLocked(id: id, processID: id, context: context)
+    }
+
+    /// An engine-made start did not work: the container stays stopped with the reason, as
+    /// Docker leaves one whose restart fails, and auto-remove applies to it as to any
+    /// container that stops.
+    private func engineStartFailed(id: String, error: any Error, context: AsyncLock.Context) async {
+        guard var state = try? self.getContainerState(id: id, context: context) else { return }
+        self.log.error(
+            "engine could not start container",
+            metadata: ["id": "\(id)", "error": "\(error)"])
+        if state.client != nil {
+            try? await self.tearDownRuntime(id: id, client: state.client, responseTimeout: nil)
+        }
+        state.client = nil
+        state.run = nil
+        state.exitRequested = false
+        state.snapshot.status = .stopped
+        state.snapshot.networks = []
+        state.snapshot.restartError = String(describing: error)
+        await self.setContainerState(id, state, context: context)
+        if (try? self.getContainerCreationOptions(id: id))?.autoRemove == true {
+            try? await self.cleanUp(id: id, context: context)
+        }
+    }
+
+    /// From here on the engine is going down: no run that ends is started again, no stop is a
+    /// person's, and the restarts waiting out their delay are dropped. The containers they
+    /// were for keep their claim to start with the engine next time.
+    public func beginEngineShutdown() async {
+        self.engineShuttingDown = true
+        await self.lock.withLock(logMetadata: ["acquirer": "\(#function)"]) { context in
+            for (id, var state) in await self.containers where state.snapshot.status == .restarting && state.client == nil {
+                state.cancelPendingRestart()
+                state.snapshot.status = .stopped
+                await self.setContainerState(id, state, context: context)
+            }
+        }
+    }
+
+    /// Start, once the engine is up and its networks are, the containers whose restart policy
+    /// says they start with the engine: `always` ones that have been started before, and
+    /// `unless-stopped` ones that a person did not stop. As at a start by hand, the count of
+    /// restarts begins again.
+    ///
+    /// A container whose folders nothing grants yet is tried again once the embedding app has
+    /// had time to publish its grants, which it does a moment after it sees the engine; one
+    /// that still cannot start stays stopped with the reason.
+    public func startContainersWithEngine(grantWait: Duration = .seconds(30)) async {
+        let candidates = self.containers.values
+            .filter {
+                $0.snapshot.status == .stopped
+                    && RestartRules.startsWithEngine(policy: $0.snapshot.configuration.restartPolicy, record: $0.restartRecord)
+            }
+            .map(\.snapshot.id)
+            .sorted()
+        guard !candidates.isEmpty else { return }
+        self.log.info("starting containers with the engine", metadata: ["count": "\(candidates.count)"])
+
+        var awaitingGrants: [String: Set<String>] = [:]
+        for id in candidates {
+            if let sources = await self.startWithEngine(id: id, deferUngranted: true) {
+                awaitingGrants[id] = sources
+            }
+        }
+        guard !awaitingGrants.isEmpty else { return }
+
+        let deadline = ContinuousClock.now.advanced(by: grantWait)
+        let sources = awaitingGrants.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        while ContinuousClock.now < deadline {
+            var covered = true
+            for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
+                covered = false
+            }
+            if covered { break }
+            do {
+                try await self.restartDelay(.milliseconds(250))
+            } catch {
+                break
+            }
+        }
+        for id in awaitingGrants.keys.sorted() {
+            _ = await self.startWithEngine(id: id, deferUngranted: false)
+        }
+    }
+
+    /// One start at engine start. Returns the folders to wait for when `deferUngranted` and
+    /// the start failed for want of a grant; nil otherwise.
+    private func startWithEngine(id: String, deferUngranted: Bool) async -> Set<String>? {
+        await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            guard var state = try? await self.getContainerState(id: id, context: context),
+                state.snapshot.status == .stopped, state.client == nil,
+                !(await self.engineShuttingDown)
+            else { return nil }
+            state.restartRecord.stoppedByUser = false
+            state.restartRecord.restartCount = 0
+            state.backoff.reset()
+            state.snapshot.restartCount = 0
+            state.snapshot.restartError = nil
+            await self.setContainerState(id, state, context: context)
+            await self.persistRestartRecord(state.restartRecord, for: id)
+            do {
+                try await self.startByEngine(id: id, dynamicEnv: [:], context: context)
+                self.log.info("started container with the engine", metadata: ["id": "\(id)"])
+                return nil
+            } catch let ungranted as HostDirectoryNotGranted where deferUngranted {
+                await self.engineStartFailed(id: id, error: ungranted, context: context)
+                return Set(state.snapshot.configuration.mounts.filter(\.isVirtiofs).map(\.source))
+            } catch {
+                await self.engineStartFailed(id: id, error: error, context: context)
+                return nil
+            }
+        }
+    }
+
+    private func persistRestartRecord(_ record: RestartRecord, for id: String) async {
+        let bundle = ContainerResource.Bundle(path: self.containerRoot.appendingPathComponent(id))
+        do {
+            try bundle.setRestartRecord(record)
+        } catch {
+            self.log.warning(
+                "failed to record restart state",
+                metadata: ["id": "\(id)", "error": "\(error)"])
         }
     }
 
@@ -1319,6 +1732,8 @@ public actor ContainersService {
         if self.containers[id] == nil {
             return
         }
+        // A restart waiting out its delay is for a container that is going away.
+        self.containers[id]?.cancelPendingRestart()
 
         // To be pedantic. This is only needed if something in the "launch
         // the init process" lifecycle fails before actually fork+exec'ing
@@ -1452,7 +1867,8 @@ public actor ContainersService {
         for id: String,
         configuration: ContainerConfiguration,
         at path: URL,
-        supplied: [Data]
+        supplied: [Data],
+        askEmbedder: Bool = true
     ) async throws {
         let requiresAuthorization =
             ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
@@ -1466,7 +1882,7 @@ public actor ContainersService {
                 // Replaces what create wrote, so a later start with no embedder to ask still has
                 // the most recent grants to try rather than the oldest.
                 try? Self.persistHostDirectoryBookmarks(supplied, at: path)
-                try await self.ensurePoolCoversBindMounts(of: configuration)
+                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
                 return
             }
             // Not fatal, because the commonest way to get here is a grant that is newer than the
@@ -1484,7 +1900,7 @@ public actor ContainersService {
         }
 
         if await self.hostDirectoryAccess.hasGrants(for: id) {
-            try await self.ensurePoolCoversBindMounts(of: configuration)
+            try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
             return
         }
 
@@ -1495,22 +1911,26 @@ public actor ContainersService {
             if !bookmarks.isEmpty,
                 await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id)
             {
-                try await self.ensurePoolCoversBindMounts(of: configuration)
+                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
                 return
             }
         }
 
         // CLI path, and the fallback when every bookmark source is empty or lapsed: the pool
         // is what the app published, or what it is about to grant from a panel.
-        try await self.ensurePoolCoversBindMounts(of: configuration)
+        try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
         await self.hostDirectoryAccess.resolve(bookmarks: [], for: id)
     }
 
     /// Every virtiofs source this container names must be openable in this process. Asks the
-    /// embedder for any that is not — which may put a panel in front of the user.
-    private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration) async throws {
+    /// embedder for any that is not — which may put a panel in front of the user — unless
+    /// `askEmbedder` is false, as it is for the engine's own starts, which fail instead.
+    private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration, askEmbedder: Bool = true) async throws {
         let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.source))
         for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
+            guard askEmbedder else {
+                throw HostDirectoryNotGranted(source: source)
+            }
             // Each outcome is a different thing for the user to do, so each says so. The old
             // single message covered them all and named the fix for only one of them.
             switch await HostDirectoryGrants.shared.request(source) {

@@ -26,4 +26,8 @@ public enum RuntimeStatus: String, CaseIterable, Sendable, Codable {
     case running
     /// The object is currently stopping.
     case stopping
+    /// The container's process exited and the engine is about to start it again, as its
+    /// restart policy asks; it is waiting out the restart delay. Not running, but not given
+    /// up on either: a stop or a delete ends the wait.
+    case restarting
 }
