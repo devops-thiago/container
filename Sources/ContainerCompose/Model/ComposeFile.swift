@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 
 /// A compose project as its files describe it, once they are merged, their variables are
@@ -200,20 +201,26 @@ public struct ComposeDependency: Sendable, Hashable {
     }
 }
 
+/// A service's `healthcheck:`, as compose gives it to the engine, which runs it. What it
+/// leaves out is the image's `HEALTHCHECK`, as Docker merges them: no test keeps the image's
+/// command with this timing, and a field not given keeps the image's value, or the default.
 public struct ComposeHealthcheck: Sendable, Equatable, Codable {
     /// The command, as an argument vector: `CMD-SHELL` and the string form are already
-    /// `/bin/sh -c ...`.
+    /// `/bin/sh -c ...`. Empty: the image's.
     public var test: [String]
-    public var interval: Double
-    public var timeout: Double
-    public var retries: Int
-    public var startPeriod: Double
-    /// How often to probe during the start period. nil probes at `interval`.
+    /// Seconds.
+    public var interval: Double?
+    public var timeout: Double?
+    public var retries: Int?
+    public var startPeriod: Double?
+    /// How often to check during the start period.
     public var startInterval: Double?
+    /// `disable: true` or a test of `NONE`: the image's check is turned off too.
+    public var disabled: Bool?
 
     public init(
-        test: [String], interval: Double = 30, timeout: Double = 30, retries: Int = 3, startPeriod: Double = 0,
-        startInterval: Double? = nil
+        test: [String] = [], interval: Double? = nil, timeout: Double? = nil, retries: Int? = nil, startPeriod: Double? = nil,
+        startInterval: Double? = nil, disabled: Bool? = nil
     ) {
         self.test = test
         self.interval = interval
@@ -221,6 +228,29 @@ public struct ComposeHealthcheck: Sendable, Equatable, Codable {
         self.retries = retries
         self.startPeriod = startPeriod
         self.startInterval = startInterval
+        self.disabled = disabled
+    }
+
+    /// The check turned off.
+    public static var off: ComposeHealthcheck { ComposeHealthcheck(disabled: true) }
+
+    public var isDisabled: Bool { disabled == true }
+
+    /// The check in the engine's terms, to be laid over the image's when the container is
+    /// made, as the `--health-*` flags are.
+    public var engineCheck: HealthCheckConfiguration {
+        guard !isDisabled else { return .disabled }
+        func nanoseconds(_ seconds: Double?) -> Int64 {
+            guard let seconds, seconds > 0 else { return 0 }
+            return Int64((seconds * 1_000_000_000).rounded())
+        }
+        return HealthCheckConfiguration(
+            test: test.isEmpty ? [] : [HealthCheckConfiguration.execTest] + test,
+            interval: nanoseconds(interval),
+            timeout: nanoseconds(timeout),
+            startPeriod: nanoseconds(startPeriod),
+            startInterval: nanoseconds(startInterval),
+            retries: max(retries ?? 0, 0))
     }
 }
 

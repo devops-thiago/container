@@ -33,8 +33,9 @@ public enum ComposeLabels {
     public static let dependsOn = "com.docker.compose.depends_on"
     public static let network = "com.docker.compose.network"
     public static let volume = "com.docker.compose.volume"
-    /// The service's health check, as JSON. The engine does not run health checks, so the
-    /// check travels with the container for whoever waits on it.
+    /// The service's `healthcheck:`, as JSON. The engine runs the check, from the container's
+    /// configuration; the label keeps what the file said, so that a change to it is a change
+    /// to the container.
     public static let healthcheck = "com.apple.container.compose.healthcheck"
     /// Seconds a stop waits before it kills, when the service sets `stop_grace_period`.
     public static let stopGracePeriod = "com.apple.container.compose.stop-grace-period"

@@ -1913,7 +1913,7 @@ container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recre
 *   `--no-recreate`: Keep existing containers even when their service changed
 *   `--remove-orphans`: Remove the project's containers that no service accounts for
 *   `--no-start`: Create the containers without starting them
-*   `--wait`: Wait until every service with a health check is healthy; implies `--detach`
+*   `--wait`: Wait until every service with a health check, its own or its image's, is healthy; implies `--detach`
 *   `--scheme <scheme>`: Scheme to reach the services' registries with: `http` or `https` (default: `https`)
 
 **Examples**

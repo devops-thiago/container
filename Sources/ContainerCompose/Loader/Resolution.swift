@@ -102,10 +102,10 @@ struct Resolver {
             if dependency.service == name {
                 diagnostics.error(dependencyPath, "a service cannot depend on itself", at: location(of: "depends_on"))
             }
-            if dependency.condition == .healthy, healthcheck(target.healthcheck, path: nil) == nil {
+            if dependency.condition == .healthy, healthcheck(target.healthcheck, path: nil)?.isDisabled == true {
                 diagnostics.error(
                     dependencyPath,
-                    "waits for '\(dependency.service)' to be healthy, and that service has no healthcheck with a test. A health check built into an image is not read: give the service a healthcheck here",
+                    "waits for '\(dependency.service)' to be healthy, and that service turns its health check off",
                     at: location(of: "depends_on"))
             }
         }
@@ -214,28 +214,21 @@ struct Resolver {
         return mounts
     }
 
-    /// The check a service runs, or nil when it has none or turns it off. With a `path`,
-    /// a check that cannot be run is reported there.
+    /// What the service says about its health check, or nil when it says nothing and the
+    /// image's check, if it has one, runs as it is. With a `path`, a value that cannot be
+    /// used is reported there.
     private func healthcheck(_ raw: RawHealthcheck?, path: String?) -> ComposeHealthcheck? {
-        guard let raw, raw.disable != true else { return nil }
-        guard let test = raw.test, !test.isEmpty else {
-            if let path {
-                diagnostics.warn(
-                    path,
-                    "ignored: it has no test, and a health check built into an image is not read, so there is nothing to change the timing of",
-                    at: raw.location)
-            }
-            return nil
-        }
+        guard let raw else { return nil }
+        guard raw.disable != true else { return .off }
         if let path, let retries = raw.retries, retries < 0 {
             diagnostics.error("\(path).retries", "expected zero or more, found \(retries)", at: raw.location)
         }
         return ComposeHealthcheck(
-            test: test,
-            interval: raw.interval ?? 30,
-            timeout: raw.timeout ?? 30,
-            retries: max(raw.retries ?? 3, 0),
-            startPeriod: raw.startPeriod ?? 0,
+            test: raw.test ?? [],
+            interval: raw.interval,
+            timeout: raw.timeout,
+            retries: raw.retries.map { max($0, 0) },
+            startPeriod: raw.startPeriod,
             startInterval: raw.startInterval)
     }
 }
