@@ -54,6 +54,12 @@ container run [<options>] <image> [<arguments> ...]
 *   `--dns-option <option>`: DNS options
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
+*   `--health-cmd <command>`: Command the container's shell runs to check its health; exit status 0 is healthy. See [Health checks](#health-checks)
+*   `--health-interval <duration>`: Time between health checks (ms|s|m|h) (default 30s)
+*   `--health-retries <count>`: Failed health checks in a row that make the container unhealthy (default 3)
+*   `--health-start-interval <duration>`: Time between health checks during the start period (ms|s|m|h) (default 5s)
+*   `--health-start-period <duration>`: Time the container has to start before failed health checks count; a check that passes in it ends it (ms|s|m|h) (default 0s)
+*   `--health-timeout <duration>`: Longest one health check may run before it is killed and counts as failed (ms|s|m|h) (default 30s)
 *   `--hostname <hostname>`: Set the hostname the container sees (default: the container's name)
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.
@@ -66,6 +72,7 @@ container run [<options>] <image> [<arguments> ...]
 *   `--network <network>`: Attach the container to a network (format: `<name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME]`)
 *   `--network-alias <alias>`: Add a name the container answers to on every network it attaches to
 *   `--no-dns`: Do not configure DNS in the container
+*   `--no-healthcheck`: Disable any health check the image gives
 *   `--os <os>`: Set OS if image can target multiple operating systems (default: linux)
 *   `-p, --publish <spec>`: Publish a port from container to host (format: [host-ip:]host-port:container-port[/protocol])
 *   `--platform <platform>`: Platform for the image if it's multi-platform. This takes precedence over --os and --arch
@@ -143,6 +150,35 @@ restarts; the engine stopping its containers as it shuts down does not count as 
 start by hand resets the count, which is what `on-failure:N` compares with N. The engine never
 asks for folder access when it starts a container by itself: a container whose folders are not
 granted stays stopped, with the reason in `restartError`.
+
+#### Health checks
+
+The engine runs a container's health check as Docker does: the image's `HEALTHCHECK`, with
+the `--health-*` flags laid over it field by field when the container is created (a flag left
+out, or a duration of `0`, keeps the image's value), or none with `--no-healthcheck`.
+`--health-cmd` runs its command with `/bin/sh -c`; an image's `HEALTHCHECK CMD [...]` in exec
+form runs without a shell.
+
+The check runs inside the container, as `container exec` would run it: the container's user,
+working directory and environment. The first check runs one interval after the container
+starts, and each next one an interval after the last one ended; while no check has passed and
+the start period lasts, checks run at the start interval, and their failures do not count.
+Exit status 0 is a pass. A check that runs past its timeout is killed and fails, and so does
+one that cannot be run at all, such as a `--health-cmd` in an image without `/bin/sh`.
+
+The health is `starting` until a check passes, then `healthy`; `retries` failures in a row
+make it `unhealthy`, and a pass makes it `healthy` again. `container ls` shows it in its
+`HEALTH` column (`none` for a container without a check), and `container inspect` has it
+under `status.health`, with `failingStreak` and the last five results (`start`, `end`,
+`exitCode`, `output`, of which the first 4096 bytes are kept). Each start begins again at
+`starting`; once the container stops, its health reads `unhealthy`, as Docker reports it. An
+unhealthy container is not restarted: the restart policy acts on exits only.
+
+```bash
+# healthy once nginx answers; stopping nginx inside makes it unhealthy after three checks
+container run -d --name web --health-cmd 'wget -qO- localhost' --health-interval 2s nginx:latest
+container ls
+```
 
 ### `container build`
 
@@ -251,6 +287,12 @@ container create [<options>] <image> [<arguments> ...]
 *   `--dns-option <option>`: DNS options
 *   `--dns-search <domain>`: DNS search domains
 *   `--entrypoint <cmd>`: Override the entrypoint of the image
+*   `--health-cmd <command>`: Command the container's shell runs to check its health; exit status 0 is healthy. See [Health checks](#health-checks)
+*   `--health-interval <duration>`: Time between health checks (ms|s|m|h) (default 30s)
+*   `--health-retries <count>`: Failed health checks in a row that make the container unhealthy (default 3)
+*   `--health-start-interval <duration>`: Time between health checks during the start period (ms|s|m|h) (default 5s)
+*   `--health-start-period <duration>`: Time the container has to start before failed health checks count; a check that passes in it ends it (ms|s|m|h) (default 0s)
+*   `--health-timeout <duration>`: Longest one health check may run before it is killed and counts as failed (ms|s|m|h) (default 30s)
 *   `--hostname <hostname>`: Set the hostname the container sees (default: the container's name)
 *   `--init`: Run an init process inside the container that forwards signals and reaps processes
 *   `--init-image <image>`: Use a custom init image instead of the default. This allows customizing boot-time behavior before the OCI container starts, such as running VM-level daemons, configuring eBPF filters, or debugging the init process.
@@ -263,6 +305,7 @@ container create [<options>] <image> [<arguments> ...]
 *   `--network <network>`: Attach the container to a network (format: `<name>[,mac=XX:XX:XX:XX:XX:XX][,mtu=VALUE][,alias=NAME]`)
 *   `--network-alias <alias>`: Add a name the container answers to on every network it attaches to
 *   `--no-dns`: Do not configure DNS in the container
+*   `--no-healthcheck`: Disable any health check the image gives
 *   `--os <os>`: Set OS if image can target multiple operating systems (default: linux)
 *   `-p, --publish <spec>`: Publish a port from container to host (format: [host-ip:]host-port:container-port[/protocol])
 *   `--platform <platform>`: Platform for the image if it's multi-platform. This takes precedence over --os and --arch
@@ -369,6 +412,8 @@ container delete [--all] [--force] [--debug] [<container-ids> ...]
 ### `container list (ls)`
 
 Lists containers. By default only running containers are shown. Output can be formatted as a table, JSON, YAML, or TOML.
+
+The table's columns are `ID`, `IMAGE`, `OS`, `ARCH`, `STATE`, `HEALTH`, `IP`, `CPUS`, `MEMORY`, `STARTED` and `RESTARTS`. `HEALTH` is `starting`, `healthy` or `unhealthy` for a container whose [health check](#health-checks) has run, and `none` otherwise; it is never empty, and it sits left of `IP`, which is empty for a container that is not running, so that a script counting columns from either end stays in step.
 
 **Usage**
 
@@ -1868,7 +1913,7 @@ container compose up [-d] [--build] [--pull <policy>] [--no-deps] [--force-recre
 *   `--no-recreate`: Keep existing containers even when their service changed
 *   `--remove-orphans`: Remove the project's containers that no service accounts for
 *   `--no-start`: Create the containers without starting them
-*   `--wait`: Wait until every service with a health check is healthy; implies `--detach`
+*   `--wait`: Wait until every service with a health check, its own or its image's, is healthy; implies `--detach`
 *   `--scheme <scheme>`: Scheme to reach the services' registries with: `http` or `https` (default: `https`)
 
 **Examples**

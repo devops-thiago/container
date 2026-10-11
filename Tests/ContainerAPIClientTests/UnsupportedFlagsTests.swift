@@ -51,11 +51,10 @@ struct UnsupportedFlagsTests {
         // Every flag at once: ArgumentParser reports a duplicated name the first time a
         // group is parsed, so this is the collision check against the existing groups.
         var arguments: [String] = []
-        for flag in ["--privileged", "--oom-kill-disable", "--no-healthcheck", "--publish-all"] { arguments.append(flag) }
+        for flag in ["--privileged", "--oom-kill-disable", "--publish-all"] { arguments.append(flag) }
         let valued = [
             "pid", "ipc", "uts", "userns", "cgroupns", "cgroup-parent", "oom-score-adj", "log-driver", "gpus", "isolation",
-            "stop-signal", "stop-timeout", "health-cmd", "health-interval", "health-retries", "health-start-period",
-            "health-start-interval", "health-timeout", "ip", "ip6", "mac-address", "domainname", "memory-swap",
+            "stop-signal", "stop-timeout", "ip", "ip6", "mac-address", "domainname", "memory-swap",
             "memory-swappiness", "memory-reservation", "kernel-memory", "cpu-shares", "cpu-period", "cpu-quota",
             "cpuset-cpus", "cpuset-mems", "blkio-weight", "pids-limit", "detach-keys", "volume-driver", "device",
             "device-cgroup-rule", "security-opt", "log-opt", "storage-opt", "link", "expose", "group-add",
@@ -64,8 +63,19 @@ struct UnsupportedFlagsTests {
         ]
         for flag in valued { arguments += ["--\(flag)", "x"] }
         let parsed = try Flags.Unsupported.parse(arguments)
-        #expect(parsed.given.count == 4 + valued.count)
-        let management = try Flags.Management.parse(["--name", "n", "--hostname", "h"])
+        #expect(parsed.given.count == 3 + valued.count)
+        let management = try Flags.Management.parse(["--name", "n", "--hostname", "h", "--health-cmd", "true", "--health-retries", "2"])
         #expect(management.name == "n")
+        #expect(management.health.command == "true")
+    }
+
+    @Test("the health flags are honoured now, so they are not among these")
+    func healthFlagsAreNotUnsupported() {
+        for flag in ["--no-healthcheck"] {
+            #expect(throws: (any Error).self) { try Flags.Unsupported.parse([flag]) }
+        }
+        for flag in ["health-cmd", "health-interval", "health-retries", "health-start-period", "health-start-interval", "health-timeout"] {
+            #expect(throws: (any Error).self) { try Flags.Unsupported.parse(["--\(flag)", "1s"]) }
+        }
     }
 }

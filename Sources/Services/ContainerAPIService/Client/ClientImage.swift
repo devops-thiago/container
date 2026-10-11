@@ -73,6 +73,21 @@ public struct ClientImage: Sendable {
         return try content.decode()
     }
 
+    /// Returns the image's `HEALTHCHECK` for the specified platform, or nil when it has none.
+    ///
+    /// The check is a Docker extension to the OCI image config that `ImageConfig` does not
+    /// carry, so it is read from the config blob itself: `config.Healthcheck`, with Docker's
+    /// field names and its durations in nanoseconds.
+    public func healthCheck(for platform: Platform) async throws -> HealthCheckConfiguration? {
+        let manifest = try await self.manifest(for: platform)
+        let desc = manifest.config
+        guard let content: Content = try await contentStore.get(digest: desc.digest) else {
+            throw ContainerizationError(.notFound, message: "content with digest \(desc.digest)")
+        }
+        let image: ImageHealthCheckDocument = try content.decode()
+        return image.config?.healthcheck?.configuration
+    }
+
     /// Returns the resolved OCI descriptor for the image.
     package func resolved() async throws -> Descriptor {
         let index = try await self.index()
@@ -574,4 +589,47 @@ extension ImageDescription {
         }
         return name
     }
+}
+
+/// The part of an image config blob that holds Docker's health check, and nothing else, so
+/// that any other content of the blob cannot fail the read.
+struct ImageHealthCheckDocument: Decodable {
+    struct Config: Decodable {
+        var healthcheck: DockerHealthCheck?
+
+        enum CodingKeys: String, CodingKey {
+            case healthcheck = "Healthcheck"
+        }
+    }
+
+    /// Docker's `HealthcheckConfig`, as the image spec writes it.
+    struct DockerHealthCheck: Decodable {
+        var test: [String]?
+        var interval: Int64?
+        var timeout: Int64?
+        var startPeriod: Int64?
+        var startInterval: Int64?
+        var retries: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case test = "Test"
+            case interval = "Interval"
+            case timeout = "Timeout"
+            case startPeriod = "StartPeriod"
+            case startInterval = "StartInterval"
+            case retries = "Retries"
+        }
+
+        var configuration: HealthCheckConfiguration {
+            HealthCheckConfiguration(
+                test: test ?? [],
+                interval: max(interval ?? 0, 0),
+                timeout: max(timeout ?? 0, 0),
+                startPeriod: max(startPeriod ?? 0, 0),
+                startInterval: max(startInterval ?? 0, 0),
+                retries: max(retries ?? 0, 0))
+        }
+    }
+
+    var config: Config?
 }

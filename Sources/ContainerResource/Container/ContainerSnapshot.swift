@@ -62,6 +62,10 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// started, when its restart policy asked it to. Nil once the container starts. Kept by
     /// this apiserver only: the next engine start tries again.
     public var restartError: String?
+    /// The container's health, when it has a health check and has been started with it:
+    /// Docker's `State.Health`. Reset to starting at each start; unhealthy once the run ends,
+    /// as Docker leaves it. Kept by this apiserver only, as runs do not outlive it.
+    public var health: ContainerHealth?
 
     public init(
         configuration: ContainerConfiguration,
@@ -72,7 +76,8 @@ public struct ContainerSnapshot: Codable, Sendable {
         exitCode: Int32? = nil,
         exitedAt: Date? = nil,
         restartCount: Int = 0,
-        restartError: String? = nil
+        restartError: String? = nil,
+        health: ContainerHealth? = nil
     ) {
         self.configuration = configuration
         self.incarnation = incarnation
@@ -83,6 +88,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         self.exitedAt = exitedAt
         self.restartCount = restartCount
         self.restartError = restartError
+        self.health = health
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -95,6 +101,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         case exitedAt
         case restartCount
         case restartError
+        case health
     }
 
     public init(from decoder: any Decoder) throws {
@@ -110,5 +117,6 @@ public struct ContainerSnapshot: Codable, Sendable {
         exitedAt = try container.decodeIfPresent(Date.self, forKey: .exitedAt)
         restartCount = try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
         restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
+        health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
     }
 }

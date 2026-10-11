@@ -48,6 +48,10 @@ public struct ContainerConfiguration: Sendable, Codable {
     /// after a delay that grows while it keeps failing, and `always` and `unless-stopped`
     /// containers that were running start with the engine. Absent means `no`.
     public var restartPolicy: RestartPolicy? = nil
+    /// How the engine checks that the workload works while the container runs: the image's
+    /// `HEALTHCHECK` with the `--health-*` flags over it, as Docker settles them at create.
+    /// Absent means no check, which is also what `--no-healthcheck` leaves.
+    public var healthCheck: HealthCheckConfiguration? = nil
     /// The DNS configuration for the container.
     public var dns: DNSConfiguration? = nil
     /// Whether to enable rosetta x86-64 translation for the container.
@@ -99,6 +103,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case hostname
         case extraHosts
         case restartPolicy
+        case healthCheck
         case dns
         case rosetta
         case initProcess
@@ -140,6 +145,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         hostname = try container.decodeIfPresent(String.self, forKey: .hostname)
         extraHosts = try container.decodeIfPresent([ExtraHost].self, forKey: .extraHosts) ?? []
         restartPolicy = try container.decodeIfPresent(RestartPolicy.self, forKey: .restartPolicy)
+        healthCheck = try container.decodeIfPresent(HealthCheckConfiguration.self, forKey: .healthCheck)
         dns = try container.decodeIfPresent(DNSConfiguration.self, forKey: .dns)
         rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
         initProcess = try container.decode(ProcessConfiguration.self, forKey: .initProcess)

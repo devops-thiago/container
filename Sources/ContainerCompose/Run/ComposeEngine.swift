@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 import TerminalProgress
 
@@ -40,10 +41,13 @@ public struct ComposeContainer: Sendable, Equatable {
     /// The container's published ports, as `host:container/protocol`.
     public let ports: [String]
     public let startedAt: Date?
+    /// The container's health as the engine checks it; nil when it has no health check, or
+    /// has not been started with one.
+    public let health: ContainerHealth?
 
     public init(
         id: String, image: String, imageDigest: String = "", state: State, exitCode: Int32? = nil, labels: [String: String],
-        ports: [String] = [], startedAt: Date? = nil
+        ports: [String] = [], startedAt: Date? = nil, health: ContainerHealth? = nil
     ) {
         self.id = id
         self.image = image
@@ -53,6 +57,7 @@ public struct ComposeContainer: Sendable, Equatable {
         self.labels = labels
         self.ports = ports
         self.startedAt = startedAt
+        self.health = health
     }
 
     public var project: String? { labels[ComposeLabels.project] }
@@ -73,13 +78,21 @@ public struct ContainerRequest: Sendable, Equatable {
     public let command: [String]
     /// The signal a stop sends, when it is not the image's.
     public let stopSignal: String?
+    /// The service's health check, laid over the image's as the `--health-*` flags are. Not
+    /// among the options because `--health-cmd` has no exec form, and a check given as one
+    /// must run in an image without a shell.
+    public let healthCheck: HealthCheckConfiguration?
 
-    public init(name: String, image: String, options: [String], command: [String], stopSignal: String? = nil) {
+    public init(
+        name: String, image: String, options: [String], command: [String], stopSignal: String? = nil,
+        healthCheck: HealthCheckConfiguration? = nil
+    ) {
         self.name = name
         self.image = image
         self.options = options
         self.command = command
         self.stopSignal = stopSignal
+        self.healthCheck = healthCheck
     }
 
     /// The whole `container run` command line, without the command's own name.
@@ -117,10 +130,6 @@ public protocol ComposeEngine: Sendable {
     func startContainer(_ id: String) async throws
     func stopContainer(_ id: String, timeout: Int?) async throws
     func removeContainer(_ id: String) async throws
-
-    /// Run a command in a running container and wait for it. nil when it has not ended
-    /// within `timeout` seconds, in which case it is killed.
-    func run(_ command: [String], in id: String, timeout: Double) async throws -> Int32?
 
     /// A host port nothing is listening on.
     func freeHostPort() async throws -> Int
