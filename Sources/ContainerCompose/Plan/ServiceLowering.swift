@@ -252,6 +252,7 @@ enum ServiceLowering {
             service: service.name,
             containerName: containerName,
             image: image,
+            namesImage: service.image != nil,
             build: service.build.map { build($0, tag: image) },
             pullPolicy: service.pullPolicy ?? .missing,
             platform: service.platform,

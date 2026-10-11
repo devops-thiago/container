@@ -70,6 +70,9 @@ public struct ServicePlan: Sendable, Equatable {
     public let containerName: String
     /// The image the container runs: the service's, or the name its build is tagged with.
     public let image: String
+    /// The service names its image with `image:`. One that only builds runs an image named
+    /// after the project and the service, which no registry is asked for.
+    public let namesImage: Bool
     public let build: BuildPlan?
     public let pullPolicy: ComposePullPolicy
     /// The platform the service asks for. nil is this Mac's.
