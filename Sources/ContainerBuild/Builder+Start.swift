@@ -23,6 +23,7 @@ import ContainerizationOCI
 import Foundation
 import Logging
 import NIO
+import NIOPosix
 import TerminalProgress
 
 extension Builder {
@@ -402,13 +403,8 @@ extension Builder {
                 while true {
                     do {
                         let fh = try await client.dial(id: builderContainerId, port: vsockPort)
-
-                        let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
-                        let b = try await Builder(socket: fh, group: threadGroup, logger: log)
-
-                        // If this call succeeds, then BuildKit is running.
-                        let _ = try await b.info()
-                        return b
+                        let threadGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
+                        return try await connectOnce(socket: fh, group: threadGroup, log: log)
                     } catch {
                         // If we get here, "Dialing builder" is shown for such a short period
                         // of time that it's invisible to the user.
@@ -435,6 +431,36 @@ extension Builder {
             throw ConnectError.notRunning
         }
         return builder
+    }
+
+    /// One attempt to reach BuildKit over a dialed `socket`: wrap it in a gRPC client running
+    /// on `group`, then ask BuildKit for its info, which succeeds only once BuildKit is running.
+    ///
+    /// The returned builder owns `group`. When the attempt fails, or the task is cancelled
+    /// before it returns, nothing is left running: the client is stopped and `group` is shut
+    /// down with `shutdownGroup`, so a connect that dials many times leaks no threads.
+    static func connectOnce(
+        socket: FileHandle,
+        group: MultiThreadedEventLoopGroup,
+        log: Logger,
+        probe: (Builder) async throws -> Void = { _ = try await $0.info() },
+        shutdownGroup: (MultiThreadedEventLoopGroup) async -> Void = { try? await $0.shutdownGracefully() }
+    ) async throws -> Builder {
+        do {
+            let builder = try await Builder(socket: socket, group: group, logger: log)
+            do {
+                try await probe(builder)
+                // A connect that timed out has nobody left to take the builder.
+                try Task.checkCancellation()
+                return builder
+            } catch {
+                await builder.closeConnection()
+                throw error
+            }
+        } catch {
+            await shutdownGroup(group)
+            throw error
+        }
     }
 
     /// Why ``connect(_:vsockPort:timeout:containerSystemConfig:log:progressUpdate:)`` gave up.

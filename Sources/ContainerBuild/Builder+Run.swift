@@ -432,62 +432,70 @@ extension Builder {
             progressUpdate: progressUpdate
         )
 
-        let (buildFileData, ignoreFileData) = try readBuildFile(at: dockerfile)
-        try checkBuildFileSize(buildFileData)
-        let secretsData = try readSecrets(request.secrets)
+        // `builder.build` shuts the builder down when it ends. A failure before it gets there
+        // must do the same, or the connection and its event loops stay behind; a second
+        // shutdown after the build does nothing.
+        do {
+            let (buildFileData, ignoreFileData) = try readBuildFile(at: dockerfile)
+            try checkBuildFileSize(buildFileData)
+            let secretsData = try readSecrets(request.secrets)
 
-        let buildID = UUID().uuidString
-        let exportDirectory = try await createExportDirectory(buildID: buildID)
-        defer {
-            try? FileManager.default.removeItem(at: exportDirectory)
+            let buildID = UUID().uuidString
+            let exportDirectory = try await createExportDirectory(buildID: buildID)
+            defer {
+                try? FileManager.default.removeItem(at: exportDirectory)
+            }
+
+            let imageNames = try normalizedTags(request.tags.isEmpty ? [UUID().uuidString.lowercased()] : request.tags)
+            let exports = try exports(from: request.outputs, exportDirectory: exportDirectory)
+            let platforms = try resolvePlatforms(
+                platforms: request.platforms,
+                os: ["linux"],
+                arch: [ContainerAPIClient.Arch.hostArchitecture().rawValue],
+                log: log
+            )
+
+            let config = BuildConfig(
+                buildID: buildID,
+                contentStore: RemoteContentStoreClient(),
+                buildArgs: request.buildArgs,
+                secrets: secretsData,
+                ssh: request.builder.ssh ? "default" : "",
+                contextDir: contextDir,
+                dockerfile: buildFileData,
+                dockerignore: ignoreFileData,
+                labels: request.labels,
+                noCache: request.noCache,
+                platforms: [Platform](platforms),
+                terminal: terminal,
+                tags: imageNames,
+                target: request.target,
+                quiet: request.quiet,
+                exports: exports,
+                cacheIn: request.cacheIn,
+                cacheOut: request.cacheOut,
+                pull: request.pull,
+                containerSystemConfig: containerSystemConfig,
+            )
+            await willBuild()
+            try await builder.build(config)
+
+            await progressUpdate([
+                .setDescription("Unpacking built image"),
+                .setItemsName("entries"),
+                .setTasks(0),
+                .setTotalTasks(exports.count),
+            ])
+            return try await storeExports(
+                exports,
+                tags: imageNames,
+                exportDirectory: exportDirectory,
+                log: log,
+                progressUpdate: progressUpdate
+            )
+        } catch {
+            await builder.shutdown()
+            throw error
         }
-
-        let imageNames = try normalizedTags(request.tags.isEmpty ? [UUID().uuidString.lowercased()] : request.tags)
-        let exports = try exports(from: request.outputs, exportDirectory: exportDirectory)
-        let platforms = try resolvePlatforms(
-            platforms: request.platforms,
-            os: ["linux"],
-            arch: [ContainerAPIClient.Arch.hostArchitecture().rawValue],
-            log: log
-        )
-
-        let config = BuildConfig(
-            buildID: buildID,
-            contentStore: RemoteContentStoreClient(),
-            buildArgs: request.buildArgs,
-            secrets: secretsData,
-            ssh: request.builder.ssh ? "default" : "",
-            contextDir: contextDir,
-            dockerfile: buildFileData,
-            dockerignore: ignoreFileData,
-            labels: request.labels,
-            noCache: request.noCache,
-            platforms: [Platform](platforms),
-            terminal: terminal,
-            tags: imageNames,
-            target: request.target,
-            quiet: request.quiet,
-            exports: exports,
-            cacheIn: request.cacheIn,
-            cacheOut: request.cacheOut,
-            pull: request.pull,
-            containerSystemConfig: containerSystemConfig,
-        )
-        await willBuild()
-        try await builder.build(config)
-
-        await progressUpdate([
-            .setDescription("Unpacking built image"),
-            .setItemsName("entries"),
-            .setTasks(0),
-            .setTotalTasks(exports.count),
-        ])
-        return try await storeExports(
-            exports,
-            tags: imageNames,
-            exportDirectory: exportDirectory,
-            log: log,
-            progressUpdate: progressUpdate
-        )
     }
 }
