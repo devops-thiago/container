@@ -151,8 +151,9 @@ actor HostDirectoryAccess {
 
     /// Whether this process can actually open what the bookmark named.
     ///
-    /// Listing is the check because a bind-mount source is a directory and because the sandbox
-    /// denies the listing rather than the resolve. Anything that is not a directory falls back
+    /// Listing is the check because what a bookmark grants for a bind mount is a directory, a
+    /// single file being shared through its folder, and because the sandbox denies the listing
+    /// rather than the resolve. Anything that is not a directory falls back
     /// to `access(2)`, which the sandbox also enforces, so an odd mount source is reported
     /// honestly instead of being rejected for the wrong reason.
     private static func readable(_ url: URL) -> Bool {
