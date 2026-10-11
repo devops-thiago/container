@@ -45,6 +45,15 @@ struct UpTests {
           data:
         """
 
+    /// A registry's answer to a name it does not have, as the engine reports it.
+    struct PullFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    static func notFound(_ image: String) -> PullFailure {
+        PullFailure(description: "HTTP request to https://registry.example/v2/\(image)/manifests/latest failed with response: 404 Not Found. Reason: Unknown")
+    }
+
     private func failure(_ body: () async throws -> Void) async -> String {
         do {
             try await body()
@@ -432,15 +441,18 @@ struct UpTests {
     @Test
     func aServiceThatHasToBeBuiltNeedsABuilder() async throws {
         let yaml = "services:\n  api:\n    build: ./api\n  worker:\n    build: ./api\n    image: shop-api\n  web:\n    image: web:1\n"
+        // worker names the image, so it is looked for in the registry first; it is not there.
         let cannot = ComposeRun()
+        cannot.engine.failingPulls["shop-api"] = Self.notFound("shop-api")
         let message = await failure { try await cannot.project().up(try cannot.plan(yaml)) }
         #expect(message.hasPrefix("the image of service api has to be built first. Build it with: container build --tag shop-api "))
         #expect(!cannot.engine.calls.contains { $0.hasPrefix("create") })
 
         let can = ComposeRun()
+        can.engine.failingPulls["shop-api"] = Self.notFound("shop-api")
         try await can.project(building: true).up(try can.plan(yaml))
         #expect(can.recorder.builds == ["api: shop-api"], "two services with one build have it built once")
-        #expect(can.recorder.events.prefix(4).suffix(2) == ["image shop-api building", "image shop-api built"])
+        #expect(can.recorder.events.prefix(5).suffix(3) == ["image shop-api pulling", "image shop-api building", "image shop-api built"])
 
         // An image that is there is not built again, unless asked.
         let again = ComposeRun()
@@ -479,6 +491,165 @@ struct UpTests {
         try await run.project().up(try run.plan(yaml), options: options)
         #expect(!run.engine.calls.contains { $0.hasPrefix("pull") })
         #expect(run.engine.arguments(of: "shop-other-1").suffix(3).prefix(2) == ["--pull", "never"])
+    }
+
+    private static let namedBuild = "services:\n  api:\n    build: ./api\n    image: registry.example/shop-api:1\n"
+
+    private func pulls(_ run: ComposeRun) -> [String] { run.engine.calls.filter { $0.hasPrefix("pull") } }
+
+    @Test
+    func anImageThatIsBuiltAndNamedIsPulledFirstAndNotBuiltWhenThePullWorks() async throws {
+        let run = ComposeRun()
+        run.engine.digests["registry.example/shop-api:1"] = "sha256:remote"
+        try await run.project(building: true).up(try run.plan(Self.namedBuild))
+        #expect(pulls(run) == ["pull registry.example/shop-api:1"])
+        #expect(run.recorder.builds.isEmpty)
+        #expect(run.recorder.events.contains("image registry.example/shop-api:1 pulled"))
+        #expect(run.recorder.warnings.isEmpty)
+        #expect(run.engine.calls.contains("create shop-api-1"))
+
+        // A caller that cannot build needs no builder when the pull brought the image.
+        let cannot = ComposeRun()
+        try await cannot.project().up(try cannot.plan(Self.namedBuild))
+        #expect(pulls(cannot) == ["pull registry.example/shop-api:1"])
+        #expect(cannot.engine.calls.contains("create shop-api-1"))
+    }
+
+    @Test
+    func anImageTheRegistryDoesNotHaveIsBuilt() async throws {
+        let run = ComposeRun()
+        run.engine.failingPulls["registry.example/shop-api:1"] = Self.notFound("shop-api")
+        try await run.project(building: true).up(try run.plan(Self.namedBuild))
+        #expect(pulls(run) == ["pull registry.example/shop-api:1"])
+        #expect(run.recorder.builds == ["api: registry.example/shop-api:1"])
+        #expect(run.recorder.warnings.count == 1)
+        #expect(
+            run.recorder.warnings.first?.hasPrefix(
+                "the image registry.example/shop-api:1 of service api could not be pulled, so it is built instead: HTTP request to") == true)
+        #expect(!run.recorder.events.contains("image registry.example/shop-api:1 pulled"))
+        #expect(run.engine.calls.contains("create shop-api-1"))
+    }
+
+    @Test
+    func anyOtherFailedPullOfAnImageThatCanBeBuiltIsBuiltTooAsDockerDoes() async throws {
+        // Docker Hub answers a repository it does not have with "access denied", so a
+        // denial cannot mean "stop"; Docker's compose ignores every failed pull of an
+        // image it can build, and so does this.
+        let failures: [any Error] = [
+            PullFailure(
+                description:
+                    "HTTP request to https://registry.example/v2/shop-api/manifests/1 failed with response: 401 Unauthorized. Reason: Unknown, no credentials found for host registry.example"
+            ),
+            PullFailure(description: "registry registry.example rejected the saved login"),
+            URLError(.notConnectedToInternet),
+        ]
+        for failure in failures {
+            let run = ComposeRun()
+            run.engine.failingPulls["registry.example/shop-api:1"] = failure
+            try await run.project(building: true).up(try run.plan(Self.namedBuild))
+            #expect(run.recorder.builds == ["api: registry.example/shop-api:1"], "\(failure)")
+            #expect(run.recorder.warnings.count == 1, "\(failure)")
+        }
+    }
+
+    @Test
+    func aPullThatIsCancelledStopsTheRunWithNoBuild() async throws {
+        let run = ComposeRun()
+        run.engine.failingPulls["registry.example/shop-api:1"] = CancellationError()
+        await #expect(throws: CancellationError.self) {
+            try await run.project(building: true).up(try run.plan(Self.namedBuild))
+        }
+        #expect(run.recorder.builds.isEmpty)
+        #expect(run.recorder.warnings.isEmpty)
+        #expect(!run.engine.calls.contains { $0.hasPrefix("create") })
+    }
+
+    @Test
+    func anImageOnlyBuiltIsNotLookedForInARegistry() async throws {
+        let run = ComposeRun()
+        try await run.project(building: true).up(try run.plan("services:\n  api:\n    build: ./api\n"))
+        #expect(pulls(run).isEmpty)
+        #expect(run.recorder.builds == ["api: shop-api"])
+    }
+
+    @Test
+    func eachPullPolicyDecidesWhetherAnImageThatCanBeBuiltIsPulledFirst() {
+        #expect(ComposeProject.pullsBeforeBuilding(.always, imageIsHere: true))
+        #expect(ComposeProject.pullsBeforeBuilding(.always, imageIsHere: false))
+        #expect(!ComposeProject.pullsBeforeBuilding(.missing, imageIsHere: true))
+        #expect(ComposeProject.pullsBeforeBuilding(.missing, imageIsHere: false))
+        #expect(!ComposeProject.pullsBeforeBuilding(.never, imageIsHere: true))
+        #expect(!ComposeProject.pullsBeforeBuilding(.never, imageIsHere: false))
+        #expect(!ComposeProject.pullsBeforeBuilding(.build, imageIsHere: true))
+        #expect(!ComposeProject.pullsBeforeBuilding(.build, imageIsHere: false))
+    }
+
+    @Test
+    func eachPullPolicyOfAnImageThatIsBuiltAndNamed() async throws {
+        let image = "registry.example/shop-api:1"
+        struct Case {
+            let policy: String?
+            var here = false
+            var pullFails = false
+            let pulled: Bool
+            let built: Bool
+        }
+        let cases = [
+            // No policy is `missing`: the image here is used, one not here is pulled.
+            Case(policy: nil, here: true, pulled: false, built: false),
+            Case(policy: nil, pulled: true, built: false),
+            Case(policy: nil, pullFails: true, pulled: true, built: true),
+            Case(policy: "missing", here: true, pulled: false, built: false),
+            Case(policy: "missing", pulled: true, built: false),
+            Case(policy: "missing", pullFails: true, pulled: true, built: true),
+            Case(policy: "if_not_present", here: true, pulled: false, built: false),
+            Case(policy: "if_not_present", pullFails: true, pulled: true, built: true),
+            // `always` pulls whatever is here, and builds only when there is still nothing.
+            Case(policy: "always", here: true, pulled: true, built: false),
+            Case(policy: "always", here: true, pullFails: true, pulled: true, built: false),
+            Case(policy: "always", pulled: true, built: false),
+            Case(policy: "always", pullFails: true, pulled: true, built: true),
+            // `never` pulls nothing, and builds what is not here.
+            Case(policy: "never", here: true, pulled: false, built: false),
+            Case(policy: "never", pulled: false, built: true),
+            // `build` pulls nothing, and builds whatever is here.
+            Case(policy: "build", here: true, pulled: false, built: true),
+            Case(policy: "build", pulled: false, built: true),
+        ]
+        for item in cases {
+            let run = ComposeRun()
+            if item.here { run.engine.addImage(image) }
+            if item.pullFails { run.engine.failingPulls[image] = Self.notFound("shop-api") }
+            let yaml = Self.namedBuild + (item.policy.map { "    pull_policy: \($0)\n" } ?? "")
+            try await run.project(building: true).up(try run.plan(yaml))
+            let label = "\(item.policy ?? "no policy"), here: \(item.here), pull fails: \(item.pullFails)"
+            #expect(pulls(run) == (item.pulled ? ["pull \(image)"] : []), "\(label)")
+            #expect(run.recorder.builds == (item.built ? ["api: \(image)"] : []), "\(label)")
+            #expect(run.recorder.warnings.count == (item.pullFails ? 1 : 0), "\(label)")
+        }
+
+        // A failed pull of an image that is here keeps that image, as `always` does.
+        let kept = ComposeRun()
+        kept.engine.addImage(image)
+        kept.engine.failingPulls[image] = Self.notFound("shop-api")
+        try await kept.project(building: true).up(try kept.plan(Self.namedBuild + "    pull_policy: always\n"))
+        #expect(kept.recorder.warnings.first?.hasPrefix("the image \(image) of service api could not be pulled, so the image that is here is used: ") == true)
+
+        // --pull on the command line is the policy, and --build builds without pulling.
+        let never = ComposeRun()
+        var options = ComposeProject.UpOptions()
+        options.pull = .never
+        try await never.project(building: true).up(try never.plan(Self.namedBuild), options: options)
+        #expect(pulls(never).isEmpty)
+        #expect(never.recorder.builds == ["api: \(image)"])
+
+        let forced = ComposeRun()
+        options = ComposeProject.UpOptions()
+        options.build = true
+        options.pull = .always
+        try await forced.project(building: true).up(try forced.plan(Self.namedBuild), options: options)
+        #expect(pulls(forced).isEmpty)
+        #expect(forced.recorder.builds == ["api: \(image)"])
     }
 
     @Test
