@@ -174,15 +174,26 @@ struct MountTests {
     }
 
     @Test
-    func aFileIsNotMountedOnlyAFolder() throws {
+    func aFileIsMountedLikeAFolder() throws {
         let project = try TemporaryProject([
             "compose.yaml": "services:\n  web:\n    image: web:1\n    volumes:\n      - ./nginx.conf:/etc/nginx/nginx.conf:ro\n      - ./html:/usr/share/nginx/html\n",
             "nginx.conf": "events {}\n",
         ])
         try project.makeDirectory("html")
-        let errors = loadFailure { try project.load() }
-        #expect(errors.count == 1)
-        #expect(errors.first?.contains("\(project.path)/nginx.conf is a file, and only folders can be mounted") == true, "\(errors)")
+        let web = try #require(try project.load().file.service("web"))
+        #expect(web.mounts.count == 2)
+        guard case .bind(let source) = web.mounts.first?.kind else {
+            Issue.record("expected a bind mount, found \(String(describing: web.mounts.first))")
+            return
+        }
+        #expect(source.hasSuffix("/nginx.conf"))
+        #expect(web.mounts.first?.target == "/etc/nginx/nginx.conf")
+        #expect(web.mounts.first?.readOnly == true)
+
+        let plan = try ProjectPlan.make(try project.load())
+        let service = try #require(plan.service("web"))
+        #expect(service.options.contains("\(source):/etc/nginx/nginx.conf:ro"))
+        #expect(service.bindSources.first == source)
     }
 }
 

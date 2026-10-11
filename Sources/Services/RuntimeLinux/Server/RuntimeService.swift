@@ -1443,6 +1443,7 @@ public actor RuntimeService {
             }
         }
 
+        var shared: [Filesystem] = []
         for mount in config.mounts {
             if try mount.isSocket() {
                 let attrs = try? FileManager.default.attributesOfItem(atPath: mount.source)
@@ -1456,9 +1457,10 @@ public actor RuntimeService {
                 )
                 czConfig.sockets.append(socket)
             } else {
-                czConfig.mounts.append(mount.asMount)
+                shared.append(mount)
             }
         }
+        czConfig.mounts.append(contentsOf: try BindMountPlan.mounts(for: shared))
 
         for publishedSocket in config.publishedSockets {
             // UnixSocketConfiguration (Containerization) takes URL; convert from FilePath at the boundary.
