@@ -143,8 +143,6 @@ scheduling and out-of-memory settings, `develop`, and the swarm parts of `deploy
 
 The differences worth knowing:
 
-- **A file cannot be mounted, only a folder.** `./nginx.conf:/etc/nginx/nginx.conf` is
-  refused; mount the folder that holds the file.
 - **A volume is held by one running container at a time.** Two services that mount the
   same named volume cannot run together; `compose` warns when a project has such a pair.
   Services that run together share files through a folder mounted into each. A job that

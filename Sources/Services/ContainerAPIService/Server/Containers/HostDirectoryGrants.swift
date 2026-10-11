@@ -327,8 +327,9 @@ public actor HostDirectoryGrants {
         }
     }
 
-    /// Listing rather than `access(2)`: a bind-mount source is a directory, and what the
-    /// sandbox denies is the listing.
+    /// Listing rather than `access(2)` for a directory, because what the sandbox denies is the
+    /// listing. A single file bind mount is shared through its folder, so the grant asked for
+    /// is a directory too; a file is checked with `access(2)`.
     private static func readable(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {

@@ -175,6 +175,20 @@ public struct Filesystem: Sendable, Codable {
         }
     }
 
+    /// The host folder a virtiofs mount shares into the VM, which is the folder a sandboxed
+    /// engine needs a grant for. That is the source itself, except for a regular file: virtiofs
+    /// shares only folders, so a file is bound from a share of the folder that holds it, found
+    /// after symbolic links are resolved, the way the runtime finds it.
+    public var sharedFolder: String {
+        guard isVirtiofs else { return source }
+        let resolved = URL(fileURLWithPath: source).resolvingSymlinksInPath()
+        var info = stat()
+        guard stat(resolved.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            return source
+        }
+        return resolved.deletingLastPathComponent().path
+    }
+
     /// Clone the Filesystem to the provided path.
     ///
     /// This uses `clonefile` to provide a copy-on-write copy of the Filesystem.

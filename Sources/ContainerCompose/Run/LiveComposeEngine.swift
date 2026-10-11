@@ -134,7 +134,7 @@ public struct LiveComposeEngine: ComposeEngine {
 
     private static func boundFolders(of configuration: ContainerConfiguration) -> [String] {
         var seen = Set<String>()
-        return configuration.mounts.filter(\.isVirtiofs).map(\.source).filter { seen.insert($0).inserted }
+        return configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder).filter { seen.insert($0).inserted }
     }
 
     public func startContainer(_ id: String) async throws {

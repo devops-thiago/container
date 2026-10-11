@@ -159,7 +159,7 @@ public struct ComposePort: Sendable, Hashable {
 
 public struct ComposeMount: Sendable, Hashable {
     public enum Kind: Sendable, Hashable {
-        /// A host directory, by absolute path.
+        /// A host directory or file, by absolute path.
         case bind(source: String)
         /// A named volume, by its key under the top-level `volumes:`.
         case volume(key: String)

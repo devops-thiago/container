@@ -88,11 +88,9 @@ struct FixtureTests {
     @Test
     func aStackThatMountsAFile() throws {
         let directory = try Fixture.directory("observability")
-        let errors = loadFailure { try Fixture.load("observability") }
-        #expect(
-            errors == [
-                "compose.yaml:47:5: services.tempo.volumes: not supported on this engine: \(directory)/config/tempo.yaml is a file, and only folders can be mounted. Mount the folder that holds it"
-            ])
+        let definition = try Fixture.load("observability")
+        let tempo = try #require(definition.file.service("tempo"))
+        #expect(tempo.mounts == [ComposeMount(kind: .bind(source: "\(directory)/config/tempo.yaml"), target: "/etc/tempo.yaml", readOnly: false)])
     }
 
     @Test
