@@ -47,9 +47,11 @@ visible there. When the app runs the engine in its sandbox, the permission it as
 folder.
 
 The bind is made when the container starts, to the file the path names then. Writes into that
-file, from either side, are seen on the other. An editor that saves by writing a new file and
-renaming it over the old one replaces the file rather than changing it, and the container can
-keep reading the file it started with; restart the container to pick up the new one.
+file, from either side, are seen on the other, including a rewrite in place. An editor that
+saves by writing a new file and renaming it over the old one replaces the file rather than
+changing it: the container then fails to read the path ("No such file or directory") until it
+is restarted, which binds the new file. To edit a mounted file while the container runs, use an
+editor that writes in place, or mount the folder that holds it instead.
 
 A file mounted read-write from a folder that is also mounted read-only, in the same container,
 is read-only: the VM gets one share of that folder.
