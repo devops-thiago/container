@@ -43,6 +43,15 @@ public enum HostDirectoryLendOutcome: String, Sendable {
     }
 }
 
+/// What a revoke found. Both are success: the engine no longer authorizes the folder either way.
+public enum HostDirectoryRevokeOutcome: String, Sendable {
+    /// The engine held a grant for the folder and has dropped it.
+    case revoked
+    /// The engine held no grant for the folder, so there was nothing to drop. A revoke retried
+    /// after a lost reply, or one for a folder never published to this engine, lands here.
+    case notGranted
+}
+
 /// Paths the user typed, made to mean what the user meant.
 ///
 /// Sandboxed, this process starts in its own container, so its working directory is a folder
@@ -114,6 +123,43 @@ public enum ClientHostDirectory {
         // The engine may be waiting on a person at a panel; this has to wait longer than that.
         let reply = try await client.send(request, responseTimeout: XPCClient.grantAwareResponseTimeout)
         return try accept(reply)
+    }
+
+    /// Take back a folder the embedder granted. Once this returns, the engine no longer
+    /// authorizes `path`: the next create, start, copy or build that needs it asks the embedder
+    /// again. Containers already running with a share from it keep that share until they stop.
+    ///
+    /// Only the signed app that announced the grant listener may call this, with the owner token
+    /// it announced under; anyone else is refused. Throws when the engine refused the revoke or
+    /// could not be reached, in which case nothing is known to have changed and the call can be
+    /// repeated: it is idempotent.
+    ///
+    /// - Parameters:
+    ///   - path: the folder, as the embedder granted it or where it is now if it has moved since.
+    ///   - ownerToken: the token the embedder announced its grant listener with.
+    public static func revoke(path: String, ownerToken: String) async throws -> HostDirectoryRevokeOutcome {
+        let client = XPCClient(service: ServiceIdentity.apiServerService)
+        defer { client.close() }
+        let request = revokeRequest(path: path, ownerToken: ownerToken)
+        let reply = try await client.send(request, responseTimeout: .seconds(15))
+        return try revokeOutcome(reply)
+    }
+
+    static func revokeRequest(path: String, ownerToken: String) -> XPCMessage {
+        let request = XPCMessage(route: .hostDirectoryGrantRevoke)
+        request.set(key: .hostDirectoryPath, value: path)
+        request.set(key: InstanceAttach.tokenKey, value: ownerToken)
+        return request
+    }
+
+    /// Read a revoke reply. A reply without an outcome is not a success to assume.
+    static func revokeOutcome(_ reply: XPCMessage) throws -> HostDirectoryRevokeOutcome {
+        guard
+            let outcome = reply.string(key: .hostDirectoryOutcome).flatMap(HostDirectoryRevokeOutcome.init(rawValue:))
+        else {
+            throw ContainerizationError(.internalError, message: "the engine's reply to a folder revoke said nothing about it")
+        }
+        return outcome
     }
 
     /// Borrow whatever folders `paths` sit in, when this process is sandboxed; nothing
