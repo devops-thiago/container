@@ -139,6 +139,7 @@ extension APIServer {
                     let grantHarness = HostDirectoryGrantHarness(log: log)
                     routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route(grantHarness.publish)
                     routes[XPCRoute.hostDirectoryGrantLend] = XPCServer.route(grantHarness.lend)
+                    routes[XPCRoute.hostDirectoryGrantRevoke] = XPCServer.route(grantHarness.revoke)
                 }
 
                 let containersService = try initializeContainersService(
@@ -212,8 +213,11 @@ extension APIServer {
                 // and the grant publish is the app handing us its folder bookmarks — none of
                 // those are a user running a workload, and refusing them only stops the engine
                 // assembling itself. Nothing escapes through them either: the routes that start
-                // containers are all gated.
-                let ungated: Set<XPCRoute> = [.ping, .runtimeAttach, .runtimeResolve, .hostDirectoryGrantsPublish]
+                // containers are all gated. The grant revoke is the same app taking a folder
+                // back; it only ever removes access, and must work whenever the app asks.
+                let ungated: Set<XPCRoute> = [
+                    .ping, .runtimeAttach, .runtimeResolve, .hostDirectoryGrantsPublish, .hostDirectoryGrantRevoke,
+                ]
                 for (route, handler) in routes where !ungated.contains(route) {
                     routes[route] = ownerWatchdog.wrap(handler)
                 }
