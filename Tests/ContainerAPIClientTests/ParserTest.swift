@@ -530,21 +530,58 @@ struct ParserTest {
     }
 
     @Test
-    func testMountBindFileInsteadOfDirectory() throws {
-        let tempFile = FileManager.default.temporaryDirectory.appendingPathComponent("test-file-\(UUID().uuidString)")
-        try "test content".write(to: tempFile, atomically: true, encoding: .utf8)
+    func testMountBindSingleFile() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("test-bind-file-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer {
-            try? FileManager.default.removeItem(at: tempFile)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        let file = tempDir.appendingPathComponent("nginx.conf")
+        try "events {}".write(to: file, atomically: true, encoding: .utf8)
+
+        for spec in ["type=bind,src=\(file.path),dst=/etc/nginx/nginx.conf,readonly", "type=bind,source=\(file.path),target=/etc/nginx/nginx.conf,ro"] {
+            guard case .filesystem(let fs) = try Parser.mount(spec) else {
+                Issue.record("Expected filesystem mount for \(spec)")
+                continue
+            }
+            #expect(fs.isVirtiofs)
+            #expect(fs.source == file.path)
+            #expect(fs.destination == "/etc/nginx/nginx.conf")
+            #expect(fs.options == ["ro"])
         }
 
-        #expect {
-            _ = try Parser.mount("type=bind,src=\(tempFile.path),dst=/foo")
-        } throws: { error in
-            guard let error = error as? ContainerizationError else {
-                return false
-            }
-            return error.description.contains("path") && error.description.contains("is not a directory")
+        guard case .filesystem(let writable) = try Parser.mount("type=bind,src=\(file.path),dst=/etc/nginx/nginx.conf") else {
+            Issue.record("Expected filesystem mount")
+            return
         }
+        #expect(writable.options.isEmpty)
+    }
+
+    @Test
+    func testVolumeSingleFile() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("test-volume-file-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        let file = tempDir.appendingPathComponent("nginx.conf")
+        try "events {}".write(to: file, atomically: true, encoding: .utf8)
+
+        guard case .filesystem(let relative) = try Parser.volume("./nginx.conf:/etc/nginx/nginx.conf:ro", relativeTo: tempDir) else {
+            Issue.record("Expected filesystem mount")
+            return
+        }
+        #expect(relative.isVirtiofs)
+        #expect(relative.source == file.standardizedFileURL.path)
+        #expect(relative.destination == "/etc/nginx/nginx.conf")
+        #expect(relative.options == ["ro"])
+
+        guard case .filesystem(let absolute) = try Parser.volume("\(file.path):/etc/nginx/nginx.conf") else {
+            Issue.record("Expected filesystem mount")
+            return
+        }
+        #expect(absolute.source == file.path)
+        #expect(absolute.options.isEmpty)
     }
 
     @Test

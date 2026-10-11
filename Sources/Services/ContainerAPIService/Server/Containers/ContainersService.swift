@@ -1762,7 +1762,7 @@ public actor ContainersService {
                 return nil
             } catch let ungranted as HostDirectoryNotGranted where deferUngranted {
                 await self.engineStartFailed(id: id, error: ungranted, context: context)
-                return Set(state.snapshot.configuration.mounts.filter(\.isVirtiofs).map(\.source))
+                return Set(state.snapshot.configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder))
             } catch {
                 await self.engineStartFailed(id: id, error: error, context: context)
                 return nil
@@ -2003,11 +2003,12 @@ public actor ContainersService {
         await self.hostDirectoryAccess.resolve(bookmarks: [], for: id)
     }
 
-    /// Every virtiofs source this container names must be openable in this process. Asks the
-    /// embedder for any that is not — which may put a panel in front of the user — unless
+    /// Every folder this container shares must be openable in this process: each virtiofs
+    /// source, or for a single file the folder that holds it, which is what the VM shares. Asks
+    /// the embedder for any that is not, which may put a panel in front of the user, unless
     /// `askEmbedder` is false, as it is for the engine's own starts, which fail instead.
     private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration, askEmbedder: Bool = true) async throws {
-        let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.source))
+        let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder))
         for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
             guard askEmbedder else {
                 throw HostDirectoryNotGranted(source: source)

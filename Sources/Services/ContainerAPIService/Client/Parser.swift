@@ -534,12 +534,10 @@ public struct Parser {
                     let url = basePath?.appending(path: val).standardizedFileURL ?? URL(filePath: val)
                     let absolutePath = url.absoluteURL.path
 
-                    var isDirectory: ObjCBool = false
-                    guard FileManager.default.fileExists(atPath: absolutePath, isDirectory: &isDirectory) else {
+                    // A folder or a single file, as with Docker; the runtime shares a file's
+                    // folder with the VM and binds only the file into the container.
+                    guard FileManager.default.fileExists(atPath: absolutePath) else {
                         throw ContainerizationError(.invalidArgument, message: "path '\(val)' does not exist")
-                    }
-                    guard isDirectory.boolValue else {
-                        throw ContainerizationError(.invalidArgument, message: "path '\(val)' is not a directory")
                     }
                     fs.source = absolutePath
                 case "volume":

@@ -199,14 +199,6 @@ struct Resolver {
             switch mount.kind {
             case .volume(let key) where project.volumes[key] == nil:
                 diagnostics.error(path, "the volume '\(key)' is not defined under the top-level volumes", at: location)
-            case .bind(let source):
-                var isDirectory: ObjCBool = false
-                if fileManager.fileExists(atPath: source, isDirectory: &isDirectory), !isDirectory.boolValue {
-                    diagnostics.error(
-                        path,
-                        "not supported on this engine: \(source) is a file, and only folders can be mounted. Mount the folder that holds it",
-                        at: location)
-                }
             default:
                 break
             }

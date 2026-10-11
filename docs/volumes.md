@@ -31,6 +31,29 @@ total 4
 %
 </pre>
 
+### Mount a single file
+
+A source can also be a single file, with either option. Add `ro` (or `readonly` with
+`--mount`) to make it read-only in the container:
+
+<pre>
+% container run --volume ${PWD}/nginx.conf:/etc/nginx/nginx.conf:ro docker.io/nginx:alpine nginx -t
+% container run --mount type=bind,source=${PWD}/nginx.conf,target=/etc/nginx/nginx.conf,readonly docker.io/nginx:alpine nginx -t
+</pre>
+
+The VM shares only folders, so the folder that holds the file is shared with the VM at a
+private path and only the file is bound into the container; nothing else in that folder is
+visible there. When the app runs the engine in its sandbox, the permission it asks for is that
+folder.
+
+The bind is made when the container starts, to the file the path names then. Writes into that
+file, from either side, are seen on the other. An editor that saves by writing a new file and
+renaming it over the old one replaces the file rather than changing it, and the container can
+keep reading the file it started with; restart the container to pick up the new one.
+
+A file mounted read-write from a folder that is also mounted read-only, in the same container,
+is read-only: the VM gets one share of that folder.
+
 ## Named volumes
 
 Named volumes offer complementary features to bind mounts. Use a named volume when you
