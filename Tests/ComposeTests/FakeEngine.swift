@@ -46,6 +46,8 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     var exitsLater: [String: (looks: Int, code: Int32)] = [:]
     /// The digest a pull of an image returns.
     var digests: [String: String] = [:]
+    /// What a pull of an image throws, in place of fetching it.
+    var failingPulls: [String: any Error] = [:]
     var failingStarts: Set<String> = []
     /// Called while a container is being made, before it exists.
     var whileCreating: (@Sendable (String) -> Void)?
@@ -144,8 +146,9 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     }
 
     func pullImage(_ reference: String, platform: String?, progress: @escaping ProgressUpdateHandler) async throws -> String {
-        locked {
+        try locked {
             log.append("pull \(reference)")
+            if let error = failingPulls[reference] { throw error }
             localImages.insert(reference)
             return digests[reference] ?? "sha256:pulled"
         }

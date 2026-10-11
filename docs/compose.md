@@ -167,6 +167,14 @@ is not there yet; `up --build` and `compose build` build regardless. The image i
 by the service's `image`, or `<project>-<service>` without one. Two services with the
 same build and image are built once.
 
+A service with both `build` and `image` is fetched first, as `docker compose` does, and
+built only when the image is still not there. Its `pull_policy` says when to fetch:
+`missing` (the default, also `if_not_present`) fetches an image that is not there,
+`always` fetches every time, and `never` and `build` fetch nothing; `build` builds every
+time. A fetch that fails, whatever the reason, is reported as a warning, and the image is
+built unless one is there already, because a registry answers a name it does not have with "access denied" as often
+as with "not found". `up --build` builds without fetching.
+
 ## Profiles
 
 A service with `profiles` is left out unless one of its profiles is turned on with

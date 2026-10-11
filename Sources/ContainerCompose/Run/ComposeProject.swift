@@ -102,7 +102,7 @@ public struct ComposeProject: Sendable {
         }
     }
 
-    /// Build what has to be built and fetch what is to be fetched afresh. Returns the
+    /// Fetch what is to be fetched afresh and build what has to be built. Returns the
     /// digest each planned image has afterwards, for the images that are here; one that is
     /// not is fetched when its container is made.
     private func prepareImages(_ plan: ProjectPlan, options: UpOptions) async throws -> [String: String] {
@@ -112,8 +112,18 @@ public struct ComposeProject: Sendable {
         for service in plan.services where seen.insert(service.image).inserted {
             try Task.checkCancellation()
             let policy = options.pull ?? service.pullPolicy
-            if let build = service.build {
+            // As Docker's: an image one service runs and another builds is one that can be built.
+            let sharing = plan.services.filter { $0.image == service.image }
+            if let build = sharing.lazy.compactMap(\.build).first {
                 var digest = try await engine.imageDigest(service.image)
+                // As Docker's: an image the file names is fetched first, as the pull policy
+                // says, and built only when it is still not here. `--build` turns the
+                // policy into `build`, which fetches nothing.
+                if !options.build, sharing.contains(where: \.namesImage),
+                    Self.pullsBeforeBuilding(policy, imageIsHere: digest != nil)
+                {
+                    digest = try await pullBuildable(service, imageIsHere: digest != nil) ?? digest
+                }
                 if options.build || policy == .build || digest == nil, !built.contains(build) {
                     try await runBuild(build, service: service.service)
                     built.append(build)
@@ -121,17 +131,50 @@ public struct ComposeProject: Sendable {
                 }
                 digests[service.image] = digest
             } else if policy == .always {
-                hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulling))
-                let progress = hooks.progress(service.service)
-                digests[service.image] = try await finishing {
-                    try await engine.pullImage(service.image, platform: service.platform, progress: progress)
-                }
-                hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulled))
+                digests[service.image] = try await pull(service)
             } else {
                 digests[service.image] = try await engine.imageDigest(service.image)
             }
         }
         return digests
+    }
+
+    /// Whether `up` fetches the image of a service that also builds it, before deciding
+    /// to build it, as Docker's compose decides: `always` fetches whatever is here,
+    /// `missing` (which is also what no policy means) fetches only an image that is not
+    /// here, and `never` and `build` fetch nothing.
+    static func pullsBeforeBuilding(_ policy: ComposePullPolicy, imageIsHere: Bool) -> Bool {
+        switch policy {
+        case .always: true
+        case .missing: !imageIsHere
+        case .never, .build: false
+        }
+    }
+
+    private func pull(_ service: ServicePlan) async throws -> String {
+        hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulling))
+        let progress = hooks.progress(service.service)
+        let digest = try await finishing {
+            try await engine.pullImage(service.image, platform: service.platform, progress: progress)
+        }
+        hooks.event(ComposeEvent(.image, service.image, service: service.service, .pulled))
+        return digest
+    }
+
+    /// Fetch an image the project can build. Returns nil when the fetch failed, which does
+    /// not end the run: Docker's compose ignores a failed pull of an image it can build,
+    /// whatever the failure, and so does this. A registry answers a name it does not have
+    /// with "not found" or, as Docker Hub does, with "access denied", so the two cannot be
+    /// told apart. A run cancelled during the fetch stops.
+    private func pullBuildable(_ service: ServicePlan, imageIsHere: Bool) async throws -> String? {
+        do {
+            return try await pull(service)
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw error }
+            let next = imageIsHere ? "the image that is here is used" : "it is built instead"
+            hooks.warning("the image \(service.image) of service \(service.service) could not be pulled, so \(next): \(error)")
+            return nil
+        }
     }
 
     private func runBuild(_ build: BuildPlan, service: String) async throws {
