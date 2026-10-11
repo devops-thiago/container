@@ -19,37 +19,188 @@ import ContainerPersistence
 import ContainerResource
 import Containerization
 import ContainerizationError
-import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 import Logging
+import NIO
 import TerminalProgress
 
 extension Builder {
-    public static let builderResourceDir = "builder"
+    /// The folder under the engine's app root that the builder exports into, mounted in the
+    /// builder container as `/var/lib/container-builder-shim/exports`.
+    public static let resourceDirectory = "builder"
 
+    /// The vsock port the builder shim listens on.
+    public static let defaultVsockPort: UInt32 = 8088
+
+    /// How the builder container should be started.
+    public struct StartOptions: Sendable, Equatable {
+        /// CPUs for the builder; `nil` takes `build.cpus` from the system configuration.
+        public var cpus: Int64?
+        /// Memory for the builder, with an optional K, M, G, T or P suffix; `nil` takes
+        /// `build.memory` from the system configuration.
+        public var memory: String?
+        /// Forward the caller's SSH agent into the builder. Takes effect only when
+        /// `SSH_AUTH_SOCK` is set.
+        public var ssh: Bool
+        public var dnsNameservers: [String]
+        public var dnsDomain: String?
+        public var dnsSearchDomains: [String]
+        public var dnsOptions: [String]
+
+        public init(
+            cpus: Int64? = nil,
+            memory: String? = nil,
+            ssh: Bool = false,
+            dnsNameservers: [String] = [],
+            dnsDomain: String? = nil,
+            dnsSearchDomains: [String] = [],
+            dnsOptions: [String] = []
+        ) {
+            self.cpus = cpus
+            self.memory = memory
+            self.ssh = ssh
+            self.dnsNameservers = dnsNameservers
+            self.dnsDomain = dnsDomain
+            self.dnsSearchDomains = dnsSearchDomains
+            self.dnsOptions = dnsOptions
+        }
+    }
+
+    /// The builder container that a start asks for, resolved against the system
+    /// configuration and the caller's environment.
+    public struct StartSpec: Sendable {
+        /// The BuildKit image reference.
+        public var image: String
+        public var resources: ContainerConfiguration.Resources
+        /// The environment variables the start manages (`BUILDKIT_COLORS`, `NO_COLOR`), sorted.
+        public var managedEnvironment: [String]
+        /// Whether the SSH agent is forwarded: asked for, and `SSH_AUTH_SOCK` is set.
+        public var ssh: Bool
+        public var dnsNameservers: [String]
+        public var dnsDomain: String?
+        public var dnsSearchDomains: [String]
+        public var dnsOptions: [String]
+
+        public init(
+            options: StartOptions,
+            containerSystemConfig: ContainerSystemConfig,
+            environment: [String: String] = ProcessInfo.processInfo.environment
+        ) throws {
+            self.image = containerSystemConfig.build.image
+            self.resources = try Parser.resources(
+                cpus: options.cpus,
+                memory: options.memory,
+                defaultCPUs: containerSystemConfig.build.cpus,
+                defaultMemory: containerSystemConfig.build.memory,
+            )
+            self.managedEnvironment = Builder.managedEnvironment(environment)
+            self.ssh = options.ssh && environment["SSH_AUTH_SOCK"] != nil
+            // Fields the start leaves unset take the system's container DNS defaults.
+            let dns = Utility.dnsConfiguration(
+                from: .init(
+                    domain: options.dnsDomain,
+                    nameservers: options.dnsNameservers,
+                    options: options.dnsOptions,
+                    searchDomains: options.dnsSearchDomains
+                ),
+                defaults: containerSystemConfig.container.dns
+            )
+            self.dnsNameservers = dns.nameservers
+            self.dnsDomain = dns.domain
+            self.dnsSearchDomains = dns.searchDomains
+            self.dnsOptions = dns.options
+        }
+
+        /// Whether a builder created from `existing` differs from this one in a way that needs
+        /// a new container: image, CPUs, memory, managed environment, SSH forwarding, or DNS.
+        ///
+        /// DNS compares the whole resolved configuration, so a builder whose DNS no longer
+        /// matches the system defaults is recreated too.
+        public func requiresRecreate(_ existing: ContainerConfiguration) -> Bool {
+            let existingManagedEnv = existing.initProcess.environment.filter { envVar in
+                envVar.hasPrefix("BUILDKIT_COLORS=") || envVar.hasPrefix("NO_COLOR=")
+            }.sorted()
+            let envChanged = existingManagedEnv != managedEnvironment
+            let imageChanged = existing.image.reference != image
+            let cpuChanged = existing.resources.cpus != resources.cpus
+            let memChanged = existing.resources.memoryInBytes != resources.memoryInBytes
+            let sshChanged = existing.ssh != ssh
+            let dnsChanged = Builder.dnsConfigurationChanged(
+                existing: existing.dns,
+                desired: ContainerConfiguration.DNSConfiguration(
+                    nameservers: dnsNameservers,
+                    domain: dnsDomain,
+                    searchDomains: dnsSearchDomains,
+                    options: dnsOptions))
+            return imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged
+        }
+    }
+
+    /// What a start does with the builder container it finds.
+    public enum StartAction: Sendable, Equatable {
+        /// No usable container: create one and start it.
+        case create
+        /// Running and matching: use it as it is.
+        case reuse
+        /// Running but different: stop and delete it, then create a new one.
+        case stopAndRecreate
+        /// Stopped and matching: start it again, recreating it if that fails.
+        case restart
+        /// Stopped and different: delete it, then create a new one.
+        case deleteAndRecreate
+    }
+
+    /// Decide what a start does with an existing builder in `status`. Throws while the
+    /// builder is stopping or restarting, since neither can be acted on yet.
+    public static func startAction(status: RuntimeStatus?, requiresRecreate: Bool) throws -> StartAction {
+        switch status {
+        case nil, .unknown:
+            return .create
+        case .running:
+            return requiresRecreate ? .stopAndRecreate : .reuse
+        case .stopped:
+            return requiresRecreate ? .deleteAndRecreate : .restart
+        case .stopping:
+            throw ContainerizationError(
+                .invalidState,
+                message: "builder is stopping, please wait until it is fully stopped before proceeding"
+            )
+        case .restarting:
+            throw ContainerizationError(
+                .invalidState,
+                message: "builder is restarting, please stop it or wait until it is running before proceeding"
+            )
+        }
+    }
+
+    /// The `BUILDKIT_COLORS` and `NO_COLOR` settings from `environment` that the builder
+    /// container carries, sorted.
+    public static func managedEnvironment(_ environment: [String: String]) -> [String] {
+        var targetEnvVars: [String] = []
+        if let buildkitColors = environment["BUILDKIT_COLORS"] {
+            targetEnvVars.append("BUILDKIT_COLORS=\(buildkitColors)")
+        }
+        if environment["NO_COLOR"] != nil {
+            targetEnvVars.append("NO_COLOR=true")
+        }
+        targetEnvVars.sort()
+        return targetEnvVars
+    }
+
+    /// Start the builder container, or make sure it is running, the way
+    /// `container builder start` does.
+    ///
+    /// An existing builder is kept when it matches `options`; one that differs in image,
+    /// CPUs, memory, managed environment, SSH forwarding or DNS is replaced (see
+    /// ``StartSpec/requiresRecreate(_:)``). Progress is reported in four tasks: fetching the
+    /// BuildKit image, unpacking it, fetching the kernel, starting the container.
     public static func start(
-        cpus: Int64?,
-        memory: String?,
-        log: Logger,
-        ssh: Bool = false,
-        dnsNameservers: [String] = [],
-        dnsDomain: String? = nil,
-        dnsSearchDomains: [String] = [],
-        dnsOptions: [String] = [],
-        progressUpdate: @escaping ProgressUpdateHandler,
+        _ options: StartOptions,
         containerSystemConfig: ContainerSystemConfig,
+        log: Logger,
+        progressUpdate: @escaping ProgressUpdateHandler
     ) async throws {
-        let dns = Utility.dnsConfiguration(
-            from: .init(
-                domain: dnsDomain,
-                nameservers: dnsNameservers,
-                options: dnsOptions,
-                searchDomains: dnsSearchDomains
-            ),
-            defaults: containerSystemConfig.container.dns
-        )
-
         await progressUpdate([
             .setDescription("Fetching BuildKit image"),
             .setItemsName("blobs"),
@@ -57,10 +208,9 @@ extension Builder {
         let taskManager = ProgressTaskCoordinator()
         let fetchTask = await taskManager.startTask()
 
-        let builderImage: String = containerSystemConfig.build.image
         let systemHealth = try await ClientHealthCheck.ping(timeout: .seconds(10))
         let exportsMount: String = systemHealth.appRoot
-            .appendingPathComponent(Builder.builderResourceDir)
+            .appendingPathComponent(resourceDirectory)
             .absolutePath()
 
         if !FileManager.default.fileExists(atPath: exportsMount) {
@@ -71,88 +221,38 @@ extension Builder {
             )
         }
 
+        let target = try StartSpec(options: options, containerSystemConfig: containerSystemConfig)
+
         let builderPlatform = ContainerizationOCI.Platform(arch: "arm64", os: "linux", variant: "v8")
 
-        var targetEnvVars: [String] = []
-        if let buildkitColors = ProcessInfo.processInfo.environment["BUILDKIT_COLORS"] {
-            targetEnvVars.append("BUILDKIT_COLORS=\(buildkitColors)")
-        }
-        if ProcessInfo.processInfo.environment["NO_COLOR"] != nil {
-            targetEnvVars.append("NO_COLOR=true")
-        }
-        targetEnvVars.sort()
-
-        let defaultBuildCPUs: Int = containerSystemConfig.build.cpus
-        let defaultBuildMemory = containerSystemConfig.build.memory
-        let resources = try Parser.resources(
-            cpus: cpus,
-            memory: memory,
-            defaultCPUs: defaultBuildCPUs,
-            defaultMemory: defaultBuildMemory,
-        )
-
         let client = ContainerClient()
-        let existingContainer = try? await client.get(id: "buildkit")
-        if let existingContainer {
-            let existingImage = existingContainer.configuration.image.reference
-            let existingResources = existingContainer.configuration.resources
-            let existingEnv = existingContainer.configuration.initProcess.environment
-            let existingDNS = existingContainer.configuration.dns
-
-            let existingManagedEnv = existingEnv.filter { envVar in
-                envVar.hasPrefix("BUILDKIT_COLORS=") || envVar.hasPrefix("NO_COLOR=")
-            }.sorted()
-
-            let envChanged = existingManagedEnv != targetEnvVars
-
-            // Check if we need to recreate the builder due to different image
-            let imageChanged = existingImage != builderImage
-            let cpuChanged = existingResources.cpus != resources.cpus
-            let memChanged = existingResources.memoryInBytes != resources.memoryInBytes
-            let sshForwarded = existingContainer.configuration.ssh
-            let sshWanted = ssh && ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] != nil
-            let sshChanged = sshForwarded != sshWanted
-            let dnsChanged = Self.dnsConfigurationChanged(existing: existingDNS, desired: dns)
-
-            switch existingContainer.status {
-            case .running:
-                guard imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged else {
-                    // If image, mem, cpu, env, and DNS are the same, continue using the existing builder
-                    return
-                }
-                // If they changed, stop and delete the existing builder
+        if let existingContainer = try? await client.get(id: builderContainerId) {
+            let action = try startAction(
+                status: existingContainer.status,
+                requiresRecreate: target.requiresRecreate(existingContainer.configuration)
+            )
+            switch action {
+            case .reuse:
+                return
+            case .stopAndRecreate:
                 try await client.stop(id: existingContainer.id)
                 try await client.delete(id: existingContainer.id)
-            case .stopped:
-                // If the builder is stopped and matches our requirements, start it
-                // Otherwise, delete it and create a new one
-                if imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged {
-                    try? await client.delete(id: existingContainer.id)
-                } else {
-                    do {
-                        try await startBuildKit(client: client, id: existingContainer.id, progressUpdate, nil)
-                        return
-                    } catch {
-                        log.warning(
-                            "failed to restart existing stopped BuildKit container, recreating it",
-                            metadata: [
-                                "id": "\(existingContainer.id)",
-                                "error": "\(error)",
-                            ])
-                    }
-                    try? await client.delete(id: existingContainer.id)
+            case .deleteAndRecreate:
+                try? await client.delete(id: existingContainer.id)
+            case .restart:
+                do {
+                    try await startBuildKit(client: client, id: existingContainer.id, progressUpdate, nil)
+                    return
+                } catch {
+                    log.warning(
+                        "failed to restart existing stopped BuildKit container, recreating it",
+                        metadata: [
+                            "id": "\(existingContainer.id)",
+                            "error": "\(error)",
+                        ])
                 }
-            case .stopping:
-                throw ContainerizationError(
-                    .invalidState,
-                    message: "builder is stopping, please wait until it is fully stopped before proceeding"
-                )
-            case .restarting:
-                throw ContainerizationError(
-                    .invalidState,
-                    message: "builder is restarting, please stop it or wait until it is running before proceeding"
-                )
-            case .unknown:
+                try? await client.delete(id: existingContainer.id)
+            case .create:
                 break
             }
         }
@@ -164,12 +264,12 @@ extension Builder {
             useRosetta ? nil : "--enable-qemu",
         ].compactMap { $0 }
 
-        guard ManagedContainer.nameValid(Builder.builderContainerId) else {
-            throw ContainerizationError(.invalidArgument, message: "container ID \(Builder.builderContainerId) is not a valid container ID")
+        guard ManagedContainer.nameValid(builderContainerId) else {
+            throw ContainerizationError(.invalidArgument, message: "container ID \(builderContainerId) is not a valid container ID")
         }
 
         let image = try await ClientImage.fetch(
-            reference: builderImage,
+            reference: target.image,
             platform: builderPlatform,
             containerSystemConfig: containerSystemConfig,
             progressUpdate: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate)
@@ -187,13 +287,13 @@ extension Builder {
         )
 
         let imageDesc = ImageDescription(
-            reference: builderImage,
+            reference: target.image,
             descriptor: image.descriptor
         )
 
         let imageConfig = try await image.config(for: builderPlatform).config
         var environment = imageConfig?.env ?? []
-        environment.append(contentsOf: targetEnvVars)
+        environment.append(contentsOf: target.managedEnvironment)
 
         let processConfig = ProcessConfiguration(
             executable: "/usr/local/bin/container-builder-shim",
@@ -204,9 +304,9 @@ extension Builder {
             user: .id(uid: 0, gid: 0)
         )
 
-        var config = ContainerConfiguration(id: Builder.builderContainerId, image: imageDesc, process: processConfig)
-        config.resources = resources
-        config.ssh = ssh && ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] != nil
+        var config = ContainerConfiguration(id: builderContainerId, image: imageDesc, process: processConfig)
+        config.resources = target.resources
+        config.ssh = target.ssh
         config.labels = [
             ResourceLabelKeys.plugin: "builder",
             ResourceLabelKeys.role: ResourceRoleValues.builder,
@@ -234,13 +334,13 @@ extension Builder {
             throw ContainerizationError(.invalidState, message: "default network is not present")
         }
         config.networks = [
-            AttachmentConfiguration(network: defaultNetwork.id, options: AttachmentOptions(hostname: Builder.builderContainerId))
+            AttachmentConfiguration(network: defaultNetwork.id, options: AttachmentOptions(hostname: builderContainerId))
         ]
         config.dns = ContainerConfiguration.DNSConfiguration(
-            nameservers: dns.nameservers,
-            domain: dns.domain,
-            searchDomains: dns.searchDomains,
-            options: dns.options
+            nameservers: target.dnsNameservers,
+            domain: target.dnsDomain,
+            searchDomains: target.dnsSearchDomains,
+            options: target.dnsOptions
         )
 
         let kernel = try await {
@@ -269,19 +369,91 @@ extension Builder {
             // idempotent, so just proceed against the container the winner created.
         }
 
-        try await startBuildKit(client: client, id: Builder.builderContainerId, progressUpdate, taskManager)
+        try await startBuildKit(client: client, id: builderContainerId, progressUpdate, taskManager)
         log.debug("starting BuildKit and BuildKit-shim")
     }
 
-    static func dnsConfigurationChanged(
-        existing: ContainerConfiguration.DNSConfiguration?,
-        desired: ContainerConfiguration.DNSConfiguration
-    ) -> Bool {
-        let existing = existing ?? .init()
-        return existing.nameservers != desired.nameservers
-            || existing.domain != desired.domain
-            || existing.searchDomains != desired.searchDomains
-            || existing.options != desired.options
+    /// Start the builder when it needs it, then connect to BuildKit in it, the way
+    /// `container build` does.
+    ///
+    /// Reports "Dialing builder" first, then the start's own progress. When a dial fails the
+    /// builder is started again and the dial retried, until `timeout` passes.
+    public static func connect(
+        _ options: StartOptions,
+        vsockPort: UInt32 = defaultVsockPort,
+        timeout: Duration = .seconds(300),
+        containerSystemConfig: ContainerSystemConfig,
+        log: Logger,
+        progressUpdate: @escaping ProgressUpdateHandler
+    ) async throws -> Builder {
+        await progressUpdate([.setDescription("Dialing builder")])
+
+        // Ensure the builder is started (or restarted) with the correct SSH configuration
+        // before attempting to dial. This handles the case where the builder is already
+        // running but was not started with SSH forwarding enabled.
+        try await start(options, containerSystemConfig: containerSystemConfig, log: log, progressUpdate: progressUpdate)
+
+        let builder: Builder? = try await withThrowingTaskGroup(of: Builder.self) { group in
+            defer {
+                group.cancelAll()
+            }
+
+            group.addTask {
+                let client = ContainerClient()
+                while true {
+                    do {
+                        let fh = try await client.dial(id: builderContainerId, port: vsockPort)
+
+                        let threadGroup: MultiThreadedEventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
+                        let b = try await Builder(socket: fh, group: threadGroup, logger: log)
+
+                        // If this call succeeds, then BuildKit is running.
+                        let _ = try await b.info()
+                        return b
+                    } catch {
+                        // If we get here, "Dialing builder" is shown for such a short period
+                        // of time that it's invisible to the user.
+                        await progressUpdate([.setTasks(0), .setTotalTasks(3)])
+
+                        try await start(options, containerSystemConfig: containerSystemConfig, log: log, progressUpdate: progressUpdate)
+
+                        // wait (seconds) for builder to start listening on vsock
+                        try await Task.sleep(for: .seconds(5))
+                        continue
+                    }
+                }
+            }
+
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw ConnectError.timeout
+            }
+
+            return try await group.next()
+        }
+
+        guard let builder else {
+            throw ConnectError.notRunning
+        }
+        return builder
+    }
+
+    /// Why ``connect(_:vsockPort:timeout:containerSystemConfig:log:progressUpdate:)`` gave up.
+    public enum ConnectError: Swift.Error, CustomStringConvertible, Equatable {
+        /// No connection to BuildKit within the timeout.
+        case timeout
+        /// The connection task ended without a builder.
+        case notRunning
+
+        public var description: String {
+            switch self {
+            case .timeout:
+                // Indented as the CLI has always printed it.
+                return "    Timeout waiting for connection to builder"
+            case .notRunning:
+                return "builder is not running"
+            }
+        }
     }
 }
 
@@ -319,5 +491,18 @@ private func startBuildKit(
             throw error
         }
         throw ContainerizationError(.internalError, message: "failed to start BuildKit: \(error)")
+    }
+}
+
+extension Builder {
+    static func dnsConfigurationChanged(
+        existing: ContainerConfiguration.DNSConfiguration?,
+        desired: ContainerConfiguration.DNSConfiguration
+    ) -> Bool {
+        let existing = existing ?? .init()
+        return existing.nameservers != desired.nameservers
+            || existing.domain != desired.domain
+            || existing.searchDomains != desired.searchDomains
+            || existing.options != desired.options
     }
 }
