@@ -47,6 +47,12 @@ import XPC
 /// not one of its jobs, whatever the app group says (`docs/sandbox-spikes.md`, S7a) — which is
 /// why the endpoint is brokered through this process instead of dialled directly.
 ///
+/// The embedder can also **revoke** one of them, when the user takes a folder back. The pool
+/// drops that grant and remembers the folder as revoked, so the next create, start, copy or
+/// build that names it asks the embedder again rather than finding it still open. A container
+/// already running with a share from that folder keeps it: the share was handed to the runtime
+/// helper and the guest when the container started, and nothing here can take it back.
+///
 /// Inert unsandboxed: paths open without help, `covers` is true for everything readable, and no
 /// embedder ever publishes anything.
 public actor HostDirectoryGrants {
@@ -59,12 +65,39 @@ public actor HostDirectoryGrants {
     /// Whether the app this engine is embedded in is running. Until configured, never: a
     /// request with no embedder announced then fails at once, as it always did.
     private var appIsRunning: @Sendable () -> Bool = { false }
-    /// Retained because releasing a URL is what ends the access. Never released: the pool is
-    /// the boot's worth of grants, and there is no moment before exit at which dropping one is
-    /// correct. The bookmark is kept beside the URL because it is what a lend hands on: a
+    /// Retained because releasing a URL is what ends the access. Held for the boot, and dropped
+    /// only when the embedder revokes the folder, which is the one moment before exit at which
+    /// letting a grant go is what the user asked for. The bookmark is kept beside the URL because it is what a lend hands on: a
     /// bookmark this process mints for a folder it only borrowed carries no access to a third
     /// process, while the one the embedder minted does.
-    private var granted: [String: (url: URL, bookmark: Data)] = [:]
+    private var granted: [String: (url: URL, bookmark: Data, identity: FolderIdentity?)] = [:]
+    /// Folders the embedder revoked, by the canonical path the pool held them under. `covers`
+    /// answers false for anything inside one unless a later grant covers it, whatever the file
+    /// system says: this process can still hold the folder's extension through a stopped
+    /// container's `HostDirectoryAccess`, and "readable" must not be read as "still granted".
+    private var revoked: Set<String> = []
+    /// The fallback `covers` uses for a path no grant answers for. A seam for tests, which run
+    /// unsandboxed and can read every folder they make.
+    private let openable: @Sendable (URL) -> Bool
+
+    init(openable: @escaping @Sendable (URL) -> Bool = { HostDirectoryGrants.readable($0) }) {
+        self.openable = openable
+    }
+
+    /// Which folder a grant was for, as the file system knows it: device and inode, recorded when
+    /// it was published. A folder renamed after that keeps them, so a revoke naming where it is
+    /// now still finds the grant filed under where it was.
+    struct FolderIdentity: Hashable, Sendable {
+        let device: UInt64
+        let inode: UInt64
+
+        init?(path: String) {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            device = UInt64(bitPattern: Int64(info.st_dev))
+            inode = UInt64(info.st_ino)
+        }
+    }
 
     /// The label the embedder announces its grant listener under. Not a mach service name — no
     /// process owns it — just the key the attach table files the endpoint under.
@@ -101,7 +134,8 @@ public actor HostDirectoryGrants {
                 log?.warning("published grant carries no access", metadata: ["path": "\(path)"])
                 continue
             }
-            granted[path] = (url, bookmark)
+            granted[path] = (url, bookmark, FolderIdentity(path: path))
+            revoked.remove(path)
             kept += 1
             log?.info("host directory granted", metadata: ["path": "\(path)"])
         }
@@ -113,10 +147,59 @@ public actor HostDirectoryGrants {
     ///
     /// A grant on a folder covers everything inside it, so one grant on a home directory
     /// answers for every project in it.
+    ///
+    /// A revoked folder is not covered, even though this process may still be able to open it,
+    /// until the embedder grants it, or a folder around it, again.
     public func covers(_ path: String) -> Bool {
         let target = Self.canonical(path)
         if granted.keys.contains(where: { target.isPathInside($0) }) { return true }
-        return Self.readable(URL(fileURLWithPath: target))
+        if revoked.contains(where: { target.isPathInside($0) }) { return false }
+        return openable(URL(fileURLWithPath: target))
+    }
+
+    /// What a revoke found to remove.
+    public enum RevokeOutcome: Sendable, Equatable {
+        /// The pool held a grant for the folder and no longer does. The paths are the ones the
+        /// grants were filed under: usually just the folder, plus where it used to be when it was
+        /// renamed after it was granted.
+        case revoked([String])
+        /// The pool held no grant for the folder. Nothing changed, and nothing needed to: a
+        /// revoke is idempotent, so a retry after a lost reply lands here.
+        case notGranted
+    }
+
+    /// Stop authorizing a folder the embedder granted, without a restart.
+    ///
+    /// Removes the grant filed under `path`, and any grant for the same folder filed under the
+    /// path it had before a rename. Only that grant: a grant on a folder around it, or inside
+    /// it, is a different grant the user made and still holds, so revoking `~/src/app` leaves a
+    /// grant on `~/src` covering it. The folder is then remembered as revoked, so `covers`
+    /// answers false and the next mount, start, copy or build that names it asks the embedder
+    /// again, which is where the user sees the panel a second time.
+    ///
+    /// What it cannot do is reach what has already been handed on. A running container's share
+    /// lives in its runtime helper and its guest, and a bookmark lent to `container build` or a
+    /// copy lives in the borrower; both last as long as that container or that command.
+    @discardableResult
+    public func revoke(_ path: String) -> RevokeOutcome {
+        let target = Self.canonical(path)
+        let identity = FolderIdentity(path: target)
+        let matches = granted.filter { key, entry in
+            key == target || (identity != nil && entry.identity == identity)
+        }.keys.sorted()
+        guard !matches.isEmpty else {
+            log?.info("host directory revoke found no grant", metadata: ["path": "\(target)"])
+            return .notGranted
+        }
+        for key in matches {
+            // Matches the implicit start the system performed when the bookmark resolved, as
+            // `HostDirectoryAccess.release` does; dropping the URL is what ends the extension.
+            granted.removeValue(forKey: key)?.url.stopAccessingSecurityScopedResource()
+            revoked.insert(key)
+        }
+        revoked.insert(target)
+        log?.info("host directory revoked", metadata: ["path": "\(target)", "removed": "\(matches)"])
+        return .revoked(matches)
     }
 
     /// Lend `path` to another process: the embedder's own bookmark for the pooled folder that
@@ -330,7 +413,7 @@ public actor HostDirectoryGrants {
     /// Listing rather than `access(2)` for a directory, because what the sandbox denies is the
     /// listing. A single file bind mount is shared through its folder, so the grant asked for
     /// is a directory too; a file is checked with `access(2)`.
-    private static func readable(_ url: URL) -> Bool {
+    static func readable(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
             return false
@@ -343,7 +426,7 @@ public actor HostDirectoryGrants {
 
     /// Compared resolved, because the sandbox resolves symlinks before it checks access:
     /// `/tmp/x` and `/private/tmp/x` are one directory however it was spelled.
-    private static func canonical(_ path: String) -> String {
+    static func canonical(_ path: String) -> String {
         URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 }

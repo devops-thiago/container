@@ -243,6 +243,10 @@ public enum XPCRoute: String {
     /// grant of its own. The reply carries a fresh bookmark for a folder the pool covers — after
     /// asking the embedder for it if nothing does — or the outcome that explains its absence.
     case hostDirectoryGrantLend
+    /// The embedder taking back a folder its user had granted. The engine stops authorizing it
+    /// at once, without a restart; the reply says whether it held a grant to remove. Bound to
+    /// the signed app and its owner token, like the publish it undoes.
+    case hostDirectoryGrantRevoke
 
     case installKernel
     case getDefaultKernel
