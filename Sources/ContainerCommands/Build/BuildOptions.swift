@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerBuild
 import ContainerLog
 import Containerization
 import ContainerizationOCI
@@ -32,10 +33,7 @@ public struct BuildOptions: ParsableArguments {
         case tty
     }
 
-    public enum SecretType: Decodable {
-        case data(Data)
-        case file(String)
-    }
+    public typealias SecretType = Builder.Secret
 
     @Option(
         name: .shortAndLong,

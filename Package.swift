@@ -189,7 +189,13 @@ let package = Package(
         .testTarget(
             name: "ContainerBuildTests",
             dependencies: [
-                "ContainerBuild"
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "Logging", package: "swift-log"),
+                "ContainerAPIClient",
+                "ContainerBuild",
+                "ContainerPersistence",
+                "ContainerResource",
             ]
         ),
         .testTarget(
