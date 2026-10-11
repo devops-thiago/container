@@ -233,14 +233,12 @@ struct ConfigOutputTests {
                   PRICE: $$5
                 healthcheck:
                   interval: 1m30s
-                  retries: 3
                   start_interval: 500ms
                   test:
                   - CMD
                   - /bin/sh
                   - -c
                   - curl -f localhost
-                  timeout: 30s
                 image: web:1
                 ports:
                 - protocol: tcp

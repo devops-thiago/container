@@ -396,6 +396,30 @@ extension RuntimeClient {
         }
     }
 
+    /// Wait until the container's health check has recorded more than `generation` checks in
+    /// this run, or the run stops checking, and return the health then. There is no reply
+    /// timeout: cancelling the calling task abandons the wait.
+    public func waitHealth(after generation: UInt64) async throws -> HealthUpdate {
+        let request = XPCMessage(route: RuntimeRoutes.waitHealth.rawValue)
+        request.set(key: RuntimeKeys.healthGeneration.rawValue, value: generation)
+        let response: XPCMessage
+        do {
+            response = try await self.client.send(request, cancelOnTaskCancellation: true)
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            throw ContainerizationError(
+                .internalError,
+                message: "failed to wait for the health of container \(self.id)",
+                cause: error
+            )
+        }
+        guard let data = response.dataNoCopy(key: RuntimeKeys.health.rawValue) else {
+            throw ContainerizationError(.internalError, message: "no health returned for container \(self.id)")
+        }
+        return try JSONDecoder().decode(HealthUpdate.self, from: data)
+    }
+
     public func clean(id: String) async throws {
         let request = XPCMessage(route: RuntimeRoutes.clean.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)

@@ -302,9 +302,13 @@ struct ServiceSettingTests {
     func aDependencyHasToExistAndToBeCheckable() throws {
         #expect(try diagnose("depends_on:\n  - ghost").errors == ["compose.yaml:4:5: services.web.depends_on.ghost: there is no service named 'ghost'"])
         #expect(try diagnose("depends_on:\n  - web").errors == ["compose.yaml:4:5: services.web.depends_on.web: a service cannot depend on itself"])
-        let unhealthy = try diagnose("depends_on:\n  db:\n    condition: service_healthy", extra: "  db:\n    image: postgres:16\n")
-        #expect(unhealthy.errors.count == 1)
-        #expect(unhealthy.errors.first?.contains("that service has no healthcheck with a test") == true)
+        // The image's HEALTHCHECK may be the one waited for, which the engine reads.
+        let imageCheck = try diagnose("depends_on:\n  db:\n    condition: service_healthy", extra: "  db:\n    image: postgres:16\n")
+        #expect(imageCheck.errors.isEmpty)
+        let turnedOff = try diagnose(
+            "depends_on:\n  db:\n    condition: service_healthy", extra: "  db:\n    image: postgres:16\n    healthcheck:\n      disable: true\n")
+        #expect(turnedOff.errors.count == 1)
+        #expect(turnedOff.errors.first?.contains("that service turns its health check off") == true)
         #expect(
             try diagnose("depends_on:\n  db:\n    condition: service_ready", extra: "  db:\n    image: postgres:16\n").errors.first?.contains("expected service_started") == true)
     }
@@ -327,13 +331,15 @@ struct ServiceSettingTests {
                     test: ["curl", "-f", "http://localhost"], interval: 90, timeout: 10, retries: 5, startPeriod: 40, startInterval: 0.5))
         #expect(try loadService("healthcheck:\n  test: curl -f http://localhost || exit 1").healthcheck?.test == ["/bin/sh", "-c", "curl -f http://localhost || exit 1"])
         #expect(try loadService("healthcheck:\n  test: [\"CMD-SHELL\", \"pg_isready -U app\"]").healthcheck?.test == ["/bin/sh", "-c", "pg_isready -U app"])
-        #expect(try loadService("healthcheck:\n  test: [\"NONE\"]").healthcheck == nil)
-        #expect(try loadService("healthcheck:\n  disable: true\n  test: curl localhost").healthcheck == nil)
+        #expect(try loadService("healthcheck:\n  test: [\"NONE\"]").healthcheck == .off)
+        #expect(try loadService("healthcheck:\n  disable: true\n  test: curl localhost").healthcheck == .off)
         #expect(try diagnose("healthcheck:\n  test: [\"curl\", \"localhost\"]").errors.first?.contains("starts with CMD and a command") == true)
 
+        // Timing alone is the image's check run on this timing, as Docker merges them.
         let timingOnly = try diagnose("healthcheck:\n  interval: 5s")
         #expect(timingOnly.errors.isEmpty)
-        #expect(timingOnly.warnings.first?.contains("services.web.healthcheck: ignored: it has no test") == true)
+        #expect(timingOnly.warnings.isEmpty)
+        #expect(try loadService("healthcheck:\n  interval: 5s").healthcheck == ComposeHealthcheck(interval: 5))
     }
 
     @Test(arguments: [

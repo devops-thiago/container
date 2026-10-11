@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 
 extension ProjectPlan {
@@ -60,8 +61,34 @@ extension ProjectPlan {
                 let wait = dependency.condition == .healthy ? "is healthy" : "has finished without an error"
                 lines.append("# \(service.service): waits until \(dependency.service) \(wait)")
             }
-            lines.append("container run " + ShellWords.join(service.arguments))
+            // The health check goes to the engine beside the options, as `--health-*` flags
+            // cannot give a test without a shell; by hand, the flags are what there is.
+            let healthFlags = service.healthcheck?.commandLineFlags ?? []
+            lines.append("container run " + ShellWords.join(service.options + healthFlags + [service.image] + service.command))
         }
         return lines
+    }
+}
+
+extension ComposeHealthcheck {
+    /// The check as the flags of `container run`. A test given as a command to run without
+    /// a shell is written for the shell, which is the one way `--health-cmd` takes it.
+    var commandLineFlags: [String] {
+        guard !isDisabled else { return ["--no-healthcheck"] }
+        var arguments = ArgumentList()
+        if test.count == 3, Array(test.prefix(2)) == HealthCheckConfiguration.shell {
+            arguments.option("--health-cmd", test[2])
+        } else if !test.isEmpty {
+            arguments.option("--health-cmd", ShellWords.join(test))
+        }
+        func duration(_ seconds: Double) -> String {
+            HealthCheckConfiguration.format(.nanoseconds(Int64((seconds * 1_000_000_000).rounded())))
+        }
+        if let interval { arguments.option("--health-interval", duration(interval)) }
+        if let timeout { arguments.option("--health-timeout", duration(timeout)) }
+        if let retries { arguments.option("--health-retries", "\(retries)") }
+        if let startPeriod { arguments.option("--health-start-period", duration(startPeriod)) }
+        if let startInterval { arguments.option("--health-start-interval", duration(startInterval)) }
+        return arguments.words
     }
 }

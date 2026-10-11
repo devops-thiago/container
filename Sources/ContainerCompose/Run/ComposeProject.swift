@@ -94,9 +94,10 @@ public struct ComposeProject: Sendable {
         guard options.start else { return }
         try await startInOrder(plan)
         if options.wait {
-            for service in plan.services {
-                guard let check = service.healthcheck else { continue }
-                try await waitUntilHealthy(check, service: service.service, container: service.containerName)
+            // As Docker's: a service whose container has a health check, its own or its
+            // image's, is waited for until it is healthy.
+            for service in plan.services where try await engine.container(named: service.containerName)?.health != nil {
+                try await waitUntilHealthy(service: service.service, container: service.containerName)
             }
         }
     }
@@ -197,7 +198,7 @@ public struct ComposeProject: Sendable {
             }
             let request = ContainerRequest(
                 name: service.containerName, image: service.image, options: arguments, command: service.command,
-                stopSignal: service.stopSignal)
+                stopSignal: service.stopSignal, healthCheck: service.healthcheck?.engineCheck)
             let progress = hooks.progress(service.service)
             try await finishing { try await engine.createContainer(request, progress: progress) }
             hooks.event(ComposeEvent(.container, service.containerName, service: service.service, .created))
@@ -258,7 +259,7 @@ public struct ComposeProject: Sendable {
                 let key = "\(dependency.service)/\(dependency.condition.rawValue)"
                 guard !satisfied.contains(key), let target = plan.service(dependency.service) else { continue }
                 do {
-                    try await wait(for: dependency, container: target.containerName, healthcheck: target.healthcheck)
+                    try await wait(for: dependency, container: target.containerName)
                     satisfied.insert(key)
                 } catch let error as ComposeError where !dependency.required {
                     hooks.warning("\(service.service) starts without \(dependency.service), which it does not require: \(error)")
@@ -301,15 +302,12 @@ public struct ComposeProject: Sendable {
         return false
     }
 
-    private func wait(for dependency: ComposeDependency, container: String, healthcheck: ComposeHealthcheck?) async throws {
+    private func wait(for dependency: ComposeDependency, container: String) async throws {
         switch dependency.condition {
         case .started:
             break
         case .healthy:
-            guard let healthcheck else {
-                throw ComposeError("service \(dependency.service) has no health check to wait for")
-            }
-            try await waitUntilHealthy(healthcheck, service: dependency.service, container: container)
+            try await waitUntilHealthy(service: dependency.service, container: container)
         case .completedSuccessfully:
             // One that has ended already is not waited for, only looked at.
             let ended = try await engine.container(named: container).map { $0.state == .stopped && $0.exitCode != nil } ?? false
@@ -332,10 +330,10 @@ public struct ComposeProject: Sendable {
         }
     }
 
-    private func waitUntilHealthy(_ check: ComposeHealthcheck, service: String, container: String) async throws {
+    private func waitUntilHealthy(service: String, container: String) async throws {
         hooks.event(ComposeEvent(.container, container, service: service, .waiting, detail: "to be healthy"))
         do {
-            try await readiness.waitUntilHealthy(check, service: service, container: container, engine: engine)
+            try await readiness.waitUntilHealthy(service: service, container: container, engine: engine)
         } catch let error as ComposeError {
             hooks.event(ComposeEvent(.container, container, service: service, .failed, detail: "\(error)"))
             throw error
@@ -403,7 +401,7 @@ public struct ComposeProject: Sendable {
                 guard !satisfied.contains(key), let target = everyone.first(where: { $0.service == dependency.service }),
                     services.isEmpty || services.contains(dependency.service)
                 else { continue }
-                try await wait(for: dependency, container: target.id, healthcheck: target.healthcheck)
+                try await wait(for: dependency, container: target.id)
                 satisfied.insert(key)
             }
             let waiting = everyone.filter { (dependents[service] ?? []).contains($0.service ?? "") }.map(\.id)

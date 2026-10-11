@@ -80,7 +80,8 @@ public struct LiveComposeEngine: ComposeEngine {
             exitCode: snapshot.exitCode,
             labels: snapshot.configuration.labels,
             ports: ports,
-            startedAt: snapshot.startedDate)
+            startedAt: snapshot.startedDate,
+            health: snapshot.health)
     }
 
     public func containers(project: String) async throws -> [ComposeContainer] {
@@ -121,6 +122,8 @@ public struct LiveComposeEngine: ComposeEngine {
             progressUpdate: progress,
             log: log)
         if let stopSignal = request.stopSignal { configuration.stopSignal = stopSignal }
+        // The options carry no health flag, so what the configuration has is the image's.
+        configuration.healthCheck = HealthCheckConfiguration.resolve(user: request.healthCheck, image: configuration.healthCheck)
         try await ContainerClient().create(
             configuration: configuration,
             options: ContainerCreateOptions(autoRemove: false),
@@ -163,33 +166,6 @@ public struct LiveComposeEngine: ComposeEngine {
             try await ContainerClient().delete(id: id, force: true)
         } catch let error as ContainerizationError where error.isCode(.notFound) {
             // Already gone, which is what was asked for.
-        }
-    }
-
-    public func run(_ command: [String], in id: String, timeout: Double) async throws -> Int32? {
-        guard let executable = command.first else { return 0 }
-        let client = ContainerClient()
-        // The check runs as the container's own process would: same environment, same
-        // user, same working directory.
-        var configuration = try await client.get(id: id).configuration.initProcess
-        configuration.executable = executable
-        configuration.arguments = Array(command.dropFirst())
-        configuration.terminal = false
-        let process = try await client.createProcess(
-            containerId: id, processId: UUID().uuidString.lowercased(), configuration: configuration, stdio: [nil, nil, nil])
-        try await process.start()
-        return try await withThrowingTaskGroup(of: Int32?.self) { group in
-            group.addTask { try await process.wait() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(max(timeout, 0.1) * 1_000_000_000))
-                return nil
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next(), let exitCode = first else {
-                try? await process.kill(SIGKILL)
-                return nil
-            }
-            return exitCode
         }
     }
 

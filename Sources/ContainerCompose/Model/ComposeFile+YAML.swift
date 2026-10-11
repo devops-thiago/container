@@ -127,14 +127,17 @@ extension ComposeDefinition {
                 })
         }
         if let check = service.healthcheck {
-            var checkNode: [String: Any] = [
-                "test": ["CMD"] + check.test,
-                "interval": duration(check.interval),
-                "timeout": duration(check.timeout),
-                "retries": check.retries,
-            ]
-            if check.startPeriod > 0 { checkNode["start_period"] = duration(check.startPeriod) }
-            if let startInterval = check.startInterval { checkNode["start_interval"] = duration(startInterval) }
+            var checkNode: [String: Any] = [:]
+            if check.isDisabled {
+                checkNode["disable"] = true
+            } else {
+                if !check.test.isEmpty { checkNode["test"] = ["CMD"] + check.test }
+                if let interval = check.interval { checkNode["interval"] = duration(interval) }
+                if let timeout = check.timeout { checkNode["timeout"] = duration(timeout) }
+                if let retries = check.retries { checkNode["retries"] = retries }
+                if let startPeriod = check.startPeriod { checkNode["start_period"] = duration(startPeriod) }
+                if let startInterval = check.startInterval { checkNode["start_interval"] = duration(startInterval) }
+            }
             node["healthcheck"] = checkNode
         }
         node["restart"] = service.restart

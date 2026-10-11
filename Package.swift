@@ -554,7 +554,13 @@ let package = Package(
         ),
         .testTarget(
             name: "ContainerRuntimeLinuxServerTests",
-            dependencies: ["ContainerRuntimeLinuxServer", "ContainerLog"]
+            dependencies: [
+                "ContainerRuntimeLinuxServer",
+                "ContainerLog",
+                "ContainerResource",
+                "ContainerRuntimeClient",
+                .product(name: "Containerization", package: "containerization"),
+            ]
         ),
         .target(
             name: "ContainerRuntimeClient",

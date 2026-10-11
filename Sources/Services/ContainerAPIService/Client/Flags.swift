@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
+import ContainerResource
 import ContainerizationError
 import Foundation
 
@@ -162,6 +163,130 @@ public struct Flags {
         public var scheme: String = "https"
     }
 
+    /// Docker's health-check flags. What they give is laid over the image's `HEALTHCHECK`
+    /// field by field when the container is created; a duration of 0, or no flag, keeps the
+    /// image's value, and one the image does not give either is the default when the check
+    /// runs.
+    public struct Health: ParsableArguments {
+        public init() {}
+
+        /// Every field given, as a value built in code must be: one made with `init()` is
+        /// only a definition for the parser, and reading it traps.
+        public init(
+            command: String?,
+            interval: String?,
+            timeout: String?,
+            retries: Int?,
+            startPeriod: String?,
+            startInterval: String?,
+            disabled: Bool
+        ) {
+            self.command = command
+            self.interval = interval
+            self.timeout = timeout
+            self.retries = retries
+            self.startPeriod = startPeriod
+            self.startInterval = startInterval
+            self.disabled = disabled
+        }
+
+        /// No health flag given: the image's check stands.
+        public static var none: Health {
+            Health(command: nil, interval: nil, timeout: nil, retries: nil, startPeriod: nil, startInterval: nil, disabled: false)
+        }
+
+        @Option(
+            name: .customLong("health-cmd"),
+            help: .init("Command the container's shell runs to check its health; exit status 0 is healthy", valueName: "command")
+        )
+        public var command: String? = nil
+
+        @Option(
+            name: .customLong("health-interval"),
+            help: .init("Time between health checks (ms|s|m|h) (default 30s)", valueName: "duration")
+        )
+        public var interval: String? = nil
+
+        @Option(
+            name: .customLong("health-timeout"),
+            help: .init("Longest one health check may run before it is killed and counts as failed (ms|s|m|h) (default 30s)", valueName: "duration")
+        )
+        public var timeout: String? = nil
+
+        @Option(
+            name: .customLong("health-retries"),
+            help: .init("Failed health checks in a row that make the container unhealthy (default 3)", valueName: "count")
+        )
+        public var retries: Int? = nil
+
+        @Option(
+            name: .customLong("health-start-period"),
+            help: .init(
+                "Time the container has to start before failed health checks count; a check that passes in it ends it (ms|s|m|h) (default 0s)",
+                valueName: "duration")
+        )
+        public var startPeriod: String? = nil
+
+        @Option(
+            name: .customLong("health-start-interval"),
+            help: .init("Time between health checks during the start period (ms|s|m|h) (default 5s)", valueName: "duration")
+        )
+        public var startInterval: String? = nil
+
+        @Flag(name: .customLong("no-healthcheck"), help: "Disable any health check the image gives")
+        public var disabled = false
+
+        public func validate() throws {
+            _ = try configuration()
+        }
+
+        /// What the flags ask for, before the image's check is laid under it, in Docker's
+        /// shape: nil when no flag was given, `NONE` for `--no-healthcheck`.
+        public func configuration() throws -> HealthCheckConfiguration? {
+            let interval = try Self.nanoseconds(self.interval, flag: "--health-interval")
+            let timeout = try Self.nanoseconds(self.timeout, flag: "--health-timeout")
+            let startPeriod = try Self.nanoseconds(self.startPeriod, flag: "--health-start-period")
+            let startInterval = try Self.nanoseconds(self.startInterval, flag: "--health-start-interval")
+            let retries = self.retries ?? 0
+            let given = (command.map { !$0.isEmpty } ?? false) || interval != 0 || timeout != 0 || startPeriod != 0 || startInterval != 0 || retries != 0
+            if disabled {
+                guard !given else {
+                    throw ContainerizationError(.invalidArgument, message: "--no-healthcheck conflicts with --health-* options")
+                }
+                return .disabled
+            }
+            guard given else { return nil }
+            guard retries >= 0 else {
+                throw ContainerizationError(.invalidArgument, message: "--health-retries cannot be negative")
+            }
+            let check = HealthCheckConfiguration(
+                test: command.flatMap { $0.isEmpty ? nil : [HealthCheckConfiguration.shellTest, $0] } ?? [],
+                interval: interval,
+                timeout: timeout,
+                startPeriod: startPeriod,
+                startInterval: startInterval,
+                retries: retries)
+            do {
+                try check.validate()
+            } catch let error as HealthCheckError {
+                throw ContainerizationError(.invalidArgument, message: error.description)
+            }
+            return check
+        }
+
+        private static func nanoseconds(_ text: String?, flag: String) throws -> Int64 {
+            guard let text else { return 0 }
+            guard let duration = HealthCheckConfiguration.parseDuration(text) else {
+                throw ContainerizationError(
+                    .invalidArgument, message: "invalid duration '\(text)' for \(flag): expected a number with a unit, such as 30s, 1m30s or 500ms")
+            }
+            guard duration >= .zero else {
+                throw ContainerizationError(.invalidArgument, message: "\(flag) cannot be negative")
+            }
+            return HealthCheckConfiguration.nanoseconds(duration)
+        }
+    }
+
     public struct Management: ParsableArguments {
         public init() {}
 
@@ -201,7 +326,8 @@ public struct Flags {
             useInit: Bool,
             virtualization: Bool,
             volumes: [String],
-            networkAliases: [String] = []
+            networkAliases: [String] = [],
+            health: Flags.Health = .none
         ) {
             self.addHosts = addHosts
             self.arch = arch
@@ -239,6 +365,7 @@ public struct Flags {
             self.useInit = useInit
             self.virtualization = virtualization
             self.volumes = volumes
+            self.health = health
         }
 
         @Option(
@@ -273,6 +400,9 @@ public struct Flags {
 
         @OptionGroup
         public var dns: Flags.DNS
+
+        @OptionGroup
+        public var health: Flags.Health
 
         @Option(
             name: .long,
@@ -451,8 +581,6 @@ public struct Flags {
         public var privileged = false
         @Flag(name: .customLong("oom-kill-disable"), help: .hidden)
         public var oomKillDisable = false
-        @Flag(name: .customLong("no-healthcheck"), help: .hidden)
-        public var noHealthcheck = false
         @Flag(name: [.customShort("P"), .customLong("publish-all")], help: .hidden)
         public var publishAll = false
         @Option(name: .customLong("pid"), help: .hidden)
@@ -479,18 +607,6 @@ public struct Flags {
         public var stopSignal: String?
         @Option(name: .customLong("stop-timeout"), help: .hidden)
         public var stopTimeout: String?
-        @Option(name: .customLong("health-cmd"), help: .hidden)
-        public var healthCmd: String?
-        @Option(name: .customLong("health-interval"), help: .hidden)
-        public var healthInterval: String?
-        @Option(name: .customLong("health-retries"), help: .hidden)
-        public var healthRetries: String?
-        @Option(name: .customLong("health-start-period"), help: .hidden)
-        public var healthStartPeriod: String?
-        @Option(name: .customLong("health-start-interval"), help: .hidden)
-        public var healthStartInterval: String?
-        @Option(name: .customLong("health-timeout"), help: .hidden)
-        public var healthTimeout: String?
         @Option(name: .customLong("ip"), help: .hidden)
         public var ip: String?
         @Option(name: .customLong("ip6"), help: .hidden)
@@ -565,7 +681,6 @@ public struct Flags {
             var names: [String] = []
             if privileged { names.append("--privileged") }
             if oomKillDisable { names.append("--oom-kill-disable") }
-            if noHealthcheck { names.append("--no-healthcheck") }
             if publishAll { names.append("--publish-all") }
             if pid != nil { names.append("--pid") }
             if ipc != nil { names.append("--ipc") }
@@ -579,12 +694,6 @@ public struct Flags {
             if isolation != nil { names.append("--isolation") }
             if stopSignal != nil { names.append("--stop-signal") }
             if stopTimeout != nil { names.append("--stop-timeout") }
-            if healthCmd != nil { names.append("--health-cmd") }
-            if healthInterval != nil { names.append("--health-interval") }
-            if healthRetries != nil { names.append("--health-retries") }
-            if healthStartPeriod != nil { names.append("--health-start-period") }
-            if healthStartInterval != nil { names.append("--health-start-interval") }
-            if healthTimeout != nil { names.append("--health-timeout") }
             if ip != nil { names.append("--ip") }
             if ip6 != nil { names.append("--ip6") }
             if macAddress != nil { names.append("--mac-address") }

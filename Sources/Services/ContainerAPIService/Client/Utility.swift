@@ -296,6 +296,10 @@ public struct Utility {
         config.maskedPaths = try Parser.maskedPaths(management.maskedPaths)
         config.readonlyPaths = try Parser.readonlyPaths(management.readonlyPaths)
         config.stopSignal = imageConfig?.stopSignal
+        // Docker's merge at create: the flags over the image's HEALTHCHECK, field by field.
+        let userHealthCheck = try management.health.configuration()
+        let imageHealthCheck = userHealthCheck?.disables == true ? nil : try await img.healthCheck(for: requestedPlatform)
+        config.healthCheck = HealthCheckConfiguration.resolve(user: userHealthCheck, image: imageHealthCheck)
 
         config.runtimeHandler = management.runtime ?? "\(runtimePrefix)\(requestedPlatform.os)"
 

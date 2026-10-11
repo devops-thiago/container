@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 import TerminalProgress
 import Testing
@@ -31,8 +32,14 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     private var created: [String: [String]] = [:]
     private var nextPort = 49152
 
-    /// The exit codes a container's health check gives, one per run; the last one repeats.
-    var probes: [String: [Int32?]] = [:]
+    /// The health the engine reports for a running container with a health check, one per
+    /// look; the last one repeats. A container with a check and nothing here is healthy.
+    var health: [String: [ContainerHealth]] = [:]
+    /// The `HEALTHCHECK` an image has.
+    var imageChecks: [String: HealthCheckConfiguration] = [:]
+    /// The check each container was made with: the request's over its image's.
+    private var checks: [String: HealthCheckConfiguration] = [:]
+    private var healthLooks: [String: Int] = [:]
     /// Containers whose process ends at once when started, and how.
     var exits: [String: Int32] = [:]
     /// Containers whose process ends after it has been looked at this many times.
@@ -52,6 +59,9 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
     var calls: [String] { locked { log } }
     func clearCalls() { locked { log.removeAll() } }
     func arguments(of container: String) -> [String] { locked { created[container] ?? [] } }
+    func check(of container: String) -> HealthCheckConfiguration? { locked { checks[container] } }
+    /// How many times the health of a running container was read.
+    func looks(at container: String) -> Int { locked { healthLooks[container] ?? 0 } }
     func state(of container: String) -> ComposeContainer.State? { locked { stored[container]?.state } }
     var containerNames: [String] { locked { stored.keys.sorted() } }
     var networkNames: [String] { locked { projectNetworks.keys.sorted() } }
@@ -77,6 +87,13 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
                 } else {
                     exitsLater[name] = (later.looks - 1, later.code)
                 }
+            }
+            if let container = stored[name], container.state == .running, checks[name] != nil {
+                var script = health[name] ?? [ContainerHealth(status: .healthy)]
+                let next = script.count > 1 ? script.removeFirst() : script[0]
+                health[name] = script
+                healthLooks[name, default: 0] += 1
+                stored[name] = container.with(health: next)
             }
             return stored[name]
         }
@@ -146,6 +163,7 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
         locked {
             log.append("create \(request.name)")
             created[request.name] = request.arguments
+            checks[request.name] = HealthCheckConfiguration.resolve(user: request.healthCheck, image: imageChecks[request.image])
             // Making a container fetches its image when it is not here.
             localImages.insert(request.image)
             stored[request.name] = ComposeContainer(
@@ -162,7 +180,7 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
             let exit = exits[id]
             stored[id] = ComposeContainer(
                 id: id, image: container.image, imageDigest: container.imageDigest, state: exit == nil ? .running : .stopped, exitCode: exit,
-                labels: container.labels, ports: container.ports)
+                labels: container.labels, ports: container.ports, health: checks[id] == nil ? nil : ContainerHealth(status: .starting))
         }
     }
 
@@ -183,21 +201,19 @@ final class FakeEngine: ComposeEngine, @unchecked Sendable {
         }
     }
 
-    func run(_ command: [String], in id: String, timeout: Double) async throws -> Int32? {
-        locked {
-            log.append("probe \(id)")
-            guard var results = probes[id], !results.isEmpty else { return 0 }
-            let result = results.count > 1 ? results.removeFirst() : results[0]
-            probes[id] = results
-            return result
-        }
-    }
-
     func freeHostPort() async throws -> Int {
         locked {
             defer { nextPort += 1 }
             return nextPort
         }
+    }
+}
+
+extension ComposeContainer {
+    func with(health: ContainerHealth?) -> ComposeContainer {
+        ComposeContainer(
+            id: id, image: image, imageDigest: imageDigest, state: state, exitCode: exitCode, labels: labels, ports: ports, startedAt: startedAt,
+            health: health)
     }
 }
 
@@ -243,7 +259,7 @@ struct ComposeRun {
     func project(_ name: String = "shop", building: Bool = false) -> ComposeProject {
         var project = ComposeProject(name: name, engine: engine, hooks: recorder.hooks(building: building))
         let clock = self.clock
-        project.readiness = Readiness(now: { clock.now }, sleep: { clock.advance($0) }, pollInterval: 1)
+        project.readiness = Readiness(sleep: { clock.advance($0) }, pollInterval: 1)
         project.pathExists = { _ in true }
         return project
     }

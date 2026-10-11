@@ -61,4 +61,9 @@ public enum RuntimeKeys: String {
 
     /// The running containers a guest shares a network with, for its hosts file.
     case peers
+
+    /// The point in the health check's history a wait for health is past.
+    case healthGeneration
+    /// The container's health, as a `HealthUpdate`.
+    case health
 }
