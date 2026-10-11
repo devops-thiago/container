@@ -24,9 +24,16 @@ import NIO
 /// Relays builder stdout/stderr from the shim to the client terminal.
 /// Build output (layer download progress, `RUN` command output, etc.) flows
 /// through this handler and is written directly to the configured file handle.
+///
+/// The handle can close under a build that is still running: an app that hosts the build
+/// closes its pty once the build throws, while a pipeline task may still be relaying output.
+/// The first failed write marks the output as gone and later output is dropped; it never
+/// fails the build.
 actor BuildStdio: BuildPipelineHandler {
     public let quiet: Bool
     public let handle: FileHandle
+    /// Set once a write fails: nobody is reading the output any more.
+    private(set) var outputGone = false
 
     init(quiet: Bool = false, output: FileHandle = FileHandle.standardError) throws {
         self.quiet = quiet
@@ -55,7 +62,16 @@ actor BuildStdio: BuildPipelineHandler {
             response.command.command = cmdString
             sender.yield(response)
         }
-        handle.write(io.data)
+        guard !outputGone else {
+            return
+        }
+        // `write(_:)` raises an Objective-C exception on a closed descriptor, which nothing
+        // in Swift can catch; `write(contentsOf:)` throws instead.
+        do {
+            try handle.write(contentsOf: io.data)
+        } catch {
+            outputGone = true
+        }
     }
 }
 

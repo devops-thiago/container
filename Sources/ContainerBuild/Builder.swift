@@ -90,11 +90,48 @@ public struct Builder: Sendable {
         return try await self.client.info(InfoRequest(), options: opts)
     }
 
+    /// Close the connection to BuildKit and release its event loops.
+    ///
+    /// A `Builder` serves one build: ``build(_:)`` calls this when it ends, however it ends.
+    /// Call it yourself for a builder from ``connect(_:vsockPort:timeout:containerSystemConfig:log:progressUpdate:)``
+    /// that will not build. Calling it again does nothing.
+    public func shutdown() async {
+        await closeConnection()
+        try? await group.shutdownGracefully()
+    }
+
+    /// Stop the gRPC client and wait for its connection to close, leaving the event loop group
+    /// to the caller. The connection does its last work on the group's loops, so the group
+    /// must outlive it.
+    ///
+    /// Cancelling the connection task closes the channel even when the task has not started
+    /// yet. A graceful shutdown first would stop a client that has not started without ever
+    /// closing its channel, leaving the group's shutdown to tear it down underneath.
+    func closeConnection() async {
+        clientTask.cancel()
+        _ = await clientTask.result
+    }
+
     // TODO
     // - Symlinks in build context dir
     // - cache-to, cache-from
     // - output (other than the default OCI image output, e.g., local, tar, Docker)
+    /// Run one build, then shut the builder down (see ``shutdown()``), whether the build
+    /// succeeds, fails or is cancelled.
     public func build(_ config: BuildConfig) async throws {
+        do {
+            try await performBuild(config)
+        } catch Error.buildComplete {
+            await shutdown()
+            return
+        } catch {
+            await shutdown()
+            throw error
+        }
+        await shutdown()
+    }
+
+    private func performBuild(_ config: BuildConfig) async throws {
         var continuation: AsyncStream<ClientStream>.Continuation?
         let reqStream = AsyncStream<ClientStream> { (cont: AsyncStream<ClientStream>.Continuation) in
             continuation = cont
@@ -107,54 +144,74 @@ public struct Builder: Sendable {
             continuation.finish()
         }
 
-        if let terminal = config.terminal {
-            _ = Task {
-                let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
-                let setWinch = { (rows: UInt16, cols: UInt16) in
-                    var winch = ClientStream()
-                    winch.command = .init()
-                    if let cmdString = try TerminalCommand(rows: rows, cols: cols).json() {
-                        winch.command.command = cmdString
-                        continuation.yield(winch)
-                    }
-                }
-                let size = try terminal.size
-                var width = size.width
-                var height = size.height
-                try setWinch(height, width)
-
-                for await _ in winchHandler.signals {
-                    let size = try terminal.size
-                    let cols = size.width
-                    let rows = size.height
-                    if cols != width || rows != height {
-                        width = cols
-                        height = rows
-                        try setWinch(height, width)
-                    }
-                }
-            }
+        let winchTask = config.terminal.map { Self.watchWindowSize(of: $0, sender: continuation) }
+        defer {
+            winchTask?.cancel()
         }
 
         let pipeline = try await BuildPipeline(config)
-        do {
-            try await self.client.performBuild(
-                metadata: try Self.buildMetadata(config),
-                options: .defaults,
-                requestProducer: { writer in
-                    for await message in reqStream {
-                        try await writer.write(message)
-                    }
-                },
-                onResponse: { response in
-                    try await pipeline.run(sender: continuation, receiver: response.messages)
+        try await self.client.performBuild(
+            metadata: try Self.buildMetadata(config),
+            options: .defaults,
+            requestProducer: { writer in
+                for await message in reqStream {
+                    try await writer.write(message)
                 }
-            )
-        } catch Error.buildComplete {
-            self.grpcClient.beginGracefulShutdown()
-            self.clientTask.cancel()
-            try await group.shutdownGracefully()
-            return
+            },
+            onResponse: { response in
+                try await pipeline.run(sender: continuation, receiver: response.messages)
+            }
+        )
+    }
+
+    /// Send `terminal`'s size to BuildKit now and again on each `SIGWINCH` that changes it,
+    /// until the returned task is cancelled.
+    static func watchWindowSize(
+        of terminal: Terminal,
+        sender: AsyncStream<ClientStream>.Continuation
+    ) -> Task<Void, any Swift.Error> {
+        Task {
+            let winchHandler = AsyncSignalHandler.create(notify: [SIGWINCH])
+            // Take the stream before anything can throw: the handler's signal sources are
+            // released when its last stream ends, and only then.
+            let signals = winchHandler.signals
+            defer {
+                winchHandler.cancel()
+            }
+            try await relayWindowSize(signals: signals, size: { try terminal.size }, sender: sender)
+        }
+    }
+
+    /// The loop behind ``watchWindowSize(of:sender:)``: send the size from `size` once, then
+    /// again each time a signal arrives and the size has changed. Returns when `signals` ends
+    /// or the task is cancelled.
+    static func relayWindowSize(
+        signals: AsyncStream<Int32>,
+        size: () throws -> Terminal.Size,
+        sender: AsyncStream<ClientStream>.Continuation
+    ) async throws {
+        let setWinch = { (rows: UInt16, cols: UInt16) in
+            var winch = ClientStream()
+            winch.command = .init()
+            if let cmdString = try TerminalCommand(rows: rows, cols: cols).json() {
+                winch.command.command = cmdString
+                sender.yield(winch)
+            }
+        }
+        let initial = try size()
+        var width = initial.width
+        var height = initial.height
+        try setWinch(height, width)
+
+        for await _ in signals {
+            let current = try size()
+            let cols = current.width
+            let rows = current.height
+            if cols != width || rows != height {
+                width = cols
+                height = rows
+                try setWinch(height, width)
+            }
         }
     }
 
