@@ -37,6 +37,8 @@ public enum RuntimeRoutes: String {
     case dial = "com.apple.container.runtime/dial"
     /// Rewrite the running guest's `/etc/hosts` with the peers it shares a network with now.
     case refreshHosts = "com.apple.container.runtime/refreshHosts"
+    /// Wait for the container's health to change past a given point, and return it.
+    case waitHealth = "com.apple.container.runtime/waitHealth"
 
     // MARK: - Process management
 

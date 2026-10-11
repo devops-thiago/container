@@ -492,6 +492,16 @@ struct CommandLineTests {
     }
 
     @Test
+    func aHealthCheckIsWrittenAsTheFlagsThatGiveIt() {
+        #expect(
+            ComposeHealthcheck(test: ["/bin/sh", "-c", "pg_isready -U app"], interval: 90, retries: 5, startPeriod: 0.5).commandLineFlags
+                == ["--health-cmd", "pg_isready -U app", "--health-interval", "1m30s", "--health-retries", "5", "--health-start-period", "500ms"])
+        #expect(ComposeHealthcheck(test: ["curl", "-f", "http://localhost/?probe=1"]).commandLineFlags == ["--health-cmd", "curl -f 'http://localhost/?probe=1'"])
+        #expect(ComposeHealthcheck(timeout: 3).commandLineFlags == ["--health-timeout", "3s"])
+        #expect(ComposeHealthcheck.off.commandLineFlags == ["--no-healthcheck"])
+    }
+
+    @Test
     func aBotAndItsDatabase() throws {
         #expect(try commands("bot", environment: ["INHERITED": "from-shell", "DB_PASSWORD": "hunter2"]) == expected("bot"))
     }

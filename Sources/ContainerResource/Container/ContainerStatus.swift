@@ -36,6 +36,8 @@ public struct ContainerStatus: Codable, Sendable {
     public let restartCount: Int
     /// Why the engine's last attempt to start the container again failed, if it did.
     public let restartError: String?
+    /// The container's health, when it has a health check and has been started with it.
+    public let health: ContainerHealth?
 
     public init(
         state: RuntimeStatus,
@@ -44,7 +46,8 @@ public struct ContainerStatus: Codable, Sendable {
         exitCode: Int32? = nil,
         exitedAt: Date? = nil,
         restartCount: Int = 0,
-        restartError: String? = nil
+        restartError: String? = nil,
+        health: ContainerHealth? = nil
     ) {
         self.state = state
         self.networks = networks
@@ -53,6 +56,7 @@ public struct ContainerStatus: Codable, Sendable {
         self.exitedAt = exitedAt
         self.restartCount = restartCount
         self.restartError = restartError
+        self.health = health
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -63,6 +67,7 @@ public struct ContainerStatus: Codable, Sendable {
         case exitedAt
         case restartCount
         case restartError
+        case health
     }
 
     public init(from decoder: any Decoder) throws {
@@ -74,5 +79,6 @@ public struct ContainerStatus: Codable, Sendable {
         exitedAt = try container.decodeIfPresent(Date.self, forKey: .exitedAt)
         restartCount = try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
         restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
+        health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
     }
 }

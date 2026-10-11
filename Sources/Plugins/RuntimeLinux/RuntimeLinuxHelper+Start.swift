@@ -117,6 +117,7 @@ extension RuntimeLinuxHelper {
                         RuntimeRoutes.snapshotDisk.rawValue: XPCServer.route(server.snapshotDisk),
                         RuntimeRoutes.clean.rawValue: XPCServer.route(server.clean),
                         RuntimeRoutes.refreshHosts.rawValue: XPCServer.route(server.refreshHosts),
+                        RuntimeRoutes.waitHealth.rawValue: XPCServer.route(server.waitHealth),
                     ],
                     log: log
                 )

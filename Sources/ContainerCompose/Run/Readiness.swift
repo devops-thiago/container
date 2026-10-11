@@ -14,26 +14,23 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 
 /// Waiting for a service to be what another one needs it to be: healthy, or finished.
 struct Readiness: Sendable {
-    /// Seconds since a fixed moment.
-    var now: @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime }
     var sleep: @Sendable (Double) async throws -> Void = { try await Task.sleep(nanoseconds: UInt64(max($0, 0) * 1_000_000_000)) }
     /// The longest a waiting loop goes without looking again.
     var pollInterval: Double = 1
 
-    /// Run the service's health check until it passes.
+    /// Wait until the engine reports the service's container healthy.
     ///
-    /// The check is given as long as the service's own timing gives it: its start period,
-    /// then `retries` intervals. It is tried more often than every interval, because the
-    /// point of waiting is to go on as soon as the service is ready, and the first pass
-    /// ends the wait. Throws when the time is up, or when the container stops.
-    func waitUntilHealthy(_ check: ComposeHealthcheck, service: String, container: String, engine: any ComposeEngine) async throws {
-        let started = now()
-        let allowance = check.startPeriod + Double(max(check.retries, 1)) * check.interval
-        var lastFailure = "it has not been run"
+    /// The engine runs the check, on the schedule the check gives, and keeps the result; this
+    /// only looks at it, every `pollInterval`. It ends as Docker's compose ends it: healthy
+    /// goes on, unhealthy fails, and so does a container that stops, goes away, or turns out
+    /// to have no health check at all. While the check is starting, it waits: the check's own
+    /// retries and start period decide how long that lasts.
+    func waitUntilHealthy(service: String, container: String, engine: any ComposeEngine) async throws {
         while true {
             try Task.checkCancellation()
             guard let current = try await engine.container(named: container) else {
@@ -44,28 +41,31 @@ struct Readiness: Sendable {
                     "service \(service) cannot become healthy: its container \(container) has stopped"
                         + (current.exitCode.map { " with exit code \($0)" } ?? ""))
             }
-            do {
-                switch try await engine.run(check.test, in: container, timeout: check.timeout) {
-                case 0:
-                    return
-                case .some(let code):
-                    lastFailure = "it ended with exit code \(code)"
-                case nil:
-                    lastFailure = "it did not finish within \(Self.seconds(check.timeout))"
+            switch current.health?.status {
+            case .healthy:
+                return
+            case .unhealthy:
+                throw ComposeError("service \(service) is unhealthy: " + Self.describe(current.health))
+            case .starting:
+                break
+            case nil:
+                // A container being started or restarted has not been given its check yet.
+                guard current.state != .running else {
+                    throw ComposeError(
+                        "service \(service) has no health check to wait for: neither its healthcheck nor its image's HEALTHCHECK gives one")
                 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastFailure = "it could not be run: \(error)"
             }
-            let elapsed = now() - started
-            guard elapsed < allowance else {
-                throw ComposeError(
-                    "service \(service) is not healthy after \(Self.seconds(elapsed)): its check (\(ShellWords.join(check.test))) keeps failing; the last time, \(lastFailure)"
-                )
-            }
-            try await sleep(min(pollInterval, max(check.interval, 0.1), max(allowance - elapsed, 0.1)))
+            try await sleep(pollInterval)
         }
+    }
+
+    /// The failures that made a container unhealthy, in words.
+    static func describe(_ health: ContainerHealth?) -> String {
+        guard let health, let last = health.log.last else { return "its health check failed" }
+        let times = health.failingStreak == 1 ? "once" : "\(health.failingStreak) times in a row"
+        let ended = last.exitCode == -1 ? "it did not run to completion" : "it ended with exit code \(last.exitCode)"
+        let output = last.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "its health check failed \(times); the last time, \(ended)" + (output.isEmpty ? "" : ": \(output)")
     }
 
     /// Wait for the service's container to end, and return how it ended.
@@ -83,11 +83,5 @@ struct Readiness: Sendable {
             }
             try await sleep(min(pollInterval, 0.5))
         }
-    }
-
-    static func seconds(_ interval: Double) -> String {
-        let rounded = (interval * 10).rounded() / 10
-        let text = rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded)
-        return "\(text) second\(rounded == 1 ? "" : "s")"
     }
 }

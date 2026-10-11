@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 import Testing
 
@@ -63,7 +64,6 @@ struct UpTests {
                 "volume create shop_data",
                 "create shop-cache-1", "create shop-db-1", "create shop-api-1", "create shop-web-1",
                 "start shop-cache-1", "start shop-db-1",
-                "probe shop-db-1",
                 "start shop-api-1", "start shop-web-1",
             ], "every container exists, and so has its address, before the first one starts")
         #expect(
@@ -90,7 +90,7 @@ struct UpTests {
         try await run.project().up(plan)
         run.engine.clearCalls()
         try await run.project().up(plan)
-        #expect(run.engine.calls == ["probe shop-db-1"], "nothing is made or started again; the dependency is still checked")
+        #expect(run.engine.calls.isEmpty, "nothing is made or started again")
         #expect(
             run.recorder.events.suffix(6) == [
                 "container shop-cache-1 running", "container shop-db-1 running",
@@ -107,7 +107,7 @@ struct UpTests {
         try await run.project().stop()
         run.engine.clearCalls()
         try await run.project().up(plan)
-        #expect(run.engine.calls == ["start shop-cache-1", "start shop-db-1", "probe shop-db-1", "start shop-api-1", "start shop-web-1"])
+        #expect(run.engine.calls == ["start shop-cache-1", "start shop-db-1", "start shop-api-1", "start shop-web-1"])
     }
 
     @Test
@@ -117,7 +117,7 @@ struct UpTests {
         run.engine.clearCalls()
         let changed = try run.plan(Self.chain.replacingOccurrences(of: "image: api:1", with: "image: api:2"))
         try await run.project().up(changed)
-        #expect(run.engine.calls == ["stop shop-api-1", "remove shop-api-1", "create shop-api-1", "probe shop-db-1", "start shop-api-1"])
+        #expect(run.engine.calls == ["stop shop-api-1", "remove shop-api-1", "create shop-api-1", "start shop-api-1"])
         #expect(run.recorder.events.contains("container shop-api-1 recreating"))
         #expect(run.engine.arguments(of: "shop-api-1").contains("api:2"))
     }
@@ -153,38 +153,81 @@ struct UpTests {
     }
 
     @Test
+    func theServicesHealthcheckGoesToTheEngine() async throws {
+        let run = ComposeRun()
+        try await run.project().up(try run.plan(Self.chain))
+        #expect(
+            run.engine.check(of: "shop-db-1")
+                == HealthCheckConfiguration(test: ["CMD", "/bin/sh", "-c", "pg_isready"], interval: 5_000_000_000, retries: 3))
+        #expect(run.engine.check(of: "shop-api-1") == nil)
+        #expect(!run.engine.arguments(of: "shop-db-1").contains { $0.hasPrefix("--health") }, "not as flags: they have no exec form")
+    }
+
+    @Test
     func aDependentWaitsForItsDependencyToBeHealthy() async throws {
         let run = ComposeRun()
-        run.engine.probes["shop-db-1"] = [1, nil, 0]
+        run.engine.health["shop-db-1"] = [ContainerHealth(status: .starting), ContainerHealth(status: .starting), ContainerHealth(status: .healthy)]
         try await run.project().up(try run.plan(Self.chain))
-        let calls = run.engine.calls
-        let firstProbe = try #require(calls.firstIndex(of: "probe shop-db-1"))
-        let apiStart = try #require(calls.firstIndex(of: "start shop-api-1"))
-        #expect(calls.filter { $0 == "probe shop-db-1" }.count == 3)
-        #expect(firstProbe < apiStart)
-        #expect(run.clock.now == 2, "it looked again every second, not every interval")
+        let events = run.recorder.events
+        let healthy = try #require(events.firstIndex(of: "container shop-db-1 healthy"))
+        let apiStart = try #require(events.firstIndex(of: "container shop-api-1 starting"))
+        #expect(healthy < apiStart)
+        #expect(run.engine.looks(at: "shop-db-1") == 3)
+        #expect(run.clock.now == 2, "it read the engine's health every second until it was healthy")
     }
 
     @Test
-    func aDependencyThatNeverGetsHealthyStopsTheRun() async throws {
+    func aDependencyThatTurnsUnhealthyStopsTheRun() async throws {
         let run = ComposeRun()
-        run.engine.probes["shop-db-1"] = [7]
+        let failed = HealthCheckResult(start: Date(), end: Date(), exitCode: 7, output: "no response\n")
+        run.engine.health["shop-db-1"] = [
+            ContainerHealth(status: .starting), ContainerHealth(status: .unhealthy, failingStreak: 3, log: [failed, failed, failed]),
+        ]
         let message = await failure { try await run.project().up(try run.plan(Self.chain)) }
-        #expect(
-            message
-                == "service db is not healthy after 15 seconds: its check (/bin/sh -c pg_isready) keeps failing; the last time, it ended with exit code 7"
-        )
+        #expect(message == "service db is unhealthy: its health check failed 3 times in a row; the last time, it ended with exit code 7: no response")
         #expect(!run.engine.calls.contains("start shop-api-1"))
         #expect(!run.engine.calls.contains("start shop-web-1"))
-        #expect(run.recorder.events.last?.hasPrefix("container shop-db-1 failed (service db is not healthy after 15 seconds") == true)
+        #expect(run.recorder.events.last?.hasPrefix("container shop-db-1 failed (service db is unhealthy") == true)
     }
 
     @Test
-    func aCheckThatHangsIsAFailedCheck() async throws {
+    func aCheckThatTimesOutIsAFailedCheck() async throws {
         let run = ComposeRun()
-        run.engine.probes["shop-db-1"] = [nil]
+        let killed = HealthCheckResult(start: Date(), end: Date(), exitCode: -1, output: "Health check exceeded timeout (30s)")
+        run.engine.health["shop-db-1"] = [ContainerHealth(status: .unhealthy, failingStreak: 1, log: [killed])]
         let message = await failure { try await run.project().up(try run.plan(Self.chain)) }
-        #expect(message.hasSuffix("the last time, it did not finish within 30 seconds"))
+        #expect(message.hasSuffix("failed once; the last time, it did not run to completion: Health check exceeded timeout (30s)"))
+    }
+
+    @Test
+    func theImagesHealthcheckIsWaitedForToo() async throws {
+        let run = ComposeRun()
+        run.engine.imageChecks["postgres:16"] = HealthCheckConfiguration(test: ["CMD-SHELL", "pg_isready"])
+        let plan = try run.plan(Self.chain.replacingOccurrences(of: "    healthcheck:\n      test: pg_isready\n      interval: 5s\n      retries: 3\n", with: ""))
+        try await run.project().up(plan)
+        #expect(run.engine.check(of: "shop-db-1")?.test == ["CMD-SHELL", "pg_isready"])
+        #expect(run.recorder.events.contains("container shop-db-1 healthy"))
+    }
+
+    @Test
+    func aDependencyWithNoCheckAnywhereCannotBeWaitedFor() async throws {
+        let run = ComposeRun()
+        let plan = try run.plan(Self.chain.replacingOccurrences(of: "    healthcheck:\n      test: pg_isready\n      interval: 5s\n      retries: 3\n", with: ""))
+        let message = await failure { try await run.project().up(plan) }
+        #expect(message == "service db has no health check to wait for: neither its healthcheck nor its image's HEALTHCHECK gives one")
+        #expect(!run.engine.calls.contains("start shop-api-1"))
+    }
+
+    @Test
+    func disablingTheCheckTurnsTheImagesOff() async throws {
+        let run = ComposeRun()
+        run.engine.imageChecks["web:1"] = HealthCheckConfiguration(test: ["CMD", "/healthz"])
+        try await run.project().up(try run.plan("services:\n  web:\n    image: web:1\n    healthcheck:\n      disable: true\n"))
+        #expect(run.engine.check(of: "shop-web-1") == nil)
+        let timing = ComposeRun()
+        timing.engine.imageChecks["web:1"] = HealthCheckConfiguration(test: ["CMD", "/healthz"], retries: 5)
+        try await timing.project().up(try timing.plan("services:\n  web:\n    image: web:1\n    healthcheck:\n      interval: 2s\n"))
+        #expect(timing.engine.check(of: "shop-web-1") == HealthCheckConfiguration(test: ["CMD", "/healthz"], interval: 2_000_000_000, retries: 5))
     }
 
     @Test
@@ -292,13 +335,14 @@ struct UpTests {
     @Test
     func waitHoldsUntilEveryCheckPasses() async throws {
         let run = ComposeRun()
-        run.engine.probes["shop-web-1"] = [1, 0]
+        run.engine.health["shop-web-1"] = [ContainerHealth(status: .starting), ContainerHealth(status: .starting), ContainerHealth(status: .healthy)]
         var options = ComposeProject.UpOptions()
         options.wait = true
         try await run.project().up(
             try run.plan("services:\n  web:\n    image: web:1\n    healthcheck:\n      test: curl -f localhost\n  other:\n    image: other:1\n"),
             options: options)
-        #expect(run.engine.calls.suffix(2) == ["probe shop-web-1", "probe shop-web-1"])
+        #expect(run.engine.looks(at: "shop-web-1") == 3, "one to see it has a check, then until it is healthy")
+        #expect(run.engine.looks(at: "shop-other-1") == 0, "a container without a check is not waited for")
         #expect(run.recorder.events.last == "container shop-web-1 healthy")
     }
 
@@ -545,12 +589,12 @@ struct LifecycleTests {
         run.engine.clearCalls()
 
         try await run.project().start()
-        #expect(run.engine.calls == ["start shop-db-1", "probe shop-db-1", "start shop-web-1", "start shop-worker-1"])
+        #expect(run.engine.calls == ["start shop-db-1", "start shop-web-1", "start shop-worker-1"])
         #expect(run.recorder.events.contains("container shop-db-1 healthy"))
         run.engine.clearCalls()
 
         try await run.project().start()
-        #expect(run.engine.calls == ["probe shop-db-1"], "what runs is left running")
+        #expect(run.engine.calls.isEmpty, "what runs is left running")
     }
 
     @Test
@@ -717,31 +761,23 @@ struct LifecycleTests {
 }
 
 struct ReadinessTests {
-    @Test(arguments: [(0.5, "0.5 seconds"), (1.0, "1 second"), (15.0, "15 seconds"), (2.04, "2 seconds"), (90.26, "90.3 seconds")])
-    func secondsReadNaturally(_ interval: Double, _ text: String) {
-        #expect(Readiness.seconds(interval) == text)
-    }
-
     @Test
-    func theStartPeriodIsExtraTime() async throws {
+    func aStartingContainerIsWaitedForUntilItsCheckDecides() async throws {
         let run = ComposeRun()
-        run.engine.add(ComposeContainer(id: "db", image: "postgres", state: .running, labels: [:]))
-        run.engine.probes["db"] = [1]
+        run.engine.add(
+            ComposeContainer(id: "db", image: "postgres", state: .running, labels: [:], health: ContainerHealth(status: .starting)))
         let clock = run.clock
-        let readiness = Readiness(now: { clock.now }, sleep: { clock.advance($0) }, pollInterval: 1)
-        let check = ComposeHealthcheck(test: ["true"], interval: 2, timeout: 1, retries: 2, startPeriod: 10)
-        do {
-            try await readiness.waitUntilHealthy(check, service: "db", container: "db", engine: run.engine)
-            Issue.record("expected an error")
-        } catch {
-            #expect("\(error)".hasPrefix("service db is not healthy after 14 seconds"))
-        }
+        let readiness = Readiness(sleep: { clock.advance($0) }, pollInterval: 1)
+        let waiting = Task { try await readiness.waitUntilHealthy(service: "db", container: "db", engine: run.engine) }
+        while clock.now < 3 { await Task.yield() }
+        run.engine.add(ComposeContainer(id: "db", image: "postgres", state: .running, labels: [:], health: ContainerHealth(status: .healthy)))
+        try await waiting.value
     }
 
     @Test
     func aContainerThatIsGoneCannotBeWaitedFor() async throws {
         let run = ComposeRun()
-        let readiness = Readiness(now: { 0 }, sleep: { _ in }, pollInterval: 1)
+        let readiness = Readiness(sleep: { _ in }, pollInterval: 1)
         do {
             _ = try await readiness.waitUntilExited(service: "job", container: "job", engine: run.engine)
             Issue.record("expected an error")

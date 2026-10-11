@@ -80,14 +80,14 @@ commands that work on a running project — `ps`, `logs`, `stop`, `start`, `rest
 - `service_healthy`: the dependency's `healthcheck` has passed.
 - `service_completed_successfully`: the dependency's container has ended with exit code 0.
 
-A health check is run by `compose` itself, as a command in the container. While it waits,
-`compose` runs the check about once a second, so the wait ends as soon as the service is
-ready. The check may fail for the service's `start_period` and then for `retries`
-intervals; after that `up` stops with the check's last result.
-
-Only a `healthcheck` in the compose file counts. A health check built into an image is
-not read, and a service that waits for `service_healthy` on a service without one is an
-error.
+The engine runs a service's health check, from the container's own configuration: the
+service's `healthcheck` laid over the image's `HEALTHCHECK` as Docker lays them (a
+`healthcheck` with only timing keeps the image's test; `disable: true` turns the image's off).
+`compose` reads the health the engine reports, about once a second, and goes on as soon as
+the dependency is `healthy`. It stops `up` with the check's last result when the dependency
+turns `unhealthy`, which the check's own `start_period` and `retries` decide, and when the
+dependency's container stops or has no health check at all. A service waited for with
+`service_healthy` whose `healthcheck` is disabled is an error in the file.
 
 A service that others wait on to finish runs again on the next `up` only when everything
 that waited for it is stopped. While a service that waited is running, the job has done
