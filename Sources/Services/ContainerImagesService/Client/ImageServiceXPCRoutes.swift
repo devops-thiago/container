@@ -24,6 +24,10 @@ public enum ImagesServiceXPCRoute: String {
     case imagePlatforms
     case imagePush
     case imageTag
+    /// Check a registry login and keep it in the keychain, where pulls read it.
+    case registryLogin
+    /// Forget the keychain's login for a registry.
+    case registryLogout
     case imageBuild
     case imageDelete
     case imageSave

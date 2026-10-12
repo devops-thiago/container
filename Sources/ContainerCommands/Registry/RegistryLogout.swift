@@ -18,6 +18,8 @@ import ArgumentParser
 import ContainerAPIClient
 import Containerization
 import ContainerizationOCI
+import ContainerizationOS
+import Security
 
 extension Application {
     public struct RegistryLogout: AsyncLoggableCommand {
@@ -36,7 +38,13 @@ extension Application {
         public func run() async throws {
             let keychain = KeychainHelper(securityDomain: Constants.keychainID)
             let r = Reference.resolveDomain(domain: registry)
-            try keychain.delete(hostname: r)
+            do {
+                try keychain.delete(hostname: r)
+            } catch KeychainQuery.Error.unhandledError(let status) where status == errSecInvalidOwnerEdit {
+                // The keychain lets only the program that made a login remove it, and a
+                // login made in the app is kept by the engine's images service: ask it.
+                try await ClientImage.logout(server: registry)
+            }
         }
     }
 }
