@@ -22,9 +22,11 @@ import ContainerizationArchive
 import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 import Logging
 import RegistryTransport
+import Security
 import TerminalProgress
 
 public actor ImagesService {
@@ -140,6 +142,80 @@ public actor ImagesService {
             throw ContainerizationError(.internalError, message: "failed to read platforms of image \(reference)")
         }
         return platforms
+    }
+
+    // MARK: Registry logins
+
+    /// Where a login to `server` goes: its host and port, over `scheme` exactly as given.
+    /// There is no probing and no fallback between the two; a caller that names http has
+    /// chosen a registry it reaches without TLS.
+    static func loginTarget(server: String, scheme: String) throws -> (host: String, port: Int?, scheme: String) {
+        guard scheme == "http" || scheme == "https" else {
+            throw ContainerizationError(.invalidArgument, message: "unsupported registry scheme \(scheme); use http or https")
+        }
+        let server = Reference.resolveDomain(domain: server)
+        guard let url = URL(string: "\(scheme)://\(server)"), let host = url.host, !host.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "invalid registry \(server)")
+        }
+        return (host, url.port, scheme)
+    }
+
+    /// Check a login against the registry and keep it in the keychain, as
+    /// `container registry login` does.
+    ///
+    /// Done here, in the process that reads the keychain for every pull, so the login is kept
+    /// by the process that uses it. An app cannot run the bundled command line for this:
+    /// macOS stops a sandboxed tool started by a sandboxed app before it runs.
+    public func login(server: String, username: String, password: String, scheme: String) async throws {
+        let target = try Self.loginTarget(server: server, scheme: scheme)
+        let authentication = BasicAuthentication(username: username, password: password)
+        if target.scheme == "http" {
+            // Basic auth sent up front to that exact origin, as for an explicit-HTTP pull.
+            try await ExplicitHTTPRegistryClient(host: target.host, port: target.port, authentication: authentication).ping()
+        } else {
+            let client = RegistryClient(
+                host: target.host,
+                scheme: target.scheme,
+                port: target.port,
+                authentication: authentication,
+                retryOptions: .init(
+                    maxRetries: 10,
+                    retryInterval: 300_000_000,
+                    shouldRetry: ({ response in
+                        response.status.code >= 500
+                    })
+                ),
+                tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
+            )
+            try await client.ping()
+        }
+        let keychain = KeychainHelper(securityDomain: Constants.keychainID)
+        try keychain.save(hostname: Reference.resolveDomain(domain: server), username: username, password: password)
+        log.info("registry login kept", metadata: ["server": "\(server)"])
+    }
+
+    /// Forget the login kept for `server`, as `container registry logout` does.
+    public func logout(server: String) throws {
+        let host = Reference.resolveDomain(domain: server)
+        do {
+            try KeychainHelper(securityDomain: Constants.keychainID).delete(hostname: host)
+        } catch {
+            throw Self.logoutError(error, host: host)
+        }
+    }
+
+    /// The keychain lets only the program that made a login remove it, so a login made with
+    /// `container registry login` cannot be removed here, and says so in words.
+    static func logoutError(_ error: any Error, host: String) -> any Error {
+        if case KeychainQuery.Error.unhandledError(let status) = error, status == errSecInvalidOwnerEdit {
+            return ContainerizationError(
+                .invalidState,
+                message: "the login for \(host) was made by another program, and only it can remove it",
+                cause: error)
+        }
+        return error
+    }
+
     /// Pull through the credential transport only when the caller explicitly selected HTTP
     /// and a credential exists. The ordinary HTTPS/anonymous path remains on ImageStore's
     /// upstream client, so there is no protocol probing or public-host downgrade here.

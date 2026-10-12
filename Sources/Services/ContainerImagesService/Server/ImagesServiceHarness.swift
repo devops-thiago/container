@@ -98,6 +98,33 @@ public struct ImagesServiceHarness: Sendable {
     }
 
     @Sendable
+    public func registryLogin(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let server = message.string(key: .registryServer), !server.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry server")
+        }
+        guard let username = message.string(key: .registryUsername), !username.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry username")
+        }
+        guard let password = message.string(key: .registryPassword), !password.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry password")
+        }
+        guard let scheme = message.string(key: .registryScheme) else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry scheme")
+        }
+        try await service.login(server: server, username: username, password: password, scheme: scheme)
+        return message.reply()
+    }
+
+    @Sendable
+    public func registryLogout(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let server = message.string(key: .registryServer), !server.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry server")
+        }
+        try await service.logout(server: server)
+        return message.reply()
+    }
+
+    @Sendable
     public func tag(_ message: XPCMessage) async throws -> XPCMessage {
         let old = message.string(key: .imageReference)
         guard let old else {
