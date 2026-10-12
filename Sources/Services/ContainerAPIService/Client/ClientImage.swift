@@ -125,6 +125,28 @@ extension ClientImage {
 // MARK: Static methods
 
 extension ClientImage {
+    /// Check a registry login and keep it where pulls read it, through the images service.
+    /// `scheme` is http or https, used exactly as given.
+    public static func login(server: String, username: String, password: String, scheme: String) async throws {
+        let client = newXPCClient()
+        let request = newRequest(.registryLogin)
+        request.set(key: .registryServer, value: server)
+        request.set(key: .registryUsername, value: username)
+        request.set(key: .registryPassword, value: password)
+        request.set(key: .registryScheme, value: scheme)
+        _ = try await client.send(request, responseTimeout: .seconds(90))
+    }
+
+    /// Forget the login kept for a registry, through the images service.
+    public static func logout(server: String) async throws {
+        let client = newXPCClient()
+        let request = newRequest(.registryLogout)
+        request.set(key: .registryServer, value: server)
+        _ = try await client.send(request, responseTimeout: .seconds(30))
+    }
+}
+
+extension ClientImage {
     private static let legacyDockerRegistryHost = "docker.io"
     private static let dockerRegistryHost = "registry-1.docker.io"
     private static let defaultDockerRegistryRepo = "library"

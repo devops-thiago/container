@@ -39,6 +39,12 @@ public enum ImagesServiceXPCKeys: String {
     case forceLoad
     case rejectedMembers
 
+    /// Registry logins
+    case registryServer
+    case registryUsername
+    case registryPassword
+    case registryScheme
+
     /// ContentStore
     case digest
     case digests
