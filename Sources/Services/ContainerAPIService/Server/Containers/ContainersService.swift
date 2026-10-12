@@ -110,6 +110,8 @@ public actor ContainersService {
 
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
+    /// The exits of containers removed when they stopped (`--rm`), for a wait that comes after.
+    private var removedExits = RemovedExits()
     /// Host directories a sandboxed embedder has granted, per container. Inert unsandboxed.
     private let hostDirectoryAccess: HostDirectoryAccess
 
@@ -1028,6 +1030,11 @@ public actor ContainersService {
             )
         }
 
+        if self.containers[id] == nil, Self.isInitProcess(id: id, processID: processID),
+            let status = removedExits.status(for: id)
+        {
+            return status
+        }
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
         return try await client.wait(processID)
@@ -1509,6 +1516,9 @@ public actor ContainersService {
 
         let options = try getContainerCreationOptions(id: id)
         if options.autoRemove {
+            // `run` starts the process and then waits on it. A process that ends first is
+            // removed before that wait arrives, and the wait still needs its exit.
+            if let code { removedExits.record(code, for: id) }
             try await self.cleanUp(id: id, context: context)
         }
     }
