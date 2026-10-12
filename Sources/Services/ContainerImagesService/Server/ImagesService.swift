@@ -22,9 +22,11 @@ import ContainerizationArchive
 import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 import Logging
 import RegistryTransport
+import Security
 import TerminalProgress
 
 public actor ImagesService {
@@ -176,8 +178,24 @@ public actor ImagesService {
 
     /// Forget the login kept for `server`, as `container registry logout` does.
     public func logout(server: String) throws {
-        let keychain = KeychainHelper(securityDomain: Constants.keychainID)
-        try keychain.delete(hostname: Reference.resolveDomain(domain: server))
+        let host = Reference.resolveDomain(domain: server)
+        do {
+            try KeychainHelper(securityDomain: Constants.keychainID).delete(hostname: host)
+        } catch {
+            throw Self.logoutError(error, host: host)
+        }
+    }
+
+    /// The keychain lets only the program that made a login remove it, so a login made with
+    /// `container registry login` cannot be removed here, and says so in words.
+    static func logoutError(_ error: any Error, host: String) -> any Error {
+        if case KeychainQuery.Error.unhandledError(let status) = error, status == errSecInvalidOwnerEdit {
+            return ContainerizationError(
+                .invalidState,
+                message: "the login for \(host) was made by another program, and only it can remove it",
+                cause: error)
+        }
+        return error
     }
 
     /// Pull through the credential transport only when the caller explicitly selected HTTP

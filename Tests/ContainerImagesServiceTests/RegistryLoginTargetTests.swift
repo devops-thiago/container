@@ -15,6 +15,8 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerizationError
+import ContainerizationOS
+import Security
 import Testing
 
 @testable import ContainerImagesService
@@ -38,6 +40,21 @@ struct RegistryLoginTargetTests {
     @Test("docker.io is the registry's own host, as the command line resolves it")
     func dockerHubResolves() throws {
         #expect(try ImagesService.loginTarget(server: "docker.io", scheme: "https").host == "registry-1.docker.io")
+    }
+
+    @Test("a login another program made says so when it cannot be removed here")
+    func otherOwnersLoginIsNamed() throws {
+        let mapped = ImagesService.logoutError(KeychainQuery.Error.unhandledError(status: errSecInvalidOwnerEdit), host: "ghcr.io")
+        let error = try #require(mapped as? ContainerizationError)
+        #expect(error.isCode(.invalidState))
+        #expect(error.message.contains("ghcr.io"))
+        #expect(error.message.contains("another program"))
+    }
+
+    @Test("any other keychain failure passes through unchanged")
+    func otherFailuresPassThrough() {
+        let mapped = ImagesService.logoutError(KeychainQuery.Error.unhandledError(status: errSecAuthFailed), host: "ghcr.io")
+        #expect(!(mapped is ContainerizationError))
     }
 
     @Test("a scheme other than http or https is refused before anything is contacted")
