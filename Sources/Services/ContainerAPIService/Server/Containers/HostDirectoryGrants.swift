@@ -347,6 +347,18 @@ public actor HostDirectoryGrants {
         return message
     }
 
+    /// What the embedder's answer to a request comes to. Its bookmark joins the pool, and the
+    /// request is granted when the pool then covers the path.
+    ///
+    /// The app also publishes every grant it holds right after its panel, and that publish can
+    /// land first. The answer then adds nothing the pool lacks, which is not a refusal: counting
+    /// only what this answer added turned a folder the user had just granted into "permission
+    /// for that folder was declined".
+    func take(answer bookmark: Data, for path: String) -> GrantOutcome {
+        publish(bookmarks: [bookmark])
+        return covers(path) ? .granted : .declined
+    }
+
     private func ask(
         _ path: String,
         requestID: String,
@@ -378,8 +390,7 @@ public actor HostDirectoryGrants {
                     metadata: ["path": "\(path)", "request": "\(requestID)"])
                 return .declined
             }
-            let opened = publish(bookmarks: [Data(bookmark)]) > 0 && covers(path)
-            return opened ? .granted : .declined
+            return take(answer: Data(bookmark), for: path)
         } catch {
             // Caller cancellation is not a dead embedder and must never enter the reannounce
             // path. The cancellation handler above has already closed the nested connection,
