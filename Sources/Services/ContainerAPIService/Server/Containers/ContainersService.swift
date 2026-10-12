@@ -110,8 +110,8 @@ public actor ContainersService {
 
     private let lock: AsyncLock
     private var containers: [String: ContainerState]
-    /// The exits of containers removed when they stopped (`--rm`), for a wait that comes after.
-    private var removedExits = RemovedExits()
+    /// The last exit of each recently stopped container, for a wait that comes after it.
+    private var recentExits = RecentExits()
     /// Host directories a sandboxed embedder has granted, per container. Inert unsandboxed.
     private let hostDirectoryAccess: HostDirectoryAccess
 
@@ -1030,10 +1030,13 @@ public actor ContainersService {
             )
         }
 
-        if self.containers[id] == nil, Self.isInitProcess(id: id, processID: processID),
-            let status = removedExits.status(for: id)
-        {
-            return status
+        // A process that has exited answers with its exit, as `docker wait` does, whether the
+        // container is stopped or already removed.
+        if Self.isInitProcess(id: id, processID: processID), let status = recentExits.status(for: id) {
+            let current = self.containers[id]
+            if current == nil || current?.snapshot.status == .stopped {
+                return status
+            }
         }
         let state = try self._getContainerState(id: id)
         let client = try state.getClient()
@@ -1459,6 +1462,11 @@ public actor ContainersService {
             return
         }
 
+        // `run` starts the process and then waits on it. A process that ends first has no
+        // runtime left when that wait arrives, and may be removed already (`--rm`): the wait
+        // still needs its exit.
+        if let code, !waitFailed { recentExits.record(code, for: id) }
+
         try await self.tearDownRuntime(id: id, client: state.client, responseTimeout: responseTimeout)
 
         let path = self.containerRoot.appendingPathComponent(id)
@@ -1516,9 +1524,6 @@ public actor ContainersService {
 
         let options = try getContainerCreationOptions(id: id)
         if options.autoRemove {
-            // `run` starts the process and then waits on it. A process that ends first is
-            // removed before that wait arrives, and the wait still needs its exit.
-            if let code { removedExits.record(code, for: id) }
             try await self.cleanUp(id: id, context: context)
         }
     }

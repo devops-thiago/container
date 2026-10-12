@@ -16,13 +16,13 @@
 
 import Containerization
 
-/// The exits of the last few containers removed when they stopped.
+/// The last exit of each of the most recently stopped containers.
 ///
-/// `container run --rm` starts the process and then waits on it. A process that ends at once
-/// is removed on its exit before that wait arrives, and the wait found no container: the run
-/// failed with "not found" though the process had exited 0. Kept bounded, newest last; a
-/// container made again under the same name replaces its entry when it exits.
-struct RemovedExits {
+/// `container run` starts the process and then waits on it. A process that ends at once has
+/// no runtime left when that wait arrives ("container is stopped"), or with `--rm` no
+/// container ("not found"), and the run failed though the process had exited 0. Kept
+/// bounded, newest last; a container's next exit replaces its entry.
+struct RecentExits {
     private(set) var entries: [(id: String, status: ExitStatus)] = []
     let capacity: Int
 

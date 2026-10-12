@@ -20,11 +20,11 @@ import Testing
 
 @testable import ContainerAPIService
 
-/// The exit of a container removed when it stopped, kept for a wait that arrives after it.
-struct RemovedExitsTests {
+/// The last exit of a stopped container, kept for a wait that arrives after it.
+struct RecentExitsTests {
     @Test("a recorded exit is found by its container")
     func recordedExitIsFound() {
-        var exits = RemovedExits()
+        var exits = RecentExits()
         exits.record(ExitStatus(exitCode: 3), for: "web")
         #expect(exits.status(for: "web")?.exitCode == 3)
         #expect(exits.status(for: "db") == nil)
@@ -32,7 +32,7 @@ struct RemovedExitsTests {
 
     @Test("a container that exits again replaces its earlier exit")
     func laterExitReplaces() {
-        var exits = RemovedExits()
+        var exits = RecentExits()
         exits.record(ExitStatus(exitCode: 1), for: "web")
         exits.record(ExitStatus(exitCode: 0), for: "web")
         #expect(exits.status(for: "web")?.exitCode == 0)
@@ -41,7 +41,7 @@ struct RemovedExitsTests {
 
     @Test("only the newest exits are kept")
     func boundedToTheNewest() {
-        var exits = RemovedExits(capacity: 2)
+        var exits = RecentExits(capacity: 2)
         exits.record(ExitStatus(exitCode: 1), for: "a")
         exits.record(ExitStatus(exitCode: 2), for: "b")
         exits.record(ExitStatus(exitCode: 3), for: "c")
