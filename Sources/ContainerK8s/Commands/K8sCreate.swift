@@ -33,6 +33,9 @@ public struct K8sCreate: AsyncParsableCommand {
         abstract: "Create and start a local Kubernetes cluster"
     )
 
+    @Option(name: .customLong("label"), help: "Set a key=value label on each node")
+    var labels: [String] = []
+
     @Option(name: .long, help: "Cluster name (default: \(K8sHelper.defaultName))")
     var name: String = K8sHelper.defaultName
 
@@ -78,6 +81,7 @@ public struct K8sCreate: AsyncParsableCommand {
 
         let result = try await K8sClusters.create(
             name: name,
+            labels: Utility.parseKeyValuePairs(labels),
             nodeImage: nodeImage,
             cpus: resourceFlags.cpus,
             memory: resourceFlags.memory,

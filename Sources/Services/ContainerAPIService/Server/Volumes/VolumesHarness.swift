@@ -69,13 +69,22 @@ public struct VolumesHarness: Sendable {
         return reply
     }
 
+    /// A guarded request must never degrade to unconditional deletion.
+    @Sendable
+    public func deleteOwned(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let required = try message.requiredLabels(), !required.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "owned deletion requires at least one label")
+        }
+        return try await delete(message)
+    }
+
     @Sendable
     public func delete(_ message: XPCMessage) async throws -> XPCMessage {
         guard let name = message.string(key: .volumeName) else {
             throw ContainerizationError(.invalidArgument, message: "volume name cannot be empty")
         }
 
-        try await service.delete(name: name)
+        try await service.delete(name: name, requiredLabels: try message.requiredLabels())
         return message.reply()
     }
 

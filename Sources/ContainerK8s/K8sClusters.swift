@@ -101,6 +101,7 @@ public enum K8sClusters {
     @discardableResult
     public static func create(
         name: String = K8sClusters.defaultName,
+        labels: [String: String] = [:],
         nodeImage: String = K8sClusters.defaultNodeImage,
         cpus: Int64? = nil,
         memory: String? = nil,
@@ -139,6 +140,7 @@ public enum K8sClusters {
         let fqdn = K8sHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
         let controlPlane = try LinuxNodeProvisioner(
             clusterName: name,
+            labels: labels,
             roles: [StandardRoles.controlPlane],
             nodeImage: nodeImage,
             cpus: cpus,
@@ -154,6 +156,7 @@ public enum K8sClusters {
                 name: workerName,
                 provisioner: try LinuxNodeProvisioner(
                     clusterName: name,
+                    labels: labels,
                     roles: [StandardRoles.worker],
                     nodeImage: nodeImage,
                     cpus: cpus,
@@ -331,11 +334,13 @@ public enum K8sClusters {
     public static func delete(
         name: String = K8sClusters.defaultName,
         expectedControlPlaneIncarnation: String? = nil,
+        requiredLabels: [String: String]? = nil,
         log: Logger
     ) async throws {
         try await delete(
             name: name,
             expectedControlPlaneIncarnation: expectedControlPlaneIncarnation,
+            requiredLabels: requiredLabels,
             containers: ContainerClient(),
             log: log)
     }
@@ -351,6 +356,7 @@ public enum K8sClusters {
     static func delete(
         name: String,
         expectedControlPlaneIncarnation: String? = nil,
+        requiredLabels: [String: String]? = nil,
         containers: any K8sClusterContainers,
         log: Logger
     ) async throws {
@@ -376,7 +382,9 @@ public enum K8sClusters {
                 }
                 if clusterNodes.isEmpty {
                     log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
-                    try K8sHelper.removeConfig(containerId: name, log: log)
+                    // With an ownership condition, no observed node means no proof that
+                    // this caller owns a same-name kubeconfig entry either.
+                    if requiredLabels == nil { try K8sHelper.removeConfig(containerId: name, log: log) }
                     return
                 }
                 log.debug(
@@ -401,6 +409,13 @@ public enum K8sClusters {
         nodes.sort { $0.id < $1.id }
         if let controlPlane { nodes.append(controlPlane) }
 
+        // Check the complete inventory before mutating any node, then carry the same
+        // requirement through each engine-side stop/delete to close replacement races.
+        for node in nodes {
+            if let requiredLabels, !requiredLabels.allSatisfy({ node.configuration.labels[$0.key] == $0.value }) {
+                throw ContainerizationError(.invalidArgument, message: "cluster node \(node.id) does not carry the labels this deletion requires")
+            }
+        }
         for node in nodes {
             guard node.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
                 throw ContainerizationError(
@@ -411,15 +426,15 @@ public enum K8sClusters {
                     .invalidArgument,
                     message: "\(node.id) belongs to k8s cluster \(owner), not \(name)")
             }
-            var requiredLabels = nodeLabels
+            var requirements = (requiredLabels ?? [:]).merging(nodeLabels) { _, plugin in plugin }
             if node.configuration.labels[ResourceLabelKeys.cluster] != nil {
-                requiredLabels[ResourceLabelKeys.cluster] = name
+                requirements[ResourceLabelKeys.cluster] = name
             }
             do {
                 do {
                     try await containers.stop(
                         id: node.id,
-                        requiredLabels: requiredLabels,
+                        requiredLabels: requirements,
                         expectedIncarnation: node.incarnation)
                 } catch let error as ContainerizationError where error.code == .invalidArgument {
                     throw error
@@ -430,7 +445,7 @@ public enum K8sClusters {
                 }
                 try await containers.delete(
                     id: node.id,
-                    requiredLabels: requiredLabels,
+                    requiredLabels: requirements,
                     expectedIncarnation: node.incarnation)
             } catch let error as ContainerizationError where error.code == .notFound {
                 log.debug("cluster node not found, skipping delete", metadata: ["name": "\(node.id)"])
