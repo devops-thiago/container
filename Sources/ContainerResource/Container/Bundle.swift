@@ -165,6 +165,17 @@ extension Bundle {
         try? load(filename: Self.exitStatusFilename)
     }
 
+    /// A new run has no exit yet. Removing the previous record must succeed before that
+    /// run is published, otherwise a restart could turn the previous exit into its answer.
+    public func clearExitStatus() throws {
+        let record = path.appendingPathComponent(Self.exitStatusFilename)
+        do {
+            try FileManager.default.removeItem(at: record)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            // A container that has never exited has no record to remove.
+        }
+    }
+
     public func setExitStatus(_ record: ExitRecord) throws {
         try write(filename: Self.exitStatusFilename, value: record)
     }
