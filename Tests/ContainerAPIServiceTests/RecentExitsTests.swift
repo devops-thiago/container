@@ -27,8 +27,8 @@ import Testing
 struct RecentExitsTests {
     let start = ContinuousClock.now
 
-    func stopped(_ incarnation: String) -> RecentExits.Current {
-        RecentExits.Current(incarnation: incarnation, isStopped: true)
+    func stopped(_ incarnation: String, recorded: Int32? = nil) -> RecentExits.Current {
+        RecentExits.Current(incarnation: incarnation, isStopped: true, recordedExit: recorded.map { ExitStatus(exitCode: $0) })
     }
 
     @Test("a stopped container's wait gets the exit of its own run")
@@ -46,12 +46,13 @@ struct RecentExitsTests {
         #expect(exits.lateExit(for: "web", current: nil, at: start + .seconds(1))?.exitCode == 0)
     }
 
-    @Test("a running container is asked, not answered from the cache")
+    @Test("a running container is asked, unless its run's exit is kept while it is torn down")
     func runningContainerIsAsked() {
         var exits = RecentExits()
-        exits.record(ExitStatus(exitCode: 3), for: "web", incarnation: "one", at: start)
-        let running = RecentExits.Current(incarnation: "one", isStopped: false)
+        let running = RecentExits.Current(incarnation: "one", isStopped: false, recordedExit: ExitStatus(exitCode: 9))
         #expect(exits.lateExit(for: "web", current: running, at: start) == nil)
+        exits.record(ExitStatus(exitCode: 3), for: "web", incarnation: "one", at: start)
+        #expect(exits.lateExit(for: "web", current: running, at: start)?.exitCode == 3)
     }
 
     @Test("a new container with a removed one's name never gets the removed one's exit")
@@ -73,6 +74,14 @@ struct RecentExitsTests {
         var exits = RecentExits()
         exits.record(ExitStatus(exitCode: 3), for: "web", incarnation: "one", at: start)
         #expect(exits.lateExit(for: "web", current: stopped("two"), at: start) == nil)
+        #expect(exits.lateExit(for: "web", current: stopped("two", recorded: 7), at: start)?.exitCode == 7)
+    }
+
+    @Test("a stopped container with nothing kept answers with the exit it recorded")
+    func recordedExitAnswers() {
+        let exits = RecentExits()
+        #expect(exits.lateExit(for: "web", current: stopped("one", recorded: 5), at: start)?.exitCode == 5)
+        #expect(exits.lateExit(for: "web", current: stopped("one"), at: start) == nil)
     }
 
     @Test("a new run of the same container drops the last run's exit")
@@ -85,13 +94,20 @@ struct RecentExitsTests {
         #expect(exits.lateExit(for: "web", current: stopped("one"), at: start)?.exitCode == 5)
     }
 
-    @Test("an exit is answered only for a short while")
-    func exitsExpire() {
+    @Test("a removed container's exit is answered only for a short while")
+    func removedExitsExpire() {
         var exits = RecentExits(lifetime: .seconds(60))
         exits.record(ExitStatus(exitCode: 3), for: "web", incarnation: "one", at: start)
         #expect(exits.lateExit(for: "web", current: nil, at: start + .seconds(60))?.exitCode == 3)
         #expect(exits.lateExit(for: "web", current: nil, at: start + .seconds(61)) == nil)
-        #expect(exits.lateExit(for: "web", current: stopped("one"), at: start + .seconds(61)) == nil)
+    }
+
+    @Test("a container that is still there keeps its exit for any later wait")
+    func existingContainersKeepTheirExit() {
+        var exits = RecentExits(lifetime: .seconds(60))
+        exits.record(ExitStatus(exitCode: 7), for: "web", incarnation: "one", at: start)
+        #expect(exits.lateExit(for: "web", current: stopped("one"), at: start + .seconds(61))?.exitCode == 7)
+        #expect(exits.lateExit(for: "web", current: stopped("one"), at: start + .seconds(86_400))?.exitCode == 7)
     }
 
     @Test("a container that exits again replaces its earlier exit")
