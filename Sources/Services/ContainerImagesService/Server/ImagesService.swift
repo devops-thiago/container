@@ -31,6 +31,7 @@ import TerminalProgress
 
 public actor ImagesService {
     private let log: Logger
+    private var logins = RegistryLoginLedger()
     private let contentStore: ContentStore
     private let imageStore: ImageStore
     private let snapshotStore: SnapshotStore
@@ -166,37 +167,55 @@ public actor ImagesService {
     /// Done here, in the process that reads the keychain for every pull, so the login is kept
     /// by the process that uses it. An app cannot run the bundled command line for this:
     /// macOS stops a sandboxed tool started by a sandboxed app before it runs.
+    ///
+    /// The check has a deadline shorter than the caller's wait, and the credential is kept
+    /// only if no sign-in or sign-out for the same host began since: an answer that comes too
+    /// late, or for a request that was replaced, keeps nothing.
     public func login(server: String, username: String, password: String, scheme: String) async throws {
         let target = try Self.loginTarget(server: server, scheme: scheme)
+        let host = Reference.resolveDomain(domain: server)
+        let ticket = logins.begin(host, at: .now)
         let authentication = BasicAuthentication(username: username, password: password)
-        if target.scheme == "http" {
-            // Basic auth sent up front to that exact origin, as for an explicit-HTTP pull.
-            try await ExplicitHTTPRegistryClient(host: target.host, port: target.port, authentication: authentication).ping()
-        } else {
-            let client = RegistryClient(
-                host: target.host,
-                scheme: target.scheme,
-                port: target.port,
-                authentication: authentication,
-                retryOptions: .init(
-                    maxRetries: 10,
-                    retryInterval: 300_000_000,
-                    shouldRetry: ({ response in
-                        response.status.code >= 500
-                    })
-                ),
-                tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
-            )
-            try await client.ping()
+        try await RegistryLoginLedger.checking(server) {
+            if target.scheme == "http" {
+                // Basic auth sent up front to that exact origin, as for an explicit-HTTP pull.
+                try await ExplicitHTTPRegistryClient(host: target.host, port: target.port, authentication: authentication).ping()
+            } else {
+                let client = RegistryClient(
+                    host: target.host,
+                    scheme: target.scheme,
+                    port: target.port,
+                    authentication: authentication,
+                    retryOptions: .init(
+                        maxRetries: 10,
+                        retryInterval: 300_000_000,
+                        shouldRetry: ({ response in
+                            response.status.code >= 500
+                        })
+                    ),
+                    tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
+                )
+                try await client.ping()
+            }
+        }
+        // No suspension from here to the save: the actor runs no other sign-in or sign-out
+        // for this host in between.
+        guard logins.mayKeep(ticket, at: .now) else {
+            log.info("registry login dropped: replaced or past its deadline", metadata: ["server": "\(server)"])
+            throw ContainerizationError(
+                .cancelled,
+                message: "the login to \(server) was replaced by a later sign-in or sign-out, or ran past its deadline")
         }
         let keychain = KeychainHelper(securityDomain: Constants.keychainID)
-        try keychain.save(hostname: Reference.resolveDomain(domain: server), username: username, password: password)
+        try keychain.save(hostname: host, username: username, password: password)
         log.info("registry login kept", metadata: ["server": "\(server)"])
     }
 
     /// Forget the login kept for `server`, as `container registry logout` does.
     public func logout(server: String) throws {
         let host = Reference.resolveDomain(domain: server)
+        // A login for this host still checking the registry keeps nothing after this.
+        _ = logins.begin(host, at: .now)
         do {
             try KeychainHelper(securityDomain: Constants.keychainID).delete(hostname: host)
         } catch {
