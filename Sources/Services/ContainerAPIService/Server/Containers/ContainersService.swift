@@ -493,6 +493,8 @@ public actor ContainersService {
                             message: "failed to resolve host-directory authorization for container \(configuration.id)"
                         )
                     }
+                    // A new container, whatever had this name before: its exit is not this one's.
+                    await self.forgetExit(of: configuration.id)
                     await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
                     return incarnation
                 }
@@ -501,6 +503,12 @@ public actor ContainersService {
                 throw error
             }
         }
+    }
+
+    /// Drop the kept exit of `id`: a container by that name was just made, and an earlier
+    /// one's exit is not its answer.
+    private func forgetExit(of id: String) {
+        recentExits.forget(id)
     }
 
     /// Hold an address for every container that exists, once the networks are up. The
@@ -654,6 +662,8 @@ public actor ContainersService {
             state.client = runtimeClient
             state.run = run
             state.exitRequested = false
+            // A new run: the last one's exit is no answer for a wait on this one.
+            recentExits.forget(id)
             await self.setContainerState(id, state, context: context)
         } catch {
             let label = try? self.pluginLoader.fullLaunchdLabel(
@@ -1018,9 +1028,11 @@ public actor ContainersService {
 
         // A process that has exited answers with its exit, as `docker wait` does, whether the
         // container is stopped or already removed.
-        if Self.isInitProcess(id: id, processID: processID), let status = recentExits.status(for: id) {
-            let current = self.containers[id]
-            if current == nil || current?.snapshot.status == .stopped {
+        if Self.isInitProcess(id: id, processID: processID) {
+            let current = self.containers[id].map {
+                RecentExits.Current(incarnation: $0.snapshot.incarnation, isStopped: $0.snapshot.status == .stopped)
+            }
+            if let status = recentExits.lateExit(for: id, current: current, at: .now) {
                 return status
             }
         }
@@ -1495,7 +1507,7 @@ public actor ContainersService {
         // `run` starts the process and then waits on it. A process that ends first has no
         // runtime left when that wait arrives, and may be removed already (`--rm`): the wait
         // still needs its exit.
-        if let code, !waitFailed { recentExits.record(code, for: id) }
+        if let code, !waitFailed { recentExits.record(code, for: id, incarnation: expectedIncarnation, at: .now) }
 
         try await self.tearDownRuntime(id: id, client: state.client, responseTimeout: responseTimeout)
 

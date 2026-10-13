@@ -20,25 +20,59 @@ import Containerization
 ///
 /// `container run` starts the process and then waits on it. A process that ends at once has
 /// no runtime left when that wait arrives ("container is stopped"), or with `--rm` no
-/// container ("not found"), and the run failed though the process had exited 0. Kept
-/// bounded, newest last; a container's next exit replaces its entry.
+/// container ("not found"), and the run failed though the process had exited 0.
+///
+/// An exit belongs to one run of one container: it is kept with the container's
+/// incarnation, a new container or a new run of the same one drops it, and it is answered
+/// only for a short while, which is all a late wait needs. A container that reuses a
+/// removed one's name never gets the removed one's exit. Bounded, newest last.
 struct RecentExits {
-    private(set) var entries: [(id: String, status: ExitStatus)] = []
-    let capacity: Int
-
-    init(capacity: Int = 64) {
-        self.capacity = capacity
+    struct Entry {
+        let id: String
+        let incarnation: String
+        let status: ExitStatus
+        let recorded: ContinuousClock.Instant
     }
 
-    mutating func record(_ status: ExitStatus, for id: String) {
-        entries.removeAll { $0.id == id }
-        entries.append((id, status))
+    /// What `wait` knows about the container it was asked about.
+    struct Current {
+        let incarnation: String
+        let isStopped: Bool
+    }
+
+    private(set) var entries: [Entry] = []
+    let capacity: Int
+    let lifetime: Duration
+
+    init(capacity: Int = 64, lifetime: Duration = .seconds(60)) {
+        self.capacity = capacity
+        self.lifetime = lifetime
+    }
+
+    /// The run of `id` with `incarnation` ended with `status`.
+    mutating func record(_ status: ExitStatus, for id: String, incarnation: String, at now: ContinuousClock.Instant) {
+        forget(id)
+        entries.append(Entry(id: id, incarnation: incarnation, status: status, recorded: now))
         if entries.count > capacity {
             entries.removeFirst(entries.count - capacity)
         }
     }
 
-    func status(for id: String) -> ExitStatus? {
-        entries.last { $0.id == id }?.status
+    /// A container named `id` was created, or a new run of it started: no earlier exit is its.
+    mutating func forget(_ id: String) {
+        entries.removeAll { $0.id == id }
+    }
+
+    /// The exit a wait on the init process of `id` gets without a runtime to ask: the last
+    /// run's, while it is fresh, when the container is stopped and is the one that exited, or
+    /// has been removed since. A running container, or another incarnation, gets nil and is
+    /// asked as usual.
+    func lateExit(for id: String, current: Current?, at now: ContinuousClock.Instant) -> ExitStatus? {
+        guard let entry = entries.last(where: { $0.id == id }), now - entry.recorded <= lifetime else {
+            return nil
+        }
+        guard let current else { return entry.status }
+        guard current.isStopped, current.incarnation == entry.incarnation else { return nil }
+        return entry.status
     }
 }
