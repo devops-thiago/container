@@ -33,11 +33,14 @@ public struct K8sDelete: AsyncParsableCommand {
     @Option(name: .long, help: "Cluster name (default: \(K8sHelper.defaultName))")
     var name: String = K8sHelper.defaultName
 
+    @Option(name: .customLong("require-label"), help: "Delete only nodes carrying this key=value label")
+    var requiredLabels: [String] = []
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: K8sHelper.pluginName)
 
-        try await K8sClusters.delete(name: name, log: log)
+        try await K8sClusters.delete(name: name, requiredLabels: requiredLabels.isEmpty ? nil : Utility.parseKeyValuePairs(requiredLabels), log: log)
         print(name)
     }
 }

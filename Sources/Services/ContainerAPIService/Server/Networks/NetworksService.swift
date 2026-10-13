@@ -289,7 +289,7 @@ public actor NetworksService {
     }
 
     /// Delete a network.
-    public func delete(id: String) async throws {
+    public func delete(id: String, requiredLabels: [String: String]? = nil) async throws {
         log.debug(
             "NetworksService: enter",
             metadata: [
@@ -326,6 +326,10 @@ public actor NetworksService {
         try await stateLock.withLock { _ in
             guard let serviceState = await self.serviceStates[id] else {
                 throw ContainerizationError(.notFound, message: "no network for id \(id)")
+            }
+
+            guard ContainersService.labelsSatisfied(required: requiredLabels, actual: serviceState.configuration.labels.dictionary) else {
+                throw ContainerizationError(.invalidArgument, message: "network \(id) does not carry the labels this deletion requires")
             }
 
             // basic sanity checks on network itself
@@ -519,7 +523,7 @@ extension NetworksService {
         self.serviceStates.removeValue(forKey: key)
     }
 
-    private func setServiceState(key: String, value: NetworkEntry) {
+    func setServiceState(key: String, value: NetworkEntry) {
         self.serviceStates[key] = value
     }
 }

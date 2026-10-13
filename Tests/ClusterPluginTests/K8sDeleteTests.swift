@@ -489,6 +489,47 @@ extension KubeconfigEnvTests {
             #expect(engine.currentIDs.isEmpty)
         }
 
+        @Test("an ownership-conditioned delete with no nodes preserves an unrelated kubeconfig")
+        func absentOwnedClusterKeepsConfig() async throws {
+            let name = "not-ours"
+            let engine = FakeContainers(get: .failure(ContainerizationError(.notFound, message: "absent")), current: nil)
+            try await withScratchKubeconfig(containing: name) { file in
+                try await K8sClusters.delete(name: name, requiredLabels: ["owner": "ours"], containers: engine, log: log)
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"))
+                #expect(engine.calls.isEmpty)
+            }
+        }
+
+        @Test("a cluster another client created is not owned by this screenshot run")
+        func differentRunOwnerIsPreserved() async throws {
+            let name = "foreign-showcase"
+            let node = try snapshot(id: name, labels: nodeLabels.merging(["owner": "other"]) { _, new in new })
+            let engine = FakeContainers(get: .success(node), current: node)
+            try await withScratchKubeconfig(containing: name) { file in
+                await #expect(throws: ContainerizationError.self) {
+                    try await K8sClusters.delete(name: name, requiredLabels: ["owner": "ours"], containers: engine, log: log)
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.current != nil)
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("the creation owner accompanies every cluster stop and delete")
+        func runOwnerTravelsToEngine() async throws {
+            let name = "owned-showcase"
+            let node = try snapshot(id: name, labels: nodeLabels.merging(["owner": "ours"]) { _, new in new })
+            let engine = FakeContainers(get: .success(node), current: node)
+            try await withScratchKubeconfig(containing: name) { _ in
+                try await K8sClusters.delete(name: name, requiredLabels: ["owner": "ours"], containers: engine, log: log)
+            }
+            #expect(engine.calls.count == 2)
+            #expect(engine.calls.allSatisfy { $0.labels["owner"] == "ours" && $0.incarnation == node.incarnation })
+            #expect(engine.current == nil)
+        }
+
         @Test("a real node is stopped and deleted with the node labels required, and its context removed")
         func nodeIsDeletedWithTheRequirementAttached() async throws {
             let name = "cluster-c"

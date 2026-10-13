@@ -90,7 +90,7 @@ public actor VolumesService {
         }
     }
 
-    public func delete(name: String) async throws {
+    public func delete(name: String, requiredLabels: [String: String]? = nil) async throws {
         log.debug(
             "VolumesService: enter",
             metadata: [
@@ -109,7 +109,7 @@ public actor VolumesService {
         }
 
         try await lock.withLock { _ in
-            try await self._delete(name: name)
+            try await self._delete(name: name, requiredLabels: requiredLabels)
         }
     }
 
@@ -369,15 +369,19 @@ public actor VolumesService {
         return volume
     }
 
-    private func _delete(name: String) async throws {
+    private func _delete(name: String, requiredLabels: [String: String]? = nil) async throws {
         guard VolumeStorage.isValidVolumeName(name) else {
             throw VolumeError.invalidVolumeName("invalid volume name '\(name)': must match \(VolumeStorage.volumeNamePattern)")
         }
 
         // Check if volume exists by trying to list and finding it
         let existingVolumes = try await store.list()
-        guard existingVolumes.contains(where: { $0.name == name }) else {
+        guard let volume = existingVolumes.first(where: { $0.name == name }) else {
             throw VolumeError.volumeNotFound(name)
+        }
+
+        guard ContainersService.labelsSatisfied(required: requiredLabels, actual: volume.labels) else {
+            throw ContainerizationError(.invalidArgument, message: "volume \(name) does not carry the labels this deletion requires")
         }
 
         // Check if volume is in use by any container atomically
