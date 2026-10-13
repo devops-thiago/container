@@ -214,10 +214,12 @@ public enum XPCRoute: String {
 
     case networkCreate
     case networkDelete
+    case networkDeleteOwned
     case networkList
 
     case volumeCreate
     case volumeDelete
+    case volumeDeleteOwned
     case volumeList
     case volumeInspect
 

@@ -453,7 +453,7 @@ public struct ContainersHarness: Sendable {
 
 extension XPCMessage {
     /// The labels a stop or delete insists on, or nil when the caller made no demand.
-    fileprivate func requiredLabels() throws -> [String: String]? {
+    func requiredLabels() throws -> [String: String]? {
         guard let data = data(key: .requiredLabels) else { return nil }
         do {
             return try JSONDecoder().decode([String: String].self, from: data)

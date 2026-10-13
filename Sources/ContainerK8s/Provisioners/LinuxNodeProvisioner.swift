@@ -34,6 +34,7 @@ private actor NodeIncarnations {
 public struct LinuxNodeProvisioner: NodeProvisioner {
     public let roles: [String]
 
+    private let labels: [String: String]
     private let clusterName: String
     private let nodeImage: String?
     private let cpus: Int64?
@@ -48,6 +49,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
 
     public init(
         clusterName: String,
+        labels: [String: String] = [:],
         roles: [String] = [StandardRoles.controlPlane],
         nodeImage: String? = nil,
         cpus: Int64? = nil,
@@ -69,6 +71,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
                 .invalidArgument,
                 message: "LinuxNode roles contains unrecognized values: \(unrecognized.joined(separator: ", "))")
         }
+        self.labels = labels
         self.clusterName = clusterName
         self.roles = roles
         self.nodeImage = nodeImage
@@ -81,6 +84,15 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         self.containerSystemConfig = containerSystemConfig
         self.progressUpdate = progressUpdate
         self.incarnations = NodeIncarnations()
+    }
+
+    /// Extra metadata travels with every node, without changing its reserved identity.
+    var managementLabels: [String] {
+        labels.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" } + [
+            "\(ResourceLabelKeys.plugin)=\(K8sHelper.pluginName)",
+            "\(ResourceLabelKeys.cluster)=\(clusterName)",
+            "\(ResourceLabelKeys.role)=\(roles.joined(separator: ","))",
+        ]
     }
 
     public func provision(name: String, log: Logger) async throws {
@@ -110,11 +122,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             initImage: nil,
             kernel: nil,
             kernelArgs: [],
-            labels: [
-                "\(ResourceLabelKeys.plugin)=\(K8sHelper.pluginName)",
-                "\(ResourceLabelKeys.cluster)=\(clusterName)",
-                "\(ResourceLabelKeys.role)=\(roles.joined(separator: ","))",
-            ],
+            labels: managementLabels,
             maskedPaths: [],
             mounts: [],
             name: name,

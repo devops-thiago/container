@@ -35,6 +35,9 @@ extension Application {
         @Flag(name: .shortAndLong, help: "Delete containers even if they are running")
         var force = false
 
+        @Option(name: .customLong("require-label"), help: "Delete only resources carrying this key=value label (checked by the engine)")
+        var requiredLabels: [String] = []
+
         @OptionGroup
         public var logOptions: Flags.Logging
 
@@ -71,12 +74,13 @@ extension Application {
                 containers = Array(Set(containerIds))
             }
 
+            let requirements = requiredLabels.isEmpty ? nil : Utility.parseKeyValuePairs(requiredLabels)
             var errors: [any Error] = []
             try await withThrowingTaskGroup(of: (any Error)?.self) { group in
                 for container in containers {
                     group.addTask {
                         do {
-                            try await client.delete(id: container, force: force)
+                            try await client.delete(id: container, force: force, requiredLabels: requirements)
                             print(container)
                             return nil
                         } catch {
