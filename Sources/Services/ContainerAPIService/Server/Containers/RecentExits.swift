@@ -23,9 +23,11 @@ import Containerization
 /// container ("not found"), and the run failed though the process had exited 0.
 ///
 /// An exit belongs to one run of one container: it is kept with the container's
-/// incarnation, a new container or a new run of the same one drops it, and it is answered
-/// only for a short while, which is all a late wait needs. A container that reuses a
-/// removed one's name never gets the removed one's exit. Bounded, newest last.
+/// incarnation, and a new container or a new run of the same one drops it. A container that
+/// is still there gets its exit whenever the wait comes, as `docker wait` answers a stopped
+/// container; one that has been removed since gets it only for a short while, which is all a
+/// late wait needs. A container that reuses a removed one's name never gets the removed
+/// one's exit. Bounded, newest last.
 struct RecentExits {
     struct Entry {
         let id: String
@@ -38,6 +40,8 @@ struct RecentExits {
     struct Current {
         let incarnation: String
         let isStopped: Bool
+        /// The exit the container recorded for its last run, kept on disk across restarts.
+        let recordedExit: ExitStatus?
     }
 
     private(set) var entries: [Entry] = []
@@ -63,16 +67,20 @@ struct RecentExits {
         entries.removeAll { $0.id == id }
     }
 
-    /// The exit a wait on the init process of `id` gets without a runtime to ask: the last
-    /// run's, while it is fresh, when the container is stopped and is the one that exited, or
-    /// has been removed since. A running container, or another incarnation, gets nil and is
-    /// asked as usual.
+    /// The exit a wait on the init process of `id` gets without a runtime to ask, or nil to
+    /// ask the runtime as usual.
+    ///
+    /// - A container that is still there: the exit kept for its incarnation, whatever its age
+    ///   (the run that ended, while its runtime is still being torn down), else, once it is
+    ///   stopped, the exit it recorded.
+    /// - A container removed since (`--rm`): its kept exit, while that is fresh.
     func lateExit(for id: String, current: Current?, at now: ContinuousClock.Instant) -> ExitStatus? {
-        guard let entry = entries.last(where: { $0.id == id }), now - entry.recorded <= lifetime else {
-            return nil
+        let entry = entries.last { $0.id == id }
+        guard let current else {
+            guard let entry, now - entry.recorded <= lifetime else { return nil }
+            return entry.status
         }
-        guard let current else { return entry.status }
-        guard current.isStopped, current.incarnation == entry.incarnation else { return nil }
-        return entry.status
+        if let entry, entry.incarnation == current.incarnation { return entry.status }
+        return current.isStopped ? current.recordedExit : nil
     }
 }
