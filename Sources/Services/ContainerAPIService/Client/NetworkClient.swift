@@ -119,6 +119,17 @@ public struct NetworkClient: Sendable {
         return network
     }
 
+    // A distinct route makes an older engine reject this request rather than ignore
+    // an ownership field on its unconditional delete route. Never retry unguarded.
+    static func deleteRequest(id: String, requiredLabels: [String: String]?) throws -> XPCMessage {
+        let request = XPCMessage(route: requiredLabels == nil ? .networkDelete : .networkDeleteOwned)
+        request.set(key: .networkId, value: id)
+        if let requiredLabels {
+            request.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
+        }
+        return request
+    }
+
     /// Deletes the network with the given identifier.
     ///
     /// Deletion succeeds only when no containers are currently attached to the
@@ -127,9 +138,8 @@ public struct NetworkClient: Sendable {
     /// - Parameter id: The identifier of the network to delete.
     /// - Throws: ``ContainerizationError`` if the network has active attachments,
     ///   if the network is the built-in default, or if the XPC call fails.
-    public func delete(id: String) async throws {
-        let request = XPCMessage(route: .networkDelete)
-        request.set(key: .networkId, value: id)
+    public func delete(id: String, requiredLabels: [String: String]? = nil) async throws {
+        let request = try Self.deleteRequest(id: id, requiredLabels: requiredLabels)
         try await xpcSend(message: request)
     }
 

@@ -31,6 +31,9 @@ extension Application.VolumeCommand {
         @Flag(name: .shortAndLong, help: "Delete all volumes")
         var all = false
 
+        @Option(name: .customLong("require-label"), help: "Delete only resources carrying this key=value label (checked by the engine)")
+        var requiredLabels: [String] = []
+
         @OptionGroup
         public var logOptions: Flags.Logging
 
@@ -79,13 +82,14 @@ extension Application.VolumeCommand {
                 }
             }
 
+            let requirements = requiredLabels.isEmpty ? nil : Utility.parseKeyValuePairs(requiredLabels)
             var failed = [String]()
             let _log = log
             try await withThrowingTaskGroup(of: VolumeConfiguration?.self) { group in
                 for volume in volumes {
                     group.addTask {
                         do {
-                            try await ClientVolume.delete(name: volume.id)
+                            try await ClientVolume.delete(name: volume.id, requiredLabels: requirements)
                             print(volume.id)
                             return nil
                         } catch {

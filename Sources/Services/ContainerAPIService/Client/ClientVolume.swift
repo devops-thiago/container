@@ -49,12 +49,22 @@ public struct ClientVolume {
         return try JSONDecoder().decode(VolumeConfiguration.self, from: responseData)
     }
 
-    public static func delete(name: String) async throws {
-        let client = XPCClient(service: serviceIdentifier)
-        let message = XPCMessage(route: .volumeDelete)
+    // A distinct route makes an older engine reject this request rather than ignore
+    // an ownership field on its unconditional delete route. Never retry unguarded.
+    static func deleteRequest(name: String, requiredLabels: [String: String]?) throws -> XPCMessage {
+        let message = XPCMessage(route: requiredLabels == nil ? .volumeDelete : .volumeDeleteOwned)
         message.set(key: .volumeName, value: name)
+        if let requiredLabels {
+            message.set(key: .requiredLabels, value: try JSONEncoder().encode(requiredLabels))
+        }
+        return message
+    }
 
-        _ = try await client.send(message)
+    public static func delete(name: String, requiredLabels: [String: String]? = nil) async throws {
+        let client = XPCClient(service: serviceIdentifier)
+        let message = try Self.deleteRequest(name: name, requiredLabels: requiredLabels)
+
+        _ = try await client.send(message, responseTimeout: requiredLabels == nil ? nil : XPCClient.xpcRegistrationTimeout)
     }
 
     public static func list() async throws -> [VolumeConfiguration] {

@@ -30,6 +30,9 @@ extension Application {
         @Flag(name: .shortAndLong, help: "Delete all networks")
         var all = false
 
+        @Option(name: .customLong("require-label"), help: "Delete only resources carrying this key=value label (checked by the engine)")
+        var requiredLabels: [String] = []
+
         @OptionGroup
         public var logOptions: Flags.Logging
 
@@ -89,6 +92,7 @@ extension Application {
                 }
             }
 
+            let requirements = requiredLabels.isEmpty ? nil : Utility.parseKeyValuePairs(requiredLabels)
             var failed = [String]()
             let _log = log
             try await withThrowingTaskGroup(of: NetworkResource?.self) { group in
@@ -97,7 +101,7 @@ extension Application {
                         do {
                             // Delete atomically disables the IP allocator, then deletes
                             // the allocator. The disable fails if any IPs are still in use.
-                            try await networkClient.delete(id: network.id)
+                            try await networkClient.delete(id: network.id, requiredLabels: requirements)
                             print(network.id)
                             return nil
                         } catch {

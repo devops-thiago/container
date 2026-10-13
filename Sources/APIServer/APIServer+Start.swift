@@ -183,8 +183,10 @@ extension APIServer {
                         .pluginUnload,
                         .networkCreate,
                         .networkDelete,
+                        .networkDeleteOwned,
                         .volumeCreate,
                         .volumeDelete,
+                        .volumeDeleteOwned,
                         .installKernel,
                     ]
                     for route in mutatingRoutes {
@@ -554,6 +556,7 @@ extension APIServer {
             }
             routes[XPCRoute.networkList] = XPCServer.route(harness.list)
             routes[XPCRoute.networkDelete] = XPCServer.route(harness.delete)
+            routes[XPCRoute.networkDeleteOwned] = XPCServer.route(harness.deleteOwned)
 
             return service
         }
@@ -586,6 +589,7 @@ extension APIServer {
 
             routes[XPCRoute.volumeCreate] = XPCServer.route(harness.create)
             routes[XPCRoute.volumeDelete] = XPCServer.route(harness.delete)
+            routes[XPCRoute.volumeDeleteOwned] = XPCServer.route(harness.deleteOwned)
             routes[XPCRoute.volumeList] = XPCServer.route(harness.list)
             routes[XPCRoute.volumeInspect] = XPCServer.route(harness.inspect)
             routes[XPCRoute.volumeDiskUsage] = XPCServer.route(harness.diskUsage)
