@@ -511,6 +511,11 @@ public actor ContainersService {
         recentExits.forget(id)
     }
 
+    /// Keep the exit of the run of `id` that just ended, for a wait that arrives after it.
+    func recordExit(_ status: ExitStatus, of id: String, incarnation: String) {
+        recentExits.record(status, for: id, incarnation: incarnation, at: .now)
+    }
+
     /// Hold an address for every container that exists, once the networks are up. The
     /// helpers start empty with the engine, so the reservations made at create are made
     /// again here; in id order, so the outcome does not depend on dictionary order.
@@ -1029,8 +1034,11 @@ public actor ContainersService {
         // A process that has exited answers with its exit, as `docker wait` does, whether the
         // container is stopped or already removed.
         if Self.isInitProcess(id: id, processID: processID) {
-            let current = self.containers[id].map {
-                RecentExits.Current(incarnation: $0.snapshot.incarnation, isStopped: $0.snapshot.status == .stopped)
+            let current = self.containers[id].map { state in
+                RecentExits.Current(
+                    incarnation: state.snapshot.incarnation,
+                    isStopped: state.snapshot.status == .stopped,
+                    recordedExit: state.snapshot.exitCode.map { ExitStatus(exitCode: $0, exitedAt: state.snapshot.exitedAt ?? .now) })
             }
             if let status = recentExits.lateExit(for: id, current: current, at: .now) {
                 return status
@@ -1507,7 +1515,7 @@ public actor ContainersService {
         // `run` starts the process and then waits on it. A process that ends first has no
         // runtime left when that wait arrives, and may be removed already (`--rm`): the wait
         // still needs its exit.
-        if let code, !waitFailed { recentExits.record(code, for: id, incarnation: expectedIncarnation, at: .now) }
+        if let code, !waitFailed { recordExit(code, of: id, incarnation: expectedIncarnation) }
 
         try await self.tearDownRuntime(id: id, client: state.client, responseTimeout: responseTimeout)
 
