@@ -32,6 +32,7 @@ import TerminalProgress
 public actor ImagesService {
     private let log: Logger
     private var logins = RegistryLoginLedger()
+    private let registry: RegistryAccess
     private let contentStore: ContentStore
     private let imageStore: ImageStore
     private let snapshotStore: SnapshotStore
@@ -42,10 +43,22 @@ public actor ImagesService {
         snapshotStore: SnapshotStore,
         log: Logger
     ) throws {
+        try self.init(contentStore: contentStore, imageStore: imageStore, snapshotStore: snapshotStore, log: log, registry: .live)
+    }
+
+    /// With `registry` in place of the live registry and keychain, for tests.
+    init(
+        contentStore: ContentStore,
+        imageStore: ImageStore,
+        snapshotStore: SnapshotStore,
+        log: Logger,
+        registry: RegistryAccess
+    ) throws {
         self.contentStore = contentStore
         self.imageStore = imageStore
         self.snapshotStore = snapshotStore
         self.log = log
+        self.registry = registry
     }
 
     private func _list() async throws -> [Containerization.Image] {
@@ -176,38 +189,19 @@ public actor ImagesService {
         let host = Reference.resolveDomain(domain: server)
         let ticket = logins.begin(host, at: .now)
         let authentication = BasicAuthentication(username: username, password: password)
-        try await RegistryLoginLedger.checking(server) {
-            if target.scheme == "http" {
-                // Basic auth sent up front to that exact origin, as for an explicit-HTTP pull.
-                try await ExplicitHTTPRegistryClient(host: target.host, port: target.port, authentication: authentication).ping()
-            } else {
-                let client = RegistryClient(
-                    host: target.host,
-                    scheme: target.scheme,
-                    port: target.port,
-                    authentication: authentication,
-                    retryOptions: .init(
-                        maxRetries: 10,
-                        retryInterval: 300_000_000,
-                        shouldRetry: ({ response in
-                            response.status.code >= 500
-                        })
-                    ),
-                    tlsConfiguration: TLSUtils.makeEnvironmentAwareTLSConfiguration()
-                )
-                try await client.ping()
-            }
+        let registry = self.registry
+        try await RegistryLoginLedger.checking(server, within: registry.deadline) {
+            try await registry.check(target, authentication)
         }
         // No suspension from here to the save: the actor runs no other sign-in or sign-out
         // for this host in between.
-        guard logins.mayKeep(ticket, at: .now) else {
+        guard logins.mayKeep(ticket, at: .now, deadline: registry.deadline) else {
             log.info("registry login dropped: replaced or past its deadline", metadata: ["server": "\(server)"])
             throw ContainerizationError(
                 .cancelled,
                 message: "the login to \(server) was replaced by a later sign-in or sign-out, or ran past its deadline")
         }
-        let keychain = KeychainHelper(securityDomain: Constants.keychainID)
-        try keychain.save(hostname: host, username: username, password: password)
+        try registry.keep(host, username, password)
         log.info("registry login kept", metadata: ["server": "\(server)"])
     }
 
@@ -217,7 +211,7 @@ public actor ImagesService {
         // A login for this host still checking the registry keeps nothing after this.
         _ = logins.begin(host, at: .now)
         do {
-            try KeychainHelper(securityDomain: Constants.keychainID).delete(hostname: host)
+            try registry.forget(host)
         } catch {
             throw Self.logoutError(error, host: host)
         }
