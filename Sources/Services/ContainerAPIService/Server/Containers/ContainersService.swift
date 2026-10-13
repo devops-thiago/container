@@ -531,6 +531,24 @@ public actor ContainersService {
         recentExits.record(status, for: id, incarnation: incarnation, at: .now)
     }
 
+    /// Called under the lifecycle lock after bootstrap succeeds, before publishing the
+    /// runtime for a new run. Kept as a service operation so wait and reload tests exercise
+    /// the same memory and bundle boundary as bootstrap.
+    @discardableResult
+    func prepareNewRun(id: String) throws -> ContainerState {
+        var state = try self._getContainerState(id: id)
+        let bundle = ContainerResource.Bundle(path: containerRoot.appendingPathComponent(id))
+        // Old bundles infer hasBeenStarted from the exit file; preserve that migration
+        // before removing the file on which it depended.
+        try bundle.setRestartRecord(state.restartRecord)
+        try bundle.clearExitStatus()
+        state.snapshot.exitCode = nil
+        state.snapshot.exitedAt = nil
+        recentExits.forget(id)
+        containers[id] = state
+        return state
+    }
+
     /// Hold an address for every container that exists, once the networks are up. The
     /// helpers start empty with the engine, so the reservations made at create are made
     /// again here; in id order, so the outcome does not depend on dictionary order.
@@ -678,11 +696,10 @@ public actor ContainersService {
                 }
             )
 
+            state = try prepareNewRun(id: id)
             state.client = runtimeClient
             state.run = run
             state.exitRequested = false
-            // A new run: the last one's exit is no answer for a wait on this one.
-            recentExits.forget(id)
             await self.setContainerState(id, state, context: context)
         } catch {
             let label = try? self.pluginLoader.fullLaunchdLabel(
@@ -1403,7 +1420,7 @@ public actor ContainersService {
         try await client.clean(id: id)
     }
 
-    private func handleContainerExit(
+    func handleContainerExit(
         id: String,
         code: ExitStatus? = nil,
         waitFailed: Bool = false,
@@ -2111,7 +2128,7 @@ public actor ContainersService {
         )
     }
 
-    private func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {
+    func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {
         let old = self.containers[id]?.snapshot
         self.containers[id] = state
         await self.peerMembershipChanged(old: old, new: state.snapshot)

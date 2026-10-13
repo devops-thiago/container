@@ -19,6 +19,7 @@ import ContainerPlugin
 import ContainerResource
 import Containerization
 import ContainerizationError
+import ContainerizationExtras
 import Foundation
 import Logging
 import Testing
@@ -51,6 +52,7 @@ struct ContainersServiceWaitTests {
             try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
             let resource = ContainerResource.Bundle(path: bundle)
             try resource.set(configuration: configuration)
+            try JSONEncoder().encode(ContainerCreateOptions(autoRemove: false)).write(to: bundle.appendingPathComponent("options.json"))
             if let exit { try resource.setExitStatus(exit) }
         }
 
@@ -145,4 +147,103 @@ struct ContainersServiceWaitTests {
             _ = try await service.wait(id: fixture.id, processID: "exec-1")
         }
     }
+    @Test("a new run forgets the prior exit in memory and on disk before it can answer a wait", arguments: [Int32(0), 7])
+    func newRunDoesNotInheritExit(code: Int32) async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanup() }
+        let oldDate = Date(timeIntervalSinceNow: -3600)
+        try fixture.addStoppedContainer(exit: ExitRecord(exitCode: code, exitedAt: oldDate))
+        let service = try fixture.service()
+        let oldState = try await service.prepareNewRun(id: fixture.id)
+        #expect(oldState.snapshot.exitCode == nil)
+        #expect(oldState.snapshot.exitedAt == nil)
+        #expect(ContainerResource.Bundle(path: fixture.bundle).exitStatus == nil)
+        #expect(ContainerResource.Bundle(path: fixture.bundle).restartRecord.hasBeenStarted)
+
+        // Stop/kill without an exit callback cannot resurrect the preceding result.
+        // There is no runtime in this fixture: an unknown exit must remain an error.
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await service.wait(id: fixture.id, processID: fixture.id)
+        }
+        let reloaded = try fixture.service()
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await reloaded.wait(id: fixture.id, processID: fixture.id)
+        }
+    }
+
+    @Test("the new run's exit replaces the previous one after its start boundary")
+    func newRunAnswersWithItsOwnExit() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanup() }
+        try fixture.addStoppedContainer(exit: ExitRecord(exitCode: 0, exitedAt: Date(timeIntervalSinceNow: -3600)))
+        let service = try fixture.service()
+        let state = try await service.prepareNewRun(id: fixture.id)
+        let now = Date()
+        await service.recordExit(ExitStatus(exitCode: 137, exitedAt: now), of: fixture.id, incarnation: state.snapshot.incarnation)
+        let answer = try await service.wait(id: fixture.id, processID: fixture.id)
+        #expect(answer.exitCode == 137)
+        #expect(answer.exitedAt == now)
+        // The next start must also invalidate the recent-exit cache.
+        try await service.prepareNewRun(id: fixture.id)
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await service.wait(id: fixture.id, processID: fixture.id)
+        }
+    }
+
+    @Test("a never-run container can prepare again without an exit record")
+    func preparingWithoutExitIsIdempotent() async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanup() }
+        try fixture.addStoppedContainer(exit: nil)
+        let service = try fixture.service()
+        try await service.prepareNewRun(id: fixture.id)
+        try await service.prepareNewRun(id: fixture.id)
+        #expect(ContainerResource.Bundle(path: fixture.bundle).exitStatus == nil)
+    }
+
+    @Test("the second run cannot inherit the first exit in either completion order", arguments: [true, false])
+    func secondRunCompletionOrders(callbackFirst: Bool) async throws {
+        let fixture = Fixture()
+        defer { fixture.cleanup() }
+        let oldDate = Date(timeIntervalSinceNow: -3600)
+        try fixture.addStoppedContainer(exit: ExitRecord(exitCode: 0, exitedAt: oldDate))
+        let service = try fixture.service()
+        var running = try await service.prepareNewRun(id: fixture.id)
+        let run = UUID()
+        running.run = run
+        running.snapshot.status = .running
+        running.exitRequested = true
+        // Publish a successful start through the real state setter. There is no VM or
+        // helper in this fixture; the real exit handler still performs record/stop cleanup.
+        let state = running
+        try await AsyncLock().withLock { context in
+            await service.setContainerState(fixture.id, state, context: context)
+        }
+        let currentExit = ExitStatus(exitCode: 137, exitedAt: Date())
+        for code in callbackFirst ? [currentExit, nil] : [nil, currentExit] {
+            try await service.handleContainerExit(
+                id: fixture.id, code: code,
+                expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
+        }
+        for reader in [service, try fixture.service()] {
+            if callbackFirst {
+                let answer = try await reader.wait(id: fixture.id, processID: fixture.id)
+                #expect(answer.exitCode == 137)
+                #expect(answer.exitedAt == currentExit.exitedAt)
+            } else {
+                await #expect(throws: ContainerizationError.self) {
+                    _ = try await reader.wait(id: fixture.id, processID: fixture.id)
+                }
+            }
+        }
+        // An earlier run's callback must not restore its result once another run begins.
+        try await service.prepareNewRun(id: fixture.id)
+        try await service.handleContainerExit(
+            id: fixture.id, code: ExitStatus(exitCode: 0, exitedAt: oldDate),
+            expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
+        await #expect(throws: ContainerizationError.self) {
+            _ = try await service.wait(id: fixture.id, processID: fixture.id)
+        }
+    }
+
 }
