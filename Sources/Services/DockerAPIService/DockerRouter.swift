@@ -91,6 +91,9 @@ public struct DockerRouter: Sendable {
 
     private var routes: [Route] = []
     private let log: Logger
+    /// Asked before every route runs; a non-nil answer is sent instead. The agent refuses
+    /// everything while no app owns the engine.
+    public var gate: (@Sendable () async -> DockerAPIError?)?
 
     public init(log: Logger = Logger(label: "DockerAPIService")) {
         self.log = log
@@ -117,6 +120,9 @@ public struct DockerRouter: Sendable {
         let method = request.method == .HEAD ? HTTPMethod.GET : request.method
         for route in routes where route.method == method {
             guard let values = route.match(request.segments) else { continue }
+            if let gate, let refusal = await gate() {
+                return .error(refusal)
+            }
             do {
                 return try await route.handler(request, RouteParameters(values: values))
             } catch let error as DockerAPIError {

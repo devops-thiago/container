@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import Logging
 import NIOCore
 import NIOHTTP1
@@ -44,15 +45,33 @@ public struct DockerAPIServer: Sendable {
     ///
     /// `.forwardBytes` keeps bytes that follow an upgraded request, such as stdin typed before
     /// the 101 was read, for the hijacked stream instead of dropping them.
-    public func initialize(_ channel: any Channel) -> EventLoopFuture<Void> {
+    ///
+    /// With `allowedUID`, a connection from any other user is closed before it is read. The
+    /// socket's directory already keeps other users out; this holds even if it did not.
+    public func initialize(_ channel: any Channel, allowedUID: uid_t? = nil) -> EventLoopFuture<Void> {
         let router = self.router
         let limits = self.limits
         let log = self.log
-        return channel.eventLoop.makeCompletedFuture {
-            let encoder = HTTPResponseEncoder()
-            let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
-            let handler = DockerHTTPHandler(router: router, limits: limits, log: log, encoder: encoder, decoder: decoder)
-            try channel.pipeline.syncOperations.addHandlers([encoder, decoder, handler])
+        let install: @Sendable () -> EventLoopFuture<Void> = {
+            channel.eventLoop.makeCompletedFuture {
+                let encoder = HTTPResponseEncoder()
+                let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
+                let handler = DockerHTTPHandler(router: router, limits: limits, log: log, encoder: encoder, decoder: decoder)
+                try channel.pipeline.syncOperations.addHandlers([encoder, decoder, handler])
+            }
+        }
+        guard let allowedUID else { return install() }
+        guard let provider = channel as? any SocketOptionProvider else {
+            return channel.eventLoop.makeFailedFuture(DockerAPIError(.forbidden, "cannot identify the client"))
+        }
+        let credentials: EventLoopFuture<xucred> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_LOCAL), name: SocketOptionName(LOCAL_PEERCRED))
+        return credentials.flatMap { peer in
+            guard peer.cr_version == XUCRED_VERSION, peer.cr_uid == allowedUID else {
+                log.warning("refused a connection from another user", metadata: ["uid": "\(peer.cr_uid)"])
+                return channel.close().flatMapThrowing { throw DockerAPIError(.forbidden, "connection from another user") }
+            }
+            return install()
         }
     }
 }

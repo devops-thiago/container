@@ -31,14 +31,16 @@ struct DockerAPIServerTests {
         let server: any Channel
         let path: String
 
-        static func start(limits: DockerHTTPLimits = .init(), routes: (inout DockerRouter) -> Void) async throws -> Harness {
+        static func start(
+            limits: DockerHTTPLimits = .init(), allowedUID: uid_t? = nil, routes: (inout DockerRouter) -> Void
+        ) async throws -> Harness {
             var router = DockerRouter()
             routes(&router)
             let service = DockerAPIServer(router: router, limits: limits)
             // Short: a unix socket path has to fit in 104 bytes.
             let path = "/tmp/dapi-\(UUID().uuidString.prefix(8)).sock"
             let server = try await DockerAPIServer.configure(ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton))
-                .childChannelInitializer { service.initialize($0) }
+                .childChannelInitializer { service.initialize($0, allowedUID: allowedUID) }
                 .bind(unixDomainSocketPath: path, cleanupExistingSocketFile: true)
                 .get()
             return Harness(server: server, path: path)
@@ -295,6 +297,24 @@ struct DockerAPIServerTests {
             let first = try #require(all.range(of: "first"))
             let second = try #require(all.range(of: "second"))
             #expect(first.lowerBound < second.lowerBound)
+        }
+    }
+
+    @Test("a connection from another user is closed unread, and this user's is served")
+    func peerCredentials() async throws {
+        let refusing = try await Harness.start(allowedUID: getuid() &+ 1) { SystemRoutes.register(on: &$0, engine: Self.fakeEngine) }
+        defer { Task { try? await refusing.stop() } }
+        try await refusing.withClient { client in
+            // Connection: close, so a server that wrongly answers ends the read at once.
+            try? await client.send("GET /_ping HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            #expect(((try? await client.readToEnd()) ?? "") == "")
+        }
+        // Control: the same server for this user answers.
+        let serving = try await Harness.start(allowedUID: getuid()) { SystemRoutes.register(on: &$0, engine: Self.fakeEngine) }
+        defer { Task { try? await serving.stop() } }
+        try await serving.withClient { client in
+            try await client.send("GET /_ping HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            #expect(try await client.readToEnd().hasSuffix("OK"))
         }
     }
 

@@ -80,7 +80,8 @@ STAGED_EXECUTABLES := \
 	libexec/container/plugins/machine-apiserver/bin/machine-apiserver \
 	libexec/container/plugins/cluster/bin/cluster \
 	libexec/container/plugins/build/bin/build \
-	libexec/container/plugins/builder/bin/builder
+	libexec/container/plugins/builder/bin/builder \
+	libexec/container/plugins/container-docker-api/bin/container-docker-api
 # The build products those executables are installed from, by product name.
 # Keep in sync with the install steps in $(STAGING_DIR): `dsym` archives a dSYM
 # for each one.
@@ -93,7 +94,8 @@ DSYM_PRODUCTS := \
 	machine-apiserver \
 	cluster \
 	container-build \
-	container-builder
+	container-builder \
+	container-docker-api
 
 # Default isolated application data root under the project directory so test runs do not touch your
 # own installation. Override with APP_ROOT=/your/path, or APP_ROOT= (empty) to run against
@@ -221,6 +223,7 @@ $(STAGING_DIR):
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/build/bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/builder/bin)"
 	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/compose/bin)"
+	@mkdir -p "$(join $(STAGING_DIR), libexec/container/plugins/container-docker-api/bin)"
 
 	@install "$(BUILD_BIN_DIR)/container" "$(join $(STAGING_DIR), bin/container)"
 	@install "$(BUILD_BIN_DIR)/container-apiserver" "$(join $(STAGING_DIR), bin/container-apiserver)"
@@ -251,6 +254,8 @@ $(STAGING_DIR):
 	@install Sources/Plugins/ContainerBuilder/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/builder/config.toml)"
 	@install "$(BUILD_BIN_DIR)/compose" "$(join $(STAGING_DIR), libexec/container/plugins/compose/bin/compose)"
 	@install Sources/Plugins/Compose/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/compose/config.toml)"
+	@install "$(BUILD_BIN_DIR)/container-docker-api" "$(join $(STAGING_DIR), libexec/container/plugins/container-docker-api/bin/container-docker-api)"
+	@install Sources/Plugins/DockerAPI/config.toml "$(join $(STAGING_DIR), libexec/container/plugins/container-docker-api/config.toml)"
 
 	@echo Install update script
 	@install scripts/update-container.sh "$(join $(STAGING_DIR), bin/update-container.sh)"
@@ -278,6 +283,7 @@ installer-pkg: $(STAGING_DIR)
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/build/bin/build)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/builder/bin/builder)"
 	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/compose/bin/compose)"
+	@codesign $(CODESIGN_OPTS) --prefix=com.apple.container. "$(join $(STAGING_DIR), libexec/container/plugins/container-docker-api/bin/container-docker-api)"
 
 	@echo Creating application installer
 	@pkgbuild --root "$(STAGING_DIR)" --identifier com.apple.container-installer --install-location /usr/local --version ${RELEASE_VERSION} $(PKG_PATH)
@@ -337,7 +343,8 @@ COV_BINARIES := \
 	$(BUILD_BIN_DIR)/container-core-clusters \
 	$(BUILD_BIN_DIR)/machine-apiserver \
 	$(BUILD_BIN_DIR)/container-build \
-	$(BUILD_BIN_DIR)/container-builder
+	$(BUILD_BIN_DIR)/container-builder \
+	$(BUILD_BIN_DIR)/container-docker-api
 COV_OBJECT_FLAGS := $(patsubst %,-object %,$(COV_BINARIES))
 # Set of files we do not want to get caught in the coverage generation
 LLVM_COV_IGNORE := \
