@@ -34,6 +34,32 @@ public enum PathUtils {
         return directory
     }
 
+    /// Where engine services publish sockets for clients outside the engine:
+    /// `<group container>/run`, or `run` beside the app root without an app group.
+    ///
+    /// Created 0700 for this user. A symlink, something other than a directory, or a
+    /// directory another user owns is refused rather than used, because whoever controls
+    /// this directory controls who reaches what is published in it.
+    public static func runDirectory() throws -> URL {
+        try runDirectory(in: BaseConfigPath.groupContainer() ?? BaseConfigPath.appRoot.basePath().removingLastComponent())
+    }
+
+    static func runDirectory(in base: FilePath) throws -> URL {
+        let path = base.appending("run").string
+        if mkdir(path, 0o700) != 0 && errno != EEXIST {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var info = stat()
+        guard lstat(path, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid() else {
+            throw POSIXError(.EPERM)
+        }
+        if info.st_mode & 0o777 != 0o700, chmod(path, 0o700) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
     public enum BaseConfigPath {
         case home
         case appRoot
