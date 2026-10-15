@@ -141,7 +141,7 @@ struct StateGenerationTests {
         #expect(StateGeneration.shared.current > before)
     }
 
-    @Test("loading the containers it keeps, and removing one, count")
+    @Test("removing a container it keeps counts")
     func containersCount() async throws {
         let f = Fixture()
         defer { f.cleanup() }
@@ -155,12 +155,12 @@ struct StateGenerationTests {
                     mediaType: "application/vnd.oci.image.manifest.v1+json", digest: "sha256:" + String(repeating: "0", count: 64), size: 0)),
             process: .init(executable: "/bin/true", arguments: [], environment: []))
         try ContainerResource.Bundle(path: bundle).set(configuration: configuration)
-        var before = StateGeneration.shared.current
-        // The engine loads a container only when its runtime plugin is there.
+        // The engine loads a container only when its runtime plugin is there. Loading is not a
+        // change: it happens in the initializer, before any client has a count to compare, and
+        // a fresh process is told apart by its nonce.
         let service = try f.containers(type: "runtime", name: configuration.runtimeHandler)
         #expect(try await service.list().map(\.id) == [f.id])
-        #expect(StateGeneration.shared.current > before)
-        before = StateGeneration.shared.current
+        let before = StateGeneration.shared.current
         try await service.delete(id: f.id, force: false)
         #expect(try await service.list().isEmpty)
         #expect(StateGeneration.shared.current > before)
