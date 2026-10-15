@@ -111,6 +111,10 @@ extension ImagesHelper {
             }
         }
 
+        /// Identifies this helper process, so a client can tell a restarted helper's image state
+        /// generation, which starts over, from this one's.
+        static let processNonce = UUID().uuidString
+
         private func initializeImagesService(root: FilePath, containerSystemConfig: ContainerSystemConfig, log: Logger, routes: inout [String: XPCServer.RouteHandler]) throws {
             // TODO: remove as part of ImageStore URL removal PR
             let rootURL = URL(fileURLWithPath: root.string)
@@ -128,6 +132,12 @@ extension ImagesHelper {
 
             routes[ImagesServiceXPCRoute.imagePull.rawValue] = XPCServer.route(harness.pull)
             routes[ImagesServiceXPCRoute.imagePlatforms.rawValue] = XPCServer.route(harness.platforms)
+            routes[ImagesServiceXPCRoute.imageState.rawValue] = XPCServer.route { message in
+                let reply = message.reply()
+                reply.set(key: ImagesServiceXPCKeys.imagesProcessNonce.rawValue, value: Self.processNonce)
+                reply.set(key: ImagesServiceXPCKeys.imagesStateGeneration.rawValue, value: StateGeneration.shared.current)
+                return reply
+            }
             routes[ImagesServiceXPCRoute.imageList.rawValue] = XPCServer.route(harness.list)
             routes[ImagesServiceXPCRoute.imageDelete.rawValue] = XPCServer.route(harness.delete)
             routes[ImagesServiceXPCRoute.imageTag.rawValue] = XPCServer.route(harness.tag)

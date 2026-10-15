@@ -17,6 +17,7 @@
 import ContainerAPIClient
 import ContainerImagesServiceClient
 import ContainerResource
+import ContainerXPC
 import Containerization
 import ContainerizationArchive
 import ContainerizationError
@@ -99,6 +100,8 @@ public actor ImagesService {
     public func pull(reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?, maxConcurrentDownloads: Int = 3) async throws
         -> ImageDescription
     {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         self.log.debug(
             "ImagesService: enter",
             metadata: [
@@ -299,6 +302,8 @@ public actor ImagesService {
     }
 
     public func tag(old: String, new: String) async throws -> ImageDescription {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         self.log.debug(
             "ImagesService: enter",
             metadata: [
@@ -323,6 +328,8 @@ public actor ImagesService {
     }
 
     public func delete(reference: String, garbageCollect: Bool) async throws {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         self.log.debug(
             "ImagesService: enter",
             metadata: [
@@ -373,6 +380,8 @@ public actor ImagesService {
     }
 
     public func load(from tarFile: URL, force: Bool) async throws -> ([ImageDescription], [String]) {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         let archivePathname = tarFile.absolutePath()
         self.log.debug(
             "ImagesService: enter",
@@ -508,6 +517,8 @@ public actor ImagesService {
 
 extension ImagesService {
     public func unpack(description: ImageDescription, platform: Platform?, progressUpdate: ProgressUpdateHandler?) async throws {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         self.log.debug(
             "ImagesService: enter",
             metadata: [
@@ -532,6 +543,8 @@ extension ImagesService {
     }
 
     public func deleteImageSnapshot(description: ImageDescription, platform: Platform?) async throws {
+        // A change to what the image list shows, counted however it ends.
+        defer { StateGeneration.shared.advance() }
         self.log.debug(
             "ImagesService: enter",
             metadata: [
