@@ -33,6 +33,7 @@ let package = Package(
         .library(name: "ContainerBuild", targets: ["ContainerBuild"]),
         .library(name: "ContainerAPIService", targets: ["ContainerAPIService"]),
         .library(name: "ContainerAPIClient", targets: ["ContainerAPIClient"]),
+        .library(name: "DockerAPIService", targets: ["DockerAPIService"]),
         .library(name: "ContainerImagesService", targets: ["ContainerImagesService", "ContainerImagesServiceClient"]),
         .library(name: "ContainerNetworkClient", targets: ["ContainerNetworkClient"]),
         .library(name: "ContainerNetworkServer", targets: ["ContainerNetworkServer"]),
@@ -676,6 +677,25 @@ let package = Package(
         .testTarget(
             name: "TerminalProgressTests",
             dependencies: ["TerminalProgress"]
+        ),
+        .target(
+            name: "DockerAPIService",
+            dependencies: [
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            path: "Sources/Services/DockerAPIService"
+        ),
+        .testTarget(
+            name: "DockerAPIServiceTests",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                "DockerAPIService",
+            ]
         ),
         .target(
             name: "DNSServer",
