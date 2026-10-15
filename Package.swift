@@ -688,6 +688,24 @@ let package = Package(
             ],
             path: "Sources/Services/DockerAPIService"
         ),
+        .executableTarget(
+            name: "container-docker-api",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "SystemPackage", package: "swift-system"),
+                "ContainerAPIClient",
+                "ContainerLog",
+                "ContainerPersistence",
+                "ContainerPlugin",
+                "ContainerVersion",
+                "DockerAPIService",
+            ],
+            path: "Sources/Plugins/DockerAPI",
+            exclude: ["config.toml"]
+        ),
         .testTarget(
             name: "DockerAPIServiceTests",
             dependencies: [

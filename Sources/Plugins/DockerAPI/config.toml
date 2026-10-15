@@ -1,0 +1,13 @@
+abstract = "Docker Engine API for the Docker CLI"
+author = "SiliconShip"
+
+# Registered by the embedding app only while its "Docker CLI" setting is on, never by
+# `container system start`.
+[servicesConfig]
+loadAtBoot = false
+runAtLoad = false
+defaultArguments = []
+
+[[servicesConfig.services]]
+type = "core"
+description = "Serve the Docker Engine API on a unix socket in the app group container."
