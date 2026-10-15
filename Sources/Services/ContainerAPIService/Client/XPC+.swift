@@ -101,6 +101,8 @@ public enum XPCKeys: String {
     case lifecycleProtocolVersion
     case lifecycleGeneration
     case processNonce
+    /// How many observable changes the API server has made since it started (`StateGeneration`).
+    case stateGeneration
 
     /// Generation-aware system shutdown.
     case expectedLifecycleGeneration

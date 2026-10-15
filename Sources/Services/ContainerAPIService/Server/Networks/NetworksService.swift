@@ -47,7 +47,9 @@ public actor NetworksService {
     private var busyNetworks = Set<String>()
 
     private let stateLock = AsyncLock()
-    private var serviceStates = [String: NetworkEntry]()
+    private var serviceStates = [String: NetworkEntry]() {
+        didSet { StateGeneration.shared.advance() }
+    }
 
     /// One open session per attachment of every container that exists, started or not. The
     /// network helper keeps an address for as long as a session holds its hostname, so the
