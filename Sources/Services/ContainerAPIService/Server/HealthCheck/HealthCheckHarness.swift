@@ -69,6 +69,7 @@ public actor HealthCheckHarness {
         if let processNonce {
             reply.set(key: .processNonce, value: processNonce)
         }
+        reply.set(key: .stateGeneration, value: StateGeneration.shared.current)
         if let lifecycleGeneration {
             reply.set(key: .lifecycleProtocolVersion, value: SystemHealth.currentLifecycleProtocolVersion)
             reply.set(key: .lifecycleGeneration, value: lifecycleGeneration)

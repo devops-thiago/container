@@ -191,6 +191,18 @@ extension ClientImage {
         return updatedRawReference
     }
 
+    /// The images helper's process nonce and how many image changes it has made since it
+    /// started (pulls, tags, deletes, loads, unpacks). The count is only comparable for one
+    /// nonce. Nil from a helper that does not report them.
+    public static func state() async throws -> (processNonce: String, stateGeneration: UInt64)? {
+        let reply = try await newXPCClient().send(newRequest(.imageState))
+        guard
+            let nonce = reply.string(key: ImagesServiceXPCKeys.imagesProcessNonce.rawValue),
+            let generation = reply.uint64IfPresent(key: ImagesServiceXPCKeys.imagesStateGeneration.rawValue)
+        else { return nil }
+        return (nonce, generation)
+    }
+
     public static func list() async throws -> [ClientImage] {
         let client = newXPCClient()
         let request = newRequest(.imageList)

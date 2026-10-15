@@ -109,7 +109,11 @@ public actor ContainersService {
     private static let incarnationFilename = "incarnation"
 
     private let lock: AsyncLock
-    private var containers: [String: ContainerState]
+    /// Every write is counted: a container made, removed, started, stopped, exited, restarted
+    /// or whose health changed is what a client's listing would show differently.
+    private var containers: [String: ContainerState] {
+        didSet { StateGeneration.shared.advance() }
+    }
     /// The last exit of each recently stopped container, for a wait that comes after it.
     private var recentExits = RecentExits()
     /// Host directories a sandboxed embedder has granted, per container. Inert unsandboxed.

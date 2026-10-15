@@ -16,6 +16,7 @@
 
 import ContainerPersistence
 import ContainerResource
+import ContainerXPC
 import Containerization
 import ContainerizationEXT4
 import ContainerizationError
@@ -68,6 +69,8 @@ public actor VolumesService {
         driverOpts: [String: String] = [:],
         labels: [String: String] = [:]
     ) async throws -> VolumeConfiguration {
+        // Counted however it ends: a failure part way can still have changed what is listed.
+        defer { StateGeneration.shared.advance() }
         log.debug(
             "VolumesService: enter",
             metadata: [
@@ -91,6 +94,8 @@ public actor VolumesService {
     }
 
     public func delete(name: String, requiredLabels: [String: String]? = nil) async throws {
+        // Counted however it ends: a failure part way can still have changed what is listed.
+        defer { StateGeneration.shared.advance() }
         log.debug(
             "VolumesService: enter",
             metadata: [

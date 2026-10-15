@@ -51,6 +51,11 @@ public struct SystemHealth: Sendable, Codable {
     /// The unique nonce for this API-server process, absent for legacy API servers.
     public let processNonce: String?
 
+    /// How many observable changes this API-server process has made: containers (their
+    /// state and health included), networks and volumes. Only comparable for one
+    /// `processNonce`. Absent for API servers that do not count.
+    public let stateGeneration: UInt64?
+
     public init(
         appRoot: URL,
         installRoot: URL,
@@ -61,7 +66,8 @@ public struct SystemHealth: Sendable, Codable {
         apiServerAppName: String,
         lifecycleProtocolVersion: UInt64? = nil,
         lifecycleGeneration: String? = nil,
-        processNonce: String? = nil
+        processNonce: String? = nil,
+        stateGeneration: UInt64? = nil
     ) {
         self.appRoot = appRoot
         self.installRoot = installRoot
@@ -73,5 +79,6 @@ public struct SystemHealth: Sendable, Codable {
         self.lifecycleProtocolVersion = lifecycleProtocolVersion
         self.lifecycleGeneration = lifecycleGeneration
         self.processNonce = processNonce
+        self.stateGeneration = stateGeneration
     }
 }
