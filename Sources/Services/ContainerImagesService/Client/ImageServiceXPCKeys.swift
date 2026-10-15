@@ -20,6 +20,10 @@ import ContainerXPC
 
 /// Keys for XPC fields.
 public enum ImagesServiceXPCKeys: String {
+    /// Identifies one images-helper process; its state generation is only comparable within it.
+    case imagesProcessNonce
+    /// How many image changes the helper process has made.
+    case imagesStateGeneration
     case fd
     /// FDs pointing to container logs key.
     case logs

@@ -19,6 +19,8 @@ import Foundation
 import ContainerXPC
 
 public enum ImagesServiceXPCRoute: String {
+    /// The helper's process nonce and how many image changes it has made (`StateGeneration`).
+    case imageState
     case imageList
     case imagePull
     case imagePush
