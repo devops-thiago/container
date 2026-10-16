@@ -192,8 +192,9 @@ public enum BuildRoutes {
                 if let error = error as? DockerAPIError { throw error }
                 throw DockerAPIError.internalError("could not store the build context: \(error)")
             }
-            // Without a name the image still needs one here, as `container build` gives it.
-            let tags = parameters.tags.isEmpty ? [try DockerImageReference(UUID().uuidString.lowercased())] : parameters.tags
+            // Without a name the image is built under a reserved one, which no client sees, and
+            // kept as dockerd keeps an image with no name (see `keepUnnamed`).
+            let tags = parameters.tags.isEmpty ? [try Self.unnamedBuildReference()] : parameters.tags
             let build = DockerBuildRequest(
                 context: prepared.context, dockerfile: prepared.dockerfile, dockerignore: prepared.dockerignore, tags: tags.map(\.normalized),
                 buildArgs: parameters.buildArgs, labels: parameters.labels, target: parameters.target, noCache: parameters.noCache,
@@ -202,6 +203,28 @@ public enum BuildRoutes {
                 defer { try? FileManager.default.removeItem(at: directory) }
                 try await self.run(build, named: parameters.tags, quiet: parameters.quiet, writer: writer)
             }
+        }
+
+        /// The engine reference a build without a name is made under: a tag in the reserved
+        /// `moby-dangling` repository, unique to the build. `keepUnnamed` replaces it once the
+        /// image's digest is known.
+        static func unnamedBuildReference() throws(DockerAPIError) -> DockerImageReference {
+            try DockerImageReference("moby-dangling:build-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))
+        }
+
+        /// Keeps an image built without a name as Docker 29's containerd image store keeps one:
+        /// under `moby-dangling@<digest>`, which makes it `<none>:<none>`, listed by
+        /// `dangling=true` and removed by a plain prune. The build's own reserved tag goes. Should
+        /// either step fail, the image is still held by a reserved reference, so it still shows
+        /// as dangling. Returns the image's ID.
+        func keepUnnamed(_ reference: String) async throws -> String {
+            let built = try DockerImageCatalog(try await images.list()).resolve(reference)
+            let digest = built.record?.target.digest ?? built.image.id
+            let marker = "\(EngineImageRecord.danglingRepository)@\(digest)"
+            if (try? await images.tag(reference, as: marker)) != nil {
+                try? await images.delete(reference)
+            }
+            return built.image.id
         }
 
         /// The body as a file: the one the HTTP layer spooled, or one written here from a body
@@ -224,7 +247,11 @@ public enum BuildRoutes {
                 try await builder.build(build) { await output.append($0) }
                 await output.finish()
                 try Task.checkCancellation()
-                id = try DockerImageCatalog(try await images.list()).resolve(build.tags[0]).image.id
+                if named.isEmpty {
+                    id = try await keepUnnamed(build.tags[0])
+                } else {
+                    id = try DockerImageCatalog(try await images.list()).resolve(build.tags[0]).image.id
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch {

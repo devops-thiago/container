@@ -39,6 +39,8 @@ final class FakeBuilder: EngineBuilder, Sendable {
         var hold = false
         /// Whether a held build saw its context still there when it was cancelled.
         var contextAtCancel: Bool?
+        /// The ID, and index digest, of the image the next build makes.
+        var imageID: Character = FakeBuilder.imageID
     }
 
     static let imageID: Character = "f"
@@ -71,8 +73,9 @@ final class FakeBuilder: EngineBuilder, Sendable {
             }
         }
         if let failure { throw failure }
+        let id = state.withLock { $0.imageID }
         images.state.withLock { state in
-            for tag in request.tags { state.records.append(StoreFixtures.record(tag, id: Self.imageID)) }
+            for tag in request.tags { state.records.append(StoreFixtures.record(tag, id: id)) }
         }
     }
 
@@ -454,7 +457,25 @@ struct BuildRoutesTests {
         #expect(try scratchEntries().isEmpty)
     }
 
-    @Test("without a name the image gets one for the engine, and no Successfully tagged line is sent")
+    func imageRouter() -> DockerRouter {
+        var router = DockerRouter()
+        ImageRoutes.register(on: &router, engine: images, containers: FakeEngine(), identities: DockerIdentityStore(persistence: nil), scratch: scratch)
+        return router
+    }
+
+    func imageCall(_ method: HTTPMethod, _ uri: String) async throws -> Any {
+        let request = try DockerRequest(method: method, uri: "/v1.48" + uri, headers: [:], body: ByteBuffer())
+        guard case .data(let status, _, let body, _) = await imageRouter().respond(to: request) else {
+            Issue.record("expected a whole response")
+            return [:]
+        }
+        #expect(status == .ok, "\(uri)")
+        return try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8))
+    }
+
+    static let danglingFilter = "/images/json?filters=" + #"{"dangling":["true"]}"#.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+
+    @Test("without a name the image is dangling, as Docker 29 keeps one: moby-dangling@<digest>, <none>:<none>, pruned by a plain prune")
     func untagged() async throws {
         let harness = try await harness()
         defer { Task { try? await harness.stop() } }
@@ -462,8 +483,62 @@ struct BuildRoutesTests {
         #expect(answer.lines.contains { ($0["aux"] as? [String: Any])?["ID"] as? String == Self.id })
         #expect(!answer.text.contains("Successfully tagged"))
         #expect(answer.text.contains("Successfully built ffffffffffff"))
+        // Built under a reserved tag of its own, which is then replaced by the digest form.
         let tag = try #require(builder.requests.first?.tags.first)
-        #expect(tag.wholeMatch(of: #/docker\.io/library/[0-9a-f-]{36}:latest/#) != nil, "\(tag)")
+        #expect(tag.wholeMatch(of: #/docker\.io/library/moby-dangling:build-[0-9a-f]{32}/#) != nil, "\(tag)")
+        #expect(images.references == ["docker.io/library/moby-dangling@" + Self.id])
+
+        // Listed by dangling=true as <none>:<none>: no repo tags, no repo digests.
+        let dangling = try #require(try await imageCall(.GET, Self.danglingFilter) as? [[String: Any]])
+        #expect(dangling.map { $0["Id"] as? String } == [Self.id])
+        #expect((dangling.first?["RepoTags"] as? [String])?.isEmpty == true)
+        #expect((dangling.first?["RepoDigests"] as? [String])?.isEmpty == true)
+        let inspect = try #require(try await imageCall(.GET, "/images/\(Self.id)/json") as? [String: Any])
+        #expect((inspect["RepoTags"] as? [String])?.isEmpty == true)
+        #expect((inspect["RepoDigests"] as? [String])?.isEmpty == true)
+
+        // Control: a tagged build is not dangling, and neither is an image in a repository
+        // whose name only starts with the reserved one.
+        builder.state.withLock { $0.imageID = "e" }
+        _ = try await post(harness, "t=m231-named", body: B.tar(B.context))
+        images.state.withLock { $0.records.append(StoreFixtures.record("docker.io/library/moby-dangling-foo:1", id: "d")) }
+        let all = try #require(try await imageCall(.GET, "/images/json") as? [[String: Any]])
+        let tags = Dictionary(uniqueKeysWithValues: all.map { ($0["Id"] as? String ?? "", $0["RepoTags"] as? [String] ?? []) })
+        #expect(tags[StoreFixtures.digest("e")] == ["m231-named:latest"])
+        #expect(tags[StoreFixtures.digest("d")] == ["moby-dangling-foo:1"])
+        #expect(try #require(try await imageCall(.GET, Self.danglingFilter) as? [[String: Any]]).count == 1)
+
+        // A plain prune removes it, reported by its ID alone, and leaves the named ones.
+        let pruned = try #require(try await imageCall(.POST, "/images/prune") as? [String: Any])
+        let items = try #require(pruned["ImagesDeleted"] as? [[String: String]])
+        #expect(items == [["Deleted": Self.id]])
+        #expect(images.references == ["docker.io/library/m231-named:latest", "docker.io/library/moby-dangling-foo:1"])
+    }
+
+    @Test("naming a dangling image drops its reserved reference; deleting its last name deletes it")
+    func danglingThenNamed() async throws {
+        images.state.withLock { $0.records.append(StoreFixtures.record("docker.io/library/moby-dangling@" + Self.id, id: FakeBuilder.imageID)) }
+        let catalog = DockerImageCatalog(try await images.list())
+        #expect(catalog.images.first?.isDangling == true)
+        // Control: a digest reference in any other repository names the image.
+        let pinned = DockerImageCatalog([StoreFixtures.record("docker.io/library/alpine@" + Self.id, id: FakeBuilder.imageID)])
+        #expect(pinned.images.first?.isDangling == false)
+        #expect(pinned.images.first?.repoDigests == ["alpine@" + Self.id])
+
+        let request = try DockerRequest(method: .POST, uri: "/v1.48/images/\(Self.id)/tag?repo=m231-later&tag=1", headers: [:], body: ByteBuffer())
+        guard case .data(let status, _, _, _) = await imageRouter().respond(to: request) else {
+            Issue.record("expected a whole response")
+            return
+        }
+        #expect(status == .created)
+        #expect(images.references == ["docker.io/library/m231-later:1"])
+        #expect(try #require(try await imageCall(.GET, Self.danglingFilter) as? [[String: Any]]).isEmpty)
+
+        // With the reserved reference back beside a name, deleting the name deletes the image.
+        images.state.withLock { $0.records.append(StoreFixtures.record("docker.io/library/moby-dangling@" + Self.id, id: FakeBuilder.imageID)) }
+        let deleted = try #require(try await imageCall(.DELETE, "/images/m231-later:1") as? [[String: String]])
+        #expect(deleted == [["Untagged": "m231-later:1"], ["Deleted": Self.id]])
+        #expect(images.references.isEmpty)
     }
 
     @Test("q=1 sends the ID alone; a failed quiet build sends what it held back, then the error")
