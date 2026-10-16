@@ -71,7 +71,8 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// out-of-memory kill, a normal exit). A stop records 143 or 137 as Docker does, and this
     /// tells such an exit from a failure with the same code. A signal other than SIGKILL
     /// counts only when the exit shows that signal ended the process. False while a run is
-    /// under way and after a restart under the restart policy. Nil from an engine that does
+    /// under way, after a restart under the restart policy, and when a stop only cancels the
+    /// restart delay of a run that had already ended by itself. Nil from an engine that does
     /// not say, and in snapshots or exit records written before it did: not known.
     public var stopRequested: Bool?
 

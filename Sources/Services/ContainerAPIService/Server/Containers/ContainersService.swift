@@ -1035,9 +1035,9 @@ public actor ContainersService {
         }
         state.cancelPendingRestart()
         state.snapshot.status = .stopped
-        // The run had ended by itself; what keeps the container down now is this stop.
-        state.snapshot.stopRequested = true
-        self.persistStopRequested(of: state.snapshot)
+        // The run had already ended by itself and this stop only cancels the wait, so the
+        // container keeps showing that end, as Docker shows "Exited (1)": stopRequested stays
+        // false, with the crash's code.
         await self.setContainerState(id, state, context: context)
         self.log.info("restart cancelled by a stop", metadata: ["id": "\(id)"])
         if (try? self.getContainerCreationOptions(id: id))?.autoRemove == true {
@@ -1980,10 +1980,8 @@ public actor ContainersService {
             for (id, var state) in await self.containers where state.snapshot.status == .restarting && state.client == nil {
                 state.cancelPendingRestart()
                 state.snapshot.status = .stopped
-                // Down now because the engine is, not because of the exit that set the
-                // restart off.
-                state.snapshot.stopRequested = true
-                await self.persistStopRequested(of: state.snapshot)
+                // Only the wait ends here; the container keeps the crash that set the restart
+                // off, so stopRequested stays false.
                 await self.setContainerState(id, state, context: context)
             }
         }
@@ -2065,8 +2063,7 @@ public actor ContainersService {
     }
 
     /// Keep the snapshot's `stopRequested` with its recorded exit, so an engine start reads
-    /// it: for a stop that ended the restart delay of a run that had already ended, and for a
-    /// requested end that the restart policy overrode.
+    /// it: for a requested end that the restart policy overrode.
     private func persistStopRequested(of snapshot: ContainerSnapshot) {
         guard let code = snapshot.exitCode, let exitedAt = snapshot.exitedAt else { return }
         let bundle = ContainerResource.Bundle(path: self.containerRoot.appendingPathComponent(snapshot.id))

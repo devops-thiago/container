@@ -171,7 +171,7 @@ struct ContainerStopRequestedTests {
         #expect(stopped.stopRequested == true)
     }
 
-    @Test("a crash waiting out its restart delay was not stopped; a stop that ends the wait is, after the engine restarts too")
+    @Test("a stop that ends a crash's restart delay leaves the crash showing, as Docker shows Exited (1), after the engine restarts too")
     func stopDuringRestartDelay() async throws {
         let f = EventServiceFixture()
         defer { f.cleanup() }
@@ -192,10 +192,10 @@ struct ContainerStopRequestedTests {
         let stopped = try await snapshot(service, configuration.id)
         #expect(stopped.status == .stopped)
         #expect(stopped.exitCode == 1)
-        #expect(stopped.stopRequested == true)
+        #expect(stopped.stopRequested == false)
         let reloaded = try await snapshot(try f.service(), configuration.id)
         #expect(reloaded.exitCode == 1)
-        #expect(reloaded.stopRequested == true)
+        #expect(reloaded.stopRequested == false)
     }
 
     @Test("a stop as the engine goes down is a requested end, and unless-stopped still starts the container with the engine")
@@ -222,7 +222,7 @@ struct ContainerStopRequestedTests {
         #expect(RestartRules.startsWithEngine(policy: .unlessStopped, record: record))
     }
 
-    @Test("a crash waiting out its restart delay when the engine goes down is down because of the engine")
+    @Test("the engine going down during a crash's restart delay leaves the crash showing, after the engine restarts too")
     func engineShutdownDuringRestartDelay() async throws {
         let f = EventServiceFixture()
         defer { f.cleanup() }
@@ -238,8 +238,9 @@ struct ContainerStopRequestedTests {
         let stopped = try await snapshot(service, configuration.id)
         #expect(stopped.status == .stopped)
         #expect(stopped.exitCode == 1)
-        #expect(stopped.stopRequested == true)
+        #expect(stopped.stopRequested == false)
         let reloaded = try await snapshot(try f.service(), configuration.id)
-        #expect(reloaded.stopRequested == true)
+        #expect(reloaded.exitCode == 1)
+        #expect(reloaded.stopRequested == false)
     }
 }
