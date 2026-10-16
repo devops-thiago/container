@@ -94,6 +94,17 @@ extension DockerAPIAgent {
                     ? nil : DockerAPIError(.serviceUnavailable, "SiliconShip is not running. Open SiliconShip to use the Docker CLI.")
             }
             SystemRoutes.register(on: &router, engine: EngineSystemClient())
+            // Docker names and IDs outlive the agent here; the labels on the containers it made
+            // bring them back should this go.
+            let identities: DockerIdentityStore
+            do {
+                let stateRoot = try PluginStateRoot(plugin: Self.commandName).path
+                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: URL(fileURLWithPath: stateRoot.string, isDirectory: true)))
+            } catch {
+                log.error("no state directory", metadata: ["error": "\(error)"])
+                DockerAPIAgent.exit(withError: error)
+            }
+            ContainerRoutes.register(on: &router, engine: EngineContainersClient(), identities: identities)
             let service = DockerAPIServer(router: router, log: log)
             let uid = getuid()
 
