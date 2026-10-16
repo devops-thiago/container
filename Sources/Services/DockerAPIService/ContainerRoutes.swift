@@ -37,10 +37,13 @@ public protocol EngineContainers: Sendable {
     func allocatePort() throws -> UInt16
     /// Makes the plan's volumes, its init filesystem and the container. Returns the engine's
     /// incarnation of it.
-    func create(_ plan: DockerCreatePlan) async throws -> String
+    ///
+    /// `requester` is who the engine's folder panel names for a bind mount it has to ask for:
+    /// the client that sent the request (`DockerPeer.requester`), or nil when it is not known.
+    func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String
     /// Bootstraps a created or stopped container's init process with `stdio`, ready to start.
-    /// A failed bootstrap cleans up after itself.
-    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess
+    /// A failed bootstrap cleans up after itself. `requester` is as `create` takes it.
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess
     /// One container by its engine ID, or nil when there is none: what `wait` polls.
     func get(_ engineID: String) async throws -> ContainerSnapshot?
     func stop(_ container: ContainerSnapshot, timeout: Int32, signal: String?) async throws
@@ -75,7 +78,7 @@ public enum ContainerRoutes {
         router.add(.POST, "/containers/prune") { request, _ in try await routes.prune(request) }
         router.add(.GET, "/containers/{id}/json") { _, parameters in try await routes.inspect(try parameters["id"]) }
         router.add(.DELETE, "/containers/{id}") { request, parameters in try await routes.delete(try parameters["id"], request) }
-        router.add(.POST, "/containers/{id}/start") { _, parameters in try await routes.start(try parameters["id"]) }
+        router.add(.POST, "/containers/{id}/start") { request, parameters in try await routes.start(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/stop") { request, parameters in try await routes.stop(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/kill") { request, parameters in try await routes.kill(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/restart") { request, parameters in try await routes.restart(try parameters["id"], request) }
@@ -158,7 +161,7 @@ public enum ContainerRoutes {
                 let plan = try ContainerCreateMapper.plan(
                     body, reservation: reservation, image: image, imageReference: reference, defaults: try await engine.createDefaults(),
                     allocatePort: allocatePort, newVolumeName: { DockerIdentityTable.randomID(using: &generator) })
-                let incarnation = try await engine.create(plan)
+                let incarnation = try await engine.create(plan, requester: request.peer?.requester)
                 await identities.commit(reservation, incarnation: incarnation, extras: plan.extras)
                 await report("create", engineID: reservation.engineID, change: .created)
                 return try .json(DockerContainerCreateResponse(Id: reservation.dockerID, Warnings: plan.warnings), status: .created)
@@ -194,20 +197,20 @@ public enum ContainerRoutes {
             return last.contains(":") || last.contains("@") ? reference : reference + ":latest"
         }
 
-        func start(_ reference: String) async throws -> DockerResponse {
+        func start(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
             let (container, _) = try await find(reference)
             if ContainerViewMapper.isRunning(container.snapshot) {
                 return .empty(.notModified)
             }
-            return try await start(container) == .started ? .empty() : .empty(.notModified)
+            return try await start(container, requester: request.peer?.requester) == .started ? .empty() : .empty(.notModified)
         }
 
         /// Starts `container` with the attaches waiting for it. A container made with
         /// `--rm` that fails to start is removed, as dockerd removes it: `docker run --rm`
         /// waits for that removal before it reports the failure.
-        func start(_ container: DockerContainer) async throws -> DockerContainerProcesses.StartOutcome {
+        func start(_ container: DockerContainer, requester: String?) async throws -> DockerContainerProcesses.StartOutcome {
             do {
-                return try await streams.processes.start(container)
+                return try await streams.processes.start(container, requester: requester)
             } catch {
                 if container.extras?.autoRemove == true {
                     try? await engine.delete(container.snapshot, force: true)
@@ -274,7 +277,7 @@ public enum ContainerRoutes {
                 guard let stopped else {
                     throw DockerAPIError.notFound("No such container: \(reference)")
                 }
-                _ = try await start(stopped)
+                _ = try await start(stopped, requester: request.peer?.requester)
                 await report("restart", stopped)
             } catch let error as DockerAPIError {
                 throw DockerAPIError(error.status, "Cannot restart container \(reference): \(error.message)")

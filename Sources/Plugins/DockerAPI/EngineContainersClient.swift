@@ -114,7 +114,7 @@ struct EngineContainersClient: EngineContainers {
         return bound ? UInt16(bigEndian: address.sin_port) : nil
     }
 
-    func create(_ plan: DockerCreatePlan) async throws -> String {
+    func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String {
         try await Self.translated {
             var configuration = plan.configuration
             for volume in plan.volumes {
@@ -130,7 +130,8 @@ struct EngineContainersClient: EngineContainers {
             let initImage = try await ClientImage.fetch(reference: system.vminit.image, platform: .current, containerSystemConfig: system)
             _ = try await initImage.getCreateSnapshot(platform: .current)
             return try await ContainerClient().create(
-                configuration: configuration, options: ContainerCreateOptions(autoRemove: plan.autoRemove), kernel: kernel)
+                configuration: configuration, options: ContainerCreateOptions(autoRemove: plan.autoRemove), kernel: kernel,
+                requester: requester)
         }
     }
 
@@ -147,11 +148,11 @@ struct EngineContainersClient: EngineContainers {
         }
     }
 
-    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess {
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess {
         try await Self.translated {
             let client = ContainerClient()
             do {
-                return EngineProcessClient(process: try await client.bootstrap(id: container.id, stdio: stdio.handles))
+                return EngineProcessClient(process: try await client.bootstrap(id: container.id, stdio: stdio.handles, requester: requester))
             } catch {
                 // What a failed bootstrap leaves half-made would get in the way of the next one.
                 try? await client.stop(id: container.id, expectedIncarnation: Self.incarnation(container))

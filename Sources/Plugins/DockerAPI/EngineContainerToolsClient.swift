@@ -51,15 +51,17 @@ extension EngineContainersClient: EngineContainerTools {
         try PathUtils.sharedTemporaryDirectory()
     }
 
-    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL) async throws {
+    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL, requester: String?) async throws {
         try await Self.translatedTool {
-            try await ContainerClient().copyOut(id: container.id, source: source, destination: destination.path(percentEncoded: false))
+            try await ContainerClient().copyOut(
+                id: container.id, source: source, destination: destination.path(percentEncoded: false), requester: requester)
         }
     }
 
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32) async throws {
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
         try await Self.translatedTool {
-            try await ContainerClient().copyIn(id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode)
+            try await ContainerClient().copyIn(
+                id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, requester: requester)
         }
     }
 

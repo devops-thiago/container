@@ -48,20 +48,27 @@ public struct DockerAPIServer: Sendable {
     ///
     /// With `allowedUID`, a connection from any other user is closed before it is read. The
     /// socket's directory already keeps other users out; this holds even if it did not.
+    ///
+    /// The connecting process is read too (`LOCAL_PEERPID`) and put on each request as its
+    /// `peer`, for the engine's folder panel to name. That read is best effort: a connection
+    /// whose peer cannot be read is served all the same, with no peer.
     public func initialize(_ channel: any Channel, allowedUID: uid_t? = nil) -> EventLoopFuture<Void> {
         let router = self.router
         let limits = self.limits
         let log = self.log
-        let install: @Sendable () -> EventLoopFuture<Void> = {
+        let install: @Sendable (DockerPeer?) -> EventLoopFuture<Void> = { peer in
             channel.eventLoop.makeCompletedFuture {
                 let encoder = HTTPResponseEncoder()
                 let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
-                let handler = DockerHTTPHandler(router: router, limits: limits, log: log, encoder: encoder, decoder: decoder)
+                let handler = DockerHTTPHandler(router: router, limits: limits, log: log, encoder: encoder, decoder: decoder, peer: peer)
                 try channel.pipeline.syncOperations.addHandlers([encoder, decoder, handler])
             }
         }
-        guard let allowedUID else { return install() }
-        guard let provider = channel as? any SocketOptionProvider else {
+        let provider = channel as? any SocketOptionProvider
+        guard let allowedUID else {
+            return Self.peer(of: provider, on: channel.eventLoop).flatMap(install)
+        }
+        guard let provider else {
             return channel.eventLoop.makeFailedFuture(DockerAPIError(.forbidden, "cannot identify the client"))
         }
         let credentials: EventLoopFuture<xucred> = provider.unsafeGetSocketOption(
@@ -71,7 +78,16 @@ public struct DockerAPIServer: Sendable {
                 log.warning("refused a connection from another user", metadata: ["uid": "\(peer.cr_uid)"])
                 return channel.close().flatMapThrowing { throw DockerAPIError(.forbidden, "connection from another user") }
             }
-            return install()
+            return Self.peer(of: provider, on: channel.eventLoop).flatMap(install)
         }
+    }
+
+    /// The process that connected, or nil when the socket cannot say: not a unix socket, or a
+    /// peer that has already gone.
+    static func peer(of provider: (any SocketOptionProvider)?, on eventLoop: any EventLoop) -> EventLoopFuture<DockerPeer?> {
+        guard let provider else { return eventLoop.makeSucceededFuture(nil) }
+        let pid: EventLoopFuture<pid_t> = provider.unsafeGetSocketOption(
+            level: SocketOptionLevel(SOL_LOCAL), name: SocketOptionName(LOCAL_PEERPID))
+        return pid.map { DockerPeer.resolve(pid: $0) }.recover { _ in nil }
     }
 }

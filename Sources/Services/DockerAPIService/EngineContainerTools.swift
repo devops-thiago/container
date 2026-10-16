@@ -45,11 +45,12 @@ public protocol EngineContainerTools: Sendable {
     /// route stages.
     func scratchDirectory() throws -> URL
     /// Copies `source` in the container to `destination` on the host: a file, or a directory
-    /// and everything in it.
-    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL) async throws
+    /// and everything in it. `requester` is as `EngineContainers.create` takes it.
+    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL, requester: String?) async throws
     /// Copies `source` on the host into the directory `destination` in the container, as
-    /// `destination/<name of source>`. A file gets `mode`.
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32) async throws
+    /// `destination/<name of source>`. A file gets `mode`. `requester` is as
+    /// `EngineContainers.create` takes it.
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws
 }
 
 /// What a command this service ran in a container left behind.

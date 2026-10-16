@@ -61,11 +61,19 @@ public struct HostDirectoryGrantHarness: Sendable {
     /// A client borrowing a folder for its own process (`container build` reads its context
     /// itself). Gated like every workload route by the owner watchdog, and no further: the
     /// pool lends only what the user has granted, and asks the user for anything else.
-    public func lend(_ message: XPCMessage) async throws -> XPCMessage {
+    ///
+    /// The panel, if one is needed, names the borrower: the process on the other end of the
+    /// connection, which for a build is `container`.
+    public func lend(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        try await lend(message, peerPID: session.peerPID)
+    }
+
+    func lend(_ message: XPCMessage, peerPID: pid_t) async throws -> XPCMessage {
         guard let path = message.string(key: .hostDirectoryPath), !path.isEmpty else {
             throw ContainerizationError(.invalidArgument, message: "a host directory lend names no path")
         }
-        let (bookmark, outcome) = await HostDirectoryGrants.shared.lend(path)
+        let requester = ContainersHarness.requester(of: message, peerPID: peerPID)
+        let (bookmark, outcome) = await HostDirectoryGrants.shared.lend(path, requester: requester)
         let reply = message.reply()
         reply.set(key: .hostDirectoryOutcome, value: Self.wire(outcome).rawValue)
         if let bookmark {

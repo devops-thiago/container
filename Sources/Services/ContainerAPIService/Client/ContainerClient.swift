@@ -80,6 +80,13 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Puts who a request is for on it, when there is something showable to put. The engine
+    /// sanitizes it again: this is only the polite half.
+    static func setRequester(_ requester: String?, on request: XPCMessage) {
+        guard let requester = GrantRequester.sanitized(requester) else { return }
+        request.set(key: .hostDirectoryRequester, value: requester)
+    }
+
     /// For calls that can end up waiting on a permission panel.
     ///
     /// Creating or starting a container whose bind mount names an ungranted folder makes the
@@ -92,6 +99,9 @@ public struct ContainerClient: Sendable {
     /// - Parameter hostDirectoryBookmarks: bookmarks for host directories this container
     ///   will bind-mount, made by a sandboxed embedder for folders its user chose. Empty for
     ///   an unsandboxed engine, which opens paths without needing a grant.
+    /// - Parameter requester: who this create is for, as a folder-permission panel should name
+    ///   it (`docker (pid 4242)`), when the caller acts for another process. nil names the
+    ///   caller itself. Display only.
     @discardableResult
     public func create(
         configuration: ContainerConfiguration,
@@ -100,10 +110,12 @@ public struct ContainerClient: Sendable {
         initImage: String? = nil,
         runtimeData: Data? = nil,
         hostDirectoryBookmarks: [Data] = [],
-        incarnation requestedIncarnation: String? = nil
+        incarnation requestedIncarnation: String? = nil,
+        requester: String? = nil
     ) async throws -> String {
         do {
             let request = XPCMessage(route: .containerCreate)
+            Self.setRequester(requester, on: request)
             let incarnation = requestedIncarnation ?? UUID().uuidString.lowercased()
 
             let data = try JSONEncoder().encode(configuration)
@@ -196,13 +208,16 @@ public struct ContainerClient: Sendable {
     ///   machine reboots, and the bytes the engine persisted at create cannot bring it back
     ///   (`docs/sandbox-spikes.md`, S6d). Empty means "use whatever you already have", which is
     ///   correct unsandboxed and for a caller that holds no grants of its own.
+    /// - Parameter requester: who this start is for, as `create` takes it.
     public func bootstrap(
         id: String,
         stdio: [FileHandle?],
         dynamicEnv: [String: String] = [:],
-        hostDirectoryBookmarks: [Data] = []
+        hostDirectoryBookmarks: [Data] = [],
+        requester: String? = nil
     ) async throws -> ClientProcess {
         let request = XPCMessage(route: .containerBootstrap)
+        Self.setRequester(requester, on: request)
 
         for (i, h) in stdio.enumerated() {
             let key: XPCKeys = try {
@@ -435,8 +450,13 @@ public struct ContainerClient: Sendable {
     }
 
     /// Copy a file or directory from the host into the container.
-    public func copyIn(id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true) async throws {
+    ///
+    /// - Parameter requester: who this copy is for, as `create` takes it.
+    public func copyIn(
+        id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, requester: String? = nil
+    ) async throws {
         let request = XPCMessage(route: .containerCopyIn)
+        Self.setRequester(requester, on: request)
         request.set(key: .id, value: id)
         request.set(key: .sourcePath, value: source)
         request.set(key: .destinationPath, value: destination)
@@ -455,8 +475,11 @@ public struct ContainerClient: Sendable {
     }
 
     /// Copy a file or directory from the container to the host.
-    public func copyOut(id: String, source: String, destination: String, createParents: Bool = true) async throws {
+    ///
+    /// - Parameter requester: who this copy is for, as `create` takes it.
+    public func copyOut(id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil) async throws {
         let request = XPCMessage(route: .containerCopyOut)
+        Self.setRequester(requester, on: request)
         request.set(key: .id, value: id)
         request.set(key: .sourcePath, value: source)
         request.set(key: .destinationPath, value: destination)

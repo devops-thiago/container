@@ -53,6 +53,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     private(set) var configurations: [ProcessConfiguration] = []
     private(set) var processes: [String: FakeProcess] = [:]
     private(set) var copies: [String] = []
+    /// Who each copy was for, as `"out <requester>"` or `"in <requester>"`, with `-` for none.
+    private(set) var copyRequesters: [String] = []
     private var statsCalls = 0
     private var getCalls = 0
     var createError: (any Error)?
@@ -93,6 +95,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     var statsCount: Int { lock.withLock { statsCalls } }
     var getCount: Int { lock.withLock { getCalls } }
     var copyCalls: [String] { lock.withLock { copies } }
+    var copyRequesterCalls: [String] { lock.withLock { copyRequesters } }
 
     // MARK: EngineContainers
 
@@ -101,9 +104,9 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     func image(_ reference: String, platform: String?) async throws -> DockerImageDefaults? { try await base.image(reference, platform: platform) }
     func createDefaults() async throws -> DockerCreateDefaults { try await base.createDefaults() }
     func allocatePort() throws -> UInt16 { try base.allocatePort() }
-    func create(_ plan: DockerCreatePlan) async throws -> String { try await base.create(plan) }
-    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess {
-        try await base.bootstrap(container, stdio: stdio)
+    func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String { try await base.create(plan, requester: requester) }
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess {
+        try await base.bootstrap(container, stdio: stdio, requester: requester)
     }
     func get(_ engineID: String) async throws -> ContainerSnapshot? {
         lock.withLock { getCalls += 1 }
@@ -195,15 +198,21 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
 
     func scratchDirectory() throws -> URL { scratch }
 
-    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL) async throws {
-        lock.withLock { copies.append("out \(source)") }
+    func copyOut(_ container: ContainerSnapshot, source: String, destination: URL, requester: String?) async throws {
+        lock.withLock {
+            copies.append("out \(source)")
+            copyRequesters.append("out \(requester ?? "-")")
+        }
         let from = root.path + source
         guard FileManager.default.fileExists(atPath: from) else { throw DockerAPIError.internalError("copyOut: source not found '\(source)'") }
         try FileManager.default.copyItem(atPath: from, toPath: destination.path)
     }
 
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32) async throws {
-        lock.withLock { copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))") }
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
+        lock.withLock {
+            copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))")
+            copyRequesters.append("in \(requester ?? "-")")
+        }
         let target = root.path + (destination.hasSuffix("/") ? destination : destination + "/") + source.lastPathComponent
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: target, isDirectory: &isDirectory) {

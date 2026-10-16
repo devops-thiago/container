@@ -45,8 +45,42 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    /// Who a request is for, as a folder-permission panel names it: what the client said, when
+    /// it acts for another process (the Docker API agent names the Docker client), or else the
+    /// process on the other end of the XPC connection, so a `container run -v` names
+    /// `container`. Display only, and sanitized either way.
+    ///
+    /// - Parameter name: how a process's name is found; the system's by default.
+    static func requester(
+        of message: XPCMessage,
+        peerPID: pid_t,
+        name: (pid_t) -> String? = GrantRequester.processName(of:)
+    ) -> String? {
+        if let stated = GrantRequester.sanitized(message.string(key: .hostDirectoryRequester)) {
+            return stated
+        }
+        return GrantRequester.describe(pid: peerPID, name: name)
+    }
+
+    /// A route that takes the requester from the peer when the message names none.
+    public func bootstrap(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        try await bootstrap(message, peerPID: session.peerPID)
+    }
+
+    public func create(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        try await create(message, peerPID: session.peerPID)
+    }
+
+    public func copyIn(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        try await copyIn(message, peerPID: session.peerPID)
+    }
+
+    public func copyOut(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        try await copyOut(message, peerPID: session.peerPID)
+    }
+
     @Sendable
-    public func bootstrap(_ message: XPCMessage) async throws -> XPCMessage {
+    public func bootstrap(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         let id = message.string(key: .id)
         guard let id else {
             throw ContainerizationError(
@@ -68,7 +102,8 @@ public struct ContainersHarness: Sendable {
         }
 
         try await service.bootstrap(
-            id: id, stdio: stdio, dynamicEnv: env, hostDirectoryBookmarks: bookmarks)
+            id: id, stdio: stdio, dynamicEnv: env, hostDirectoryBookmarks: bookmarks,
+            requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 
@@ -185,7 +220,7 @@ public struct ContainersHarness: Sendable {
     }
 
     @Sendable
-    public func create(_ message: XPCMessage) async throws -> XPCMessage {
+    public func create(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         let data = message.dataNoCopy(key: .containerConfig)
         guard let data else {
             throw ContainerizationError(
@@ -229,7 +264,7 @@ public struct ContainersHarness: Sendable {
         let incarnation = try await service.create(
             configuration: config, kernel: kernel, options: options, initImage: initImage,
             runtimeData: runtimeData, hostDirectoryBookmarks: bookmarks,
-            incarnation: requestedIncarnation)
+            incarnation: requestedIncarnation, requester: Self.requester(of: message, peerPID: peerPID))
         let reply = message.reply()
         reply.set(key: .expectedIncarnation, value: incarnation)
         return reply
@@ -342,7 +377,7 @@ public struct ContainersHarness: Sendable {
     }
 
     @Sendable
-    public func copyIn(_ message: XPCMessage) async throws -> XPCMessage {
+    public func copyIn(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         guard let id = message.string(key: .id) else {
             throw ContainerizationError(
                 .invalidArgument,
@@ -364,12 +399,14 @@ public struct ContainersHarness: Sendable {
         let mode = UInt32(message.uint64(key: .fileMode))
         let createParents = message.bool(key: .createParents)
 
-        try await service.copyIn(id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents)
+        try await service.copyIn(
+            id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents,
+            requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 
     @Sendable
-    public func copyOut(_ message: XPCMessage) async throws -> XPCMessage {
+    public func copyOut(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         guard let id = message.string(key: .id) else {
             throw ContainerizationError(
                 .invalidArgument,
@@ -391,7 +428,9 @@ public struct ContainersHarness: Sendable {
 
         let createParents = message.bool(key: .createParents)
 
-        try await service.copyOut(id: id, source: sourcePath, destination: destinationPath, createParents: createParents)
+        try await service.copyOut(
+            id: id, source: sourcePath, destination: destinationPath, createParents: createParents,
+            requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 

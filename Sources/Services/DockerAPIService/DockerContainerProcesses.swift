@@ -61,7 +61,9 @@ public actor DockerContainerProcesses {
     }
 
     /// Starts `container`'s init process, bridged to the attaches waiting for it.
-    public func start(_ container: DockerContainer) async throws -> StartOutcome {
+    ///
+    /// - Parameter requester: who asked for the start, for the engine's folder panel to name.
+    public func start(_ container: DockerContainer, requester: String? = nil) async throws -> StartOutcome {
         let engineID = container.engineID
         guard !starting.contains(engineID) else { return .alreadyRunning }
         if let current = running[engineID], await !current.exited.wait(timeout: .seconds(5)) {
@@ -101,7 +103,7 @@ public actor DockerContainerProcesses {
                 // agent's ends never see EOF.
                 pipes.forEach { $0.closeContainerEnd() }
             }
-            bootstrapped = try await engine.bootstrap(container.snapshot, stdio: stdio)
+            bootstrapped = try await engine.bootstrap(container.snapshot, stdio: stdio, requester: requester)
             if !claimed.isEmpty {
                 session = try await DockerStdioSession.connect(stdin: stdinPipe?.takeHost(), stdout: stdoutPipe?.takeHost(), stderr: stderrPipe?.takeHost())
             }

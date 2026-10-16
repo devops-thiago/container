@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerResource
 import ContainerVersion
 import ContainerXPC
 import Foundation
@@ -212,8 +213,10 @@ public actor HostDirectoryGrants {
     /// that still cannot be read. It is for the covering root, not the path, so the borrower
     /// reads anything in that folder, which is what a build does, and the root is exactly what
     /// the user granted. Unsandboxed there is no pool and every readable path is its own root.
-    public func lend(_ path: String) async -> (bookmark: Data?, outcome: GrantOutcome) {
-        let outcome = await request(path)
+    ///
+    /// - Parameter requester: who asked, for the panel to name, as `request` takes it.
+    public func lend(_ path: String, requester: String? = nil) async -> (bookmark: Data?, outcome: GrantOutcome) {
+        let outcome = await request(path, requester: requester)
         guard case .granted = outcome else { return (nil, outcome) }
         let target = Self.canonical(path)
         if let pooled = granted.first(where: { target.isPathInside($0.key) })?.value {
@@ -241,7 +244,11 @@ public actor HostDirectoryGrants {
     /// minutes is long enough to find a folder in a picker without being long enough that a
     /// command looks hung when nobody is at the keyboard. Callers reaching the engine over XPC
     /// must allow more than this, or their own timeout fires first and reports nothing useful.
-    public func request(_ path: String) async -> GrantOutcome {
+    ///
+    /// - Parameter requester: who asked for the folder, such as `docker (pid 4242)`, which the
+    ///   embedder's panel names. Display only: it changes what the user reads, never what is
+    ///   granted.
+    public func request(_ path: String, requester: String? = nil) async -> GrantOutcome {
         if Task.isCancelled { return .declined }
         if covers(path) { return .granted }
         let running = appIsRunning()
@@ -268,7 +275,7 @@ public actor HostDirectoryGrants {
         // identified caller request; closing either per-request connection cancels only its
         // matching app-side route and panel.
         for attempt in 0...1 {
-            let outcome = await ask(path, requestID: requestID, at: endpoint)
+            let outcome = await ask(path, requestID: requestID, requester: requester, at: endpoint)
             guard case .noEmbedder = outcome, attempt == 0, !Task.isCancelled else {
                 return outcome
             }
@@ -329,11 +336,14 @@ public actor HostDirectoryGrants {
         }
     }
 
+    /// The question put to the embedder. `requester` goes on it sanitized, and not at all when
+    /// nothing showable is left, so the embedder keeps its wording for an unnamed asker.
     static func requestMessage(
         path: String,
         requestID: String,
         patience: Duration,
-        ownerToken: String?
+        ownerToken: String?,
+        requester: String? = nil
     ) -> XPCMessage {
         let message = XPCMessage(route: XPCRoute.hostDirectoryGrantRequest.rawValue)
         message.set(key: XPCKeys.hostDirectoryPath.rawValue, value: path)
@@ -341,6 +351,9 @@ public actor HostDirectoryGrants {
             key: XPCKeys.hostDirectoryDeadlineSeconds.rawValue,
             value: Int64(patience.components.seconds))
         message.set(key: XPCKeys.hostDirectoryRequestID.rawValue, value: requestID)
+        if let requester = GrantRequester.sanitized(requester) {
+            message.set(key: XPCKeys.hostDirectoryRequester.rawValue, value: requester)
+        }
         if let ownerToken {
             message.set(key: InstanceAttach.tokenKey, value: ownerToken)
         }
@@ -362,6 +375,7 @@ public actor HostDirectoryGrants {
     private func ask(
         _ path: String,
         requestID: String,
+        requester: String?,
         at endpoint: xpc_endpoint_t
     ) async -> GrantOutcome {
         let client = XPCClient(endpoint: endpoint, label: Self.vendorLabel)
@@ -378,7 +392,8 @@ public actor HostDirectoryGrants {
             path: path,
             requestID: requestID,
             patience: XPCClient.hostDirectoryPanelPatience,
-            ownerToken: InstanceEndpoints.owner(label: Self.vendorLabel))
+            ownerToken: InstanceEndpoints.owner(label: Self.vendorLabel),
+            requester: requester)
         do {
             let reply = try await Self.send(
                 message, timeout: XPCClient.hostDirectoryPanelPatience, over: transport)

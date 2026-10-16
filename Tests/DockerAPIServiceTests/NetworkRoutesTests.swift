@@ -55,8 +55,10 @@ struct NetworkRoutesTests {
         self.containerRouter = containerRouter
     }
 
-    func call(_ method: HTTPMethod, _ uri: String, body: String = "", on router: DockerRouter? = nil) async throws -> ContainerRoutesTests.Answer {
-        let request = try DockerRequest(method: method, uri: "/v1.48" + uri, headers: [:], body: ByteBuffer(string: body))
+    func call(
+        _ method: HTTPMethod, _ uri: String, body: String = "", on router: DockerRouter? = nil, peer: DockerPeer? = nil
+    ) async throws -> ContainerRoutesTests.Answer {
+        let request = try DockerRequest(method: method, uri: "/v1.48" + uri, headers: [:], body: ByteBuffer(string: body), peer: peer)
         guard case .data(let status, _, let buffer, _) = await (router ?? self.router).respond(to: request) else {
             Issue.record("expected a whole response")
             return .init(status: .internalServerError, body: "")

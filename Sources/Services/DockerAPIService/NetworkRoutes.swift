@@ -500,12 +500,14 @@ public enum NetworkRoutes {
                         "container \(container.name) would have no network left: SiliconShip keeps every container on at least one network")
                 }
             }
-            try await recreate(container, networks: networks)
+            try await recreate(container, networks: networks, requester: request.peer?.requester)
             await report(connect ? "connect" : "disconnect", network, extra: ["container": container.dockerID])
             return .empty(.ok)
         }
 
-        func recreate(_ container: DockerContainer, networks: [AttachmentConfiguration]) async throws {
+        /// `requester` is who the engine's folder panel names, should the new container's bind
+        /// mounts need asking for again.
+        func recreate(_ container: DockerContainer, networks: [AttachmentConfiguration], requester: String?) async throws {
             let original = container.snapshot.configuration
             var changed = original
             changed.networks = networks
@@ -516,9 +518,9 @@ public enum NetworkRoutes {
             try await containers.delete(container.snapshot, force: false)
             let incarnation: String
             do {
-                incarnation = try await containers.create(plan(changed))
+                incarnation = try await containers.create(plan(changed), requester: requester)
             } catch {
-                if let restored = try? await containers.create(plan(original)) {
+                if let restored = try? await containers.create(plan(original), requester: requester) {
                     await identities.recreated(container, incarnation: restored)
                 }
                 throw error
