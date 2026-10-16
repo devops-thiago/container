@@ -439,6 +439,9 @@ public actor ContainersService {
                     message: "container already exists: \(configuration.id)"
                 )
             }
+            // A name is one container's, as Docker's are: under this lock, so that two creates
+            // cannot both take it.
+            try await self.requireNameFree(id: configuration.id, labels: configuration.labels, checkingID: true)
             // Failed recovery deliberately leaves data outside the loaded-state map.
             // Reusing that ID must not overwrite it or let create's rollback delete it.
             guard !FileManager.default.fileExists(atPath: path.path) else {
@@ -1483,13 +1486,10 @@ public actor ContainersService {
             var state = try await self.getContainerState(id: id, context: context)
             try Self.require(labels: nil, incarnation: expectedIncarnation, on: state, id: id)
             let policy = self.labelPolicy
-            if let nameKey = policy.nameKey, let name = labels[nameKey] {
-                for other in await self.containers.values where other.snapshot.id != id {
-                    guard policy.name(id: other.snapshot.id, labels: other.snapshot.configuration.labels) != name else {
-                        throw ContainerizationError(.exists, message: "the name \(name) is already in use by container \(other.snapshot.id)")
-                    }
-                }
-            }
+            // Only the name is changing: the ID was checked when the container was made.
+            var proposed = state.snapshot.configuration.labels
+            proposed.merge(labels) { _, new in new }
+            try await self.requireNameFree(id: id, labels: proposed, checkingID: false)
             let before = state.snapshot.configuration.labels
             var configuration = state.snapshot.configuration
             configuration.labels.merge(labels) { _, new in new }
@@ -1501,6 +1501,15 @@ public actor ContainersService {
                 await self.emit(.rename, state.snapshot, attributes: ["oldName": policy.name(id: id, labels: before)])
             }
         }
+    }
+
+    /// Refuse a container `id` with `labels` whose name another container holds, as its name
+    /// label or its ID; with `checkingID`, also one whose ID is another's name label. Nothing
+    /// is refused when the label policy keeps no name. Called under the lifecycle lock.
+    private func requireNameFree(id: String, labels: [String: String], checkingID: Bool) throws {
+        let others = self.containers.values.map { (id: $0.snapshot.id, labels: $0.snapshot.configuration.labels) }
+        guard let taken = self.labelPolicy.holder(ofNameFor: id, labels: labels, among: others, checkingID: checkingID) else { return }
+        throw ContainerizationError(.exists, message: "the name \(taken.name) is already in use by container \(taken.holder)")
     }
 
     /// Write a changed configuration wherever the container's configuration is kept: the

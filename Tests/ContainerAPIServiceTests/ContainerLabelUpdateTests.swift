@@ -208,4 +208,70 @@ struct ContainerLabelUpdateTests {
         #expect(service.events.processNonce == "wired-nonce")
         #expect(service.labelPolicy == APIServer.Start.containerLabelPolicy)
     }
+
+    @Test("a create whose name another container holds, as its label or its ID, is refused, and no container or event is made", arguments: [true, false])
+    func createRefusesATakenName(byLabel: Bool) async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service(labelPolicy: Self.policy)
+        let holder = f.configuration(labels: byLabel ? [Self.nameKey: "web"] : [:])
+        try await f.create(service, holder)
+        let reader = EventCollector(try f.hub.subscribe(since: nil))
+        let taken = byLabel ? "web" : holder.id
+        let clash = f.configuration(labels: [Self.nameKey: taken])
+        do {
+            try await f.create(service, clash)
+            Issue.record("a create took a name in use")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.exists))
+            #expect(error.message.contains(holder.id))
+        }
+        #expect(try await service.list().map(\.id) == [holder.id])
+        #expect(!FileManager.default.fileExists(atPath: f.containers.appendingPathComponent(clash.id).path))
+        #expect(await reader.settle().isEmpty)
+        // The control: a different name is taken.
+        try await f.create(service, f.configuration(labels: [Self.nameKey: "api"]))
+        #expect(EventCollector.actions(await reader.take(1)) == ["create"])
+    }
+
+    @Test("a create whose ID is another container's name is refused, with a name label of its own or without")
+    func createRefusesAnIDThatIsAName() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service(labelPolicy: Self.policy)
+        try await f.create(service, f.configuration(labels: [Self.nameKey: "web"]))
+        for labels in [[:], [Self.nameKey: "other"]] {
+            await #expect(throws: ContainerizationError.self) {
+                try await f.create(service, f.configuration(id: "web", labels: labels))
+            }
+        }
+        // The control: an ID nobody is named.
+        try await f.create(service, f.configuration(id: "webx"))
+    }
+
+    @Test("with no name label named, a create enforces no name")
+    func fixedPolicyEnforcesNothingAtCreate() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let first = f.configuration(labels: [Self.nameKey: "web"])
+        try await f.create(service, first)
+        try await f.create(service, f.configuration(labels: [Self.nameKey: "web"]))
+        try await f.create(service, f.configuration(id: "web"))
+        try await f.create(service, f.configuration(labels: [Self.nameKey: first.id]))
+        #expect(try await service.list().count == 4)
+    }
+
+    @Test("the policy's check: a name label against labels and IDs, and an ID against labels only when asked")
+    func holderRules() {
+        let others: [(id: String, labels: [String: String])] = [("a", [Self.nameKey: "web"]), ("b", [:])]
+        #expect(Self.policy.holder(ofNameFor: "c", labels: [Self.nameKey: "web"], among: others, checkingID: false)?.holder == "a")
+        #expect(Self.policy.holder(ofNameFor: "c", labels: [Self.nameKey: "b"], among: others, checkingID: false)?.holder == "b")
+        #expect(Self.policy.holder(ofNameFor: "web", labels: [:], among: others, checkingID: true)?.holder == "a")
+        #expect(Self.policy.holder(ofNameFor: "web", labels: [:], among: others, checkingID: false) == nil)
+        // Its own entry is not a conflict, and an empty label is no name.
+        #expect(Self.policy.holder(ofNameFor: "a", labels: [Self.nameKey: "web"], among: others, checkingID: true) == nil)
+        #expect(Self.policy.holder(ofNameFor: "c", labels: [Self.nameKey: ""], among: [("d", [Self.nameKey: ""])], checkingID: true) == nil)
+        #expect(ContainerLabelPolicy.fixed.holder(ofNameFor: "c", labels: [Self.nameKey: "web"], among: others, checkingID: true) == nil)
+    }
 }

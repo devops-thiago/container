@@ -45,7 +45,33 @@ public struct ContainerLabelPolicy: Sendable, Equatable {
 
     /// The container's name: the name label when there is one, otherwise its ID.
     public func name(id: String, labels: [String: String]) -> String {
-        nameKey.flatMap { labels[$0] } ?? id
+        nameLabel(labels) ?? id
+    }
+
+    /// The name label's value, when the policy names one and the container has it.
+    public func nameLabel(_ labels: [String: String]) -> String? {
+        nameKey.flatMap { labels[$0] }.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The container among `others` that already holds a name a container `id` with `labels`
+    /// would have, and that name, as Docker refuses a name in use: its name label taken as
+    /// another's label or ID, or, with `checkingID`, its ID taken as another's name label. nil
+    /// when it is free, and always when the policy keeps no name.
+    public func holder(
+        ofNameFor id: String, labels: [String: String], among others: [(id: String, labels: [String: String])], checkingID: Bool
+    ) -> (holder: String, name: String)? {
+        guard nameKey != nil else { return nil }
+        let name = nameLabel(labels)
+        for other in others where other.id != id {
+            let otherName = nameLabel(other.labels)
+            if let name, name == other.id || name == otherName {
+                return (other.id, name)
+            }
+            if checkingID, let otherName, otherName == id {
+                return (other.id, id)
+            }
+        }
+        return nil
     }
 
     /// Refuses a change this policy does not allow, before anything is changed.
