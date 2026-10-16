@@ -680,6 +680,7 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 "ContainerResource",
+                "RegistryTransport",
             ],
             path: "Sources/Services/DockerAPIService"
         ),
