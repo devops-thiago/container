@@ -24,6 +24,7 @@ import Foundation
 import Logging
 import NIO
 import NIOPosix
+import SystemPackage
 import TerminalProgress
 
 extension Builder {
@@ -33,6 +34,31 @@ extension Builder {
 
     /// The vsock port the builder shim listens on.
     public static let defaultVsockPort: UInt32 = 8088
+
+    /// Where BuildKit listens in the builder container: buildkitd's default address, which
+    /// the shim starts it with.
+    public static let buildKitSocketContainerPath = "/run/buildkit/buildkitd.sock"
+
+    /// The name of the BuildKit socket the builder publishes in the engine's run directory,
+    /// for buildx's remote driver (`unix://<run directory>/buildkitd.sock`).
+    public static let buildKitSocketName = "buildkitd.sock"
+
+    /// The sockets a builder publishes to the host when the engine's run directory is
+    /// `runDirectory`: BuildKit's, readable and writable by this user alone, or none when its
+    /// path is longer than buildx can dial (``PathUtils/maxDialableSocketPathBytes``).
+    public static func publishedSockets(runDirectory: URL) throws -> [PublishSocket] {
+        let hostPath = runDirectory.appending(path: buildKitSocketName).path(percentEncoded: false)
+        guard hostPath.utf8.count <= PathUtils.maxDialableSocketPathBytes else {
+            return []
+        }
+        return [
+            try PublishSocket(
+                containerPath: FilePath(buildKitSocketContainerPath),
+                hostPath: FilePath(hostPath),
+                permissions: FilePermissions(rawValue: 0o600)
+            )
+        ]
+    }
 
     /// How the builder container should be started.
     public struct StartOptions: Sendable, Equatable {
@@ -82,11 +108,18 @@ extension Builder {
         public var dnsDomain: String?
         public var dnsSearchDomains: [String]
         public var dnsOptions: [String]
+        /// The sockets the builder publishes to the host (see
+        /// ``Builder/publishedSockets(runDirectory:)``). `nil` when the engine's run directory
+        /// is not known: a builder's sockets are then left as they are.
+        public var publishedSockets: [PublishSocket]?
 
+        /// - Parameter runDirectory: the engine's run directory, where the builder publishes
+        ///   its BuildKit socket; `nil` when it is not known.
         public init(
             options: StartOptions,
             containerSystemConfig: ContainerSystemConfig,
-            environment: [String: String] = ProcessInfo.processInfo.environment
+            environment: [String: String] = ProcessInfo.processInfo.environment,
+            runDirectory: URL? = nil
         ) throws {
             self.image = containerSystemConfig.build.image
             self.resources = try Parser.resources(
@@ -101,14 +134,40 @@ extension Builder {
             self.dnsDomain = options.dnsDomain
             self.dnsSearchDomains = options.dnsSearchDomains
             self.dnsOptions = options.dnsOptions
+            self.publishedSockets = try runDirectory.map { try Builder.publishedSockets(runDirectory: $0) }
         }
 
-        /// Whether a builder created from `existing` differs from this one in a way that needs
-        /// a new container: image, CPUs, memory, managed environment, SSH forwarding, or DNS.
+        /// Whether a builder created from `existing` needs replacing, and when.
         ///
-        /// DNS compares only the first field this start sets, in the order nameservers,
-        /// domain, search domains, options; a start that sets none keeps any DNS.
+        /// - ``Recreate/now``: it differs in image, CPUs, memory, managed environment, SSH
+        ///   forwarding or DNS. DNS compares only the first field this start sets, in the order
+        ///   nameservers, domain, search domains, options; a start that sets none keeps any DNS.
+        /// - ``Recreate/whenStopped``: it differs only in the sockets it publishes, as a builder
+        ///   made before the BuildKit socket was published does. Nothing tells the engine
+        ///   whether a build is running in it (buildx talks to BuildKit directly), so a running
+        ///   one is kept and replaced the next time it is started from stopped.
+        public func recreate(_ existing: ContainerConfiguration) -> Recreate {
+            if requiresRecreateNow(existing) {
+                return .now
+            }
+            if let publishedSockets, !Self.sameSockets(existing.publishedSockets, publishedSockets) {
+                return .whenStopped
+            }
+            return .no
+        }
+
+        /// Whether a builder created from `existing` differs from this one at all (see
+        /// ``recreate(_:)``).
         public func requiresRecreate(_ existing: ContainerConfiguration) -> Bool {
+            recreate(existing) != .no
+        }
+
+        /// The same sockets, in any order.
+        public static func sameSockets(_ lhs: [PublishSocket], _ rhs: [PublishSocket]) -> Bool {
+            lhs.count == rhs.count && lhs.allSatisfy { rhs.contains($0) } && rhs.allSatisfy { lhs.contains($0) }
+        }
+
+        private func requiresRecreateNow(_ existing: ContainerConfiguration) -> Bool {
             let existingManagedEnv = existing.initProcess.environment.filter { envVar in
                 envVar.hasPrefix("BUILDKIT_COLORS=") || envVar.hasPrefix("NO_COLOR=")
             }.sorted()
@@ -137,6 +196,16 @@ extension Builder {
         }
     }
 
+    /// When a builder that differs from a start's ``StartSpec`` is replaced.
+    public enum Recreate: Sendable, Equatable {
+        /// It matches: keep it.
+        case no
+        /// Replace it the next time it is started from stopped; while it runs, keep it.
+        case whenStopped
+        /// Replace it now, stopping it if it runs.
+        case now
+    }
+
     /// What a start does with the builder container it finds.
     public enum StartAction: Sendable, Equatable {
         /// No usable container: create one and start it.
@@ -151,16 +220,16 @@ extension Builder {
         case deleteAndRecreate
     }
 
-    /// Decide what a start does with an existing builder in `status`. Throws while the
-    /// builder is stopping or restarting, since neither can be acted on yet.
-    public static func startAction(status: RuntimeStatus?, requiresRecreate: Bool) throws -> StartAction {
+    /// Decide what a start does with an existing builder in `status` that needs `recreate`.
+    /// Throws while the builder is stopping or restarting, since neither can be acted on yet.
+    public static func startAction(status: RuntimeStatus?, recreate: Recreate) throws -> StartAction {
         switch status {
         case nil, .unknown:
             return .create
         case .running:
-            return requiresRecreate ? .stopAndRecreate : .reuse
+            return recreate == .now ? .stopAndRecreate : .reuse
         case .stopped:
-            return requiresRecreate ? .deleteAndRecreate : .restart
+            return recreate == .no ? .restart : .deleteAndRecreate
         case .stopping:
             throw ContainerizationError(
                 .invalidState,
@@ -192,9 +261,11 @@ extension Builder {
     /// `container builder start` does.
     ///
     /// An existing builder is kept when it matches `options`; one that differs in image,
-    /// CPUs, memory, managed environment, SSH forwarding or DNS is replaced (see
-    /// ``StartSpec/requiresRecreate(_:)``). Progress is reported in four tasks: fetching the
-    /// BuildKit image, unpacking it, fetching the kernel, starting the container.
+    /// CPUs, memory, managed environment, SSH forwarding or DNS is replaced, and one that
+    /// differs only in its published sockets is replaced when it is next started from stopped
+    /// (see ``StartSpec/recreate(_:)``). The builder publishes BuildKit's socket in the
+    /// engine's run directory, for buildx's remote driver. Progress is reported in four tasks:
+    /// fetching the BuildKit image, unpacking it, fetching the kernel, starting the container.
     public static func start(
         _ options: StartOptions,
         containerSystemConfig: ContainerSystemConfig,
@@ -221,18 +292,33 @@ extension Builder {
             )
         }
 
-        let target = try StartSpec(options: options, containerSystemConfig: containerSystemConfig)
+        let runDirectory: URL?
+        do {
+            runDirectory = try PathUtils.runDirectory(engineAppRoot: FilePath(systemHealth.appRoot.path(percentEncoded: false)))
+        } catch {
+            // Without it a new builder publishes nothing and an existing one keeps what it has.
+            log.warning("no run directory to publish the BuildKit socket in", metadata: ["error": "\(error)"])
+            runDirectory = nil
+        }
+        let target = try StartSpec(options: options, containerSystemConfig: containerSystemConfig, runDirectory: runDirectory)
+        if let runDirectory, target.publishedSockets?.isEmpty == true {
+            let path = runDirectory.appending(path: buildKitSocketName).path(percentEncoded: false)
+            log.warning(
+                "not publishing the BuildKit socket: its path is longer than buildx can dial",
+                metadata: ["path": "\(path)", "bytes": "\(path.utf8.count)", "max": "\(PathUtils.maxDialableSocketPathBytes)"])
+        }
 
         let builderPlatform = ContainerizationOCI.Platform(arch: "arm64", os: "linux", variant: "v8")
 
         let client = ContainerClient()
         if let existingContainer = try? await client.get(id: builderContainerId) {
-            let action = try startAction(
-                status: existingContainer.status,
-                requiresRecreate: target.requiresRecreate(existingContainer.configuration)
-            )
+            let recreate = target.recreate(existingContainer.configuration)
+            let action = try startAction(status: existingContainer.status, recreate: recreate)
             switch action {
             case .reuse:
+                if recreate == .whenStopped {
+                    log.info("the running builder keeps running without its new published sockets until it is next started from stopped")
+                }
                 return
             case .stopAndRecreate:
                 try await client.stop(id: existingContainer.id)
@@ -312,6 +398,7 @@ extension Builder {
             ResourceLabelKeys.role: ResourceRoleValues.builder,
         ]
         config.capAdd = ["ALL"]
+        config.publishedSockets = target.publishedSockets ?? []
         config.mounts = [
             .init(
                 type: .tmpfs,
