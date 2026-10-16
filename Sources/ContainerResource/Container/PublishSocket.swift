@@ -23,7 +23,7 @@ import SystemPackage
 /// - Deprecated: New for 1.0.0, path types changed from `URL` to `FilePath`.
 /// - Note: Decoder handles `FilePath` and `URL` for persistent data compatibility;
 ///    this compatibility will be removed in a later release.
-public struct PublishSocket: Sendable, Codable {
+public struct PublishSocket: Sendable, Codable, Equatable {
     /// Absolute path to the socket inside the container.
     public var containerPath: FilePath
 

@@ -44,6 +44,20 @@ public enum PathUtils {
         try runDirectory(in: BaseConfigPath.groupContainer() ?? BaseConfigPath.appRoot.basePath().removingLastComponent())
     }
 
+    /// The run directory of the engine whose app root is `engineAppRoot`: `<group container>/run`
+    /// with an app group, else `run` beside that app root.
+    ///
+    /// Every client of one engine gets the same directory from this, whatever its own
+    /// environment says, because the app root is the engine's (from its health check).
+    public static func runDirectory(engineAppRoot: FilePath) throws -> URL {
+        try runDirectory(in: BaseConfigPath.groupContainer() ?? engineAppRoot.removingLastComponent())
+    }
+
+    /// The longest unix socket path that clients written in Go, such as the Docker CLI and
+    /// buildx, can dial. Go's `net` package keeps a path in `sun_path`, 104 bytes on macOS with
+    /// its terminator, and refuses a longer one before connecting.
+    public static let maxDialableSocketPathBytes = 103
+
     static func runDirectory(in base: FilePath) throws -> URL {
         let path = base.appending("run").string
         if mkdir(path, 0o700) != 0 && errno != EEXIST {
