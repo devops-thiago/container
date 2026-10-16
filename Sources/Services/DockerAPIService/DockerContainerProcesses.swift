@@ -201,10 +201,11 @@ public struct DockerContainerStreams: Sendable {
     ///   process exited before it is no longer read.
     /// - Parameter events: where the starts and exits of the processes this service starts are
     ///   reported; nil reports nothing.
+    /// - Parameter logOptions: how an attach to a running container follows its log.
     public init(
         engine: some EngineContainers, attachLimits: DockerAttachLimits = .init(), waitLimits: DockerWaitLimits = .init(),
         execLimits: DockerExecLimits = .init(), drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService"),
-        events: DockerEventBus? = nil
+        events: DockerEventBus? = nil, logOptions: DockerToolOptions = .init()
     ) {
         let attaches = DockerAttachStore(limits: attachLimits)
         let waits = DockerWaitStore(limits: waitLimits) { engineID in
@@ -214,16 +215,23 @@ public struct DockerContainerStreams: Sendable {
         self.waits = waits
         let copies = DockerPendingCopies()
         self.copies = copies
-        // An engine the archive routes can copy into: the uploads held for a start need it.
+        // The engine's container tools, when it has them: the uploads held for a start are
+        // copied in with them, and an attach to a running container reads its log with them.
+        let tools = engine as? any EngineContainerTools
+        self.tools = tools
+        self.logOptions = logOptions
         self.processes = DockerContainerProcesses(
-            engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events, copies: copies,
-            tools: engine as? any EngineContainerTools)
+            engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events, copies: copies, tools: tools)
         self.execs = DockerExecStore(limits: execLimits)
         self.drain = drain
     }
 
     /// How long an output pipe may stay quiet without reaching EOF after its process exited.
     let drain: Duration
+    /// The engine's container tools, or nil when it has none.
+    let tools: (any EngineContainerTools)?
+    /// How an attach to a running container follows its log.
+    let logOptions: DockerToolOptions
 
     /// Lets go of everything waiting: attaches end, waits end with no answer, execs not running
     /// are forgotten.

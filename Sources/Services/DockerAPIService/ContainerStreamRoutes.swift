@@ -21,26 +21,33 @@ extension ContainerRoutes.Routes {
     /// `POST /containers/{id}/attach`: an upgraded connection that becomes the container's
     /// stdio when it next starts.
     ///
-    /// The engine binds stdio when it bootstraps a process, so only an attach made before the
-    /// start can be served: it waits for the start, which bridges it. A running container's
-    /// stdio is already bound, so attaching to one is refused (409), a partial of this service
-    /// that `docker attach` users meet. `logs` is accepted but nothing is replayed: an attach
-    /// made before a start has no past output.
+    /// The engine binds stdio when it bootstraps a process, so an attach made before the start
+    /// waits for the start, which bridges it. A running container's stdio is already bound:
+    /// an attach to one that asks for no stdin gets its output from the engine's log, from now
+    /// on (with `logs`, from the start of the log), until it stops, which is what an IDE's
+    /// container console asks for. One that asks for stdin is refused (409), a partial of this
+    /// service that `docker attach` users meet. As with `logs`, stdout and stderr arrive
+    /// together, as stdout unless only stderr was asked for.
     func attach(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let (container, _) = try await find(reference)
         let options = DockerAttachOptions(stdin: try request.bool("stdin"), stdout: try request.bool("stdout"), stderr: try request.bool("stderr"))
         let follow = try request.bool("stream")
-        _ = try request.bool("logs")
+        let replay = try request.bool("logs")
         let multiplexed = !container.snapshot.configuration.initProcess.terminal
+        let running = ContainerViewMapper.isRunning(container.snapshot)
+        let held = await streams.processes.holds(container.engineID)
         guard follow else {
-            // Past output only, which there is none of here: the stream ends at once.
-            return .hijack(multiplexed: multiplexed) { $0.finishWriting() }
+            // Past output only: the log, when it was asked for, then the end.
+            guard replay, options.stdout || options.stderr, streams.tools != nil else {
+                return .hijack(multiplexed: multiplexed) { $0.finishWriting() }
+            }
+            return try await attachToLog(container, options: options, multiplexed: multiplexed, fromStart: true, follow: false)
         }
-        if ContainerViewMapper.isRunning(container.snapshot) {
-            throw DockerAPIError.conflict(Self.runningAttachMessage(reference))
-        }
-        if await streams.processes.holds(container.engineID) {
-            throw DockerAPIError.conflict(Self.runningAttachMessage(reference))
+        if running || held {
+            guard !options.stdin, options.stdout || options.stderr, streams.tools != nil else {
+                throw DockerAPIError.conflict(Self.runningAttachMessage(reference))
+            }
+            return try await attachToLog(container, options: options, multiplexed: multiplexed, fromStart: replay, follow: true)
         }
         let attaches = streams.attaches
         let ticket = try await attaches.reserve(engineID: container.engineID, options: options)
@@ -51,9 +58,43 @@ extension ContainerRoutes.Routes {
         }
     }
 
+    /// An attach served from the container's log: from its start or its end, and on while the
+    /// container runs when `follow`.
+    func attachToLog(
+        _ container: DockerContainer, options: DockerAttachOptions, multiplexed: Bool, fromStart: Bool, follow: Bool
+    ) async throws -> DockerResponse {
+        guard let tools = streams.tools else { throw DockerAPIError.internalError("the engine has no container log to read") }
+        let handle = try await tools.log(container.snapshot)
+        let start: DockerLogFile
+        let end: UInt64?
+        do {
+            var file = try DockerLogFile(fd: handle.fileDescriptor)
+            try file.seek(tail: fromStart ? nil : 0)
+            start = file
+            end = follow ? nil : try file.size()
+        } catch {
+            try? handle.close()
+            throw DockerAPIError.internalError("could not read the container's log: \(error)")
+        }
+        let framer = DockerLogFramer(multiplexed: multiplexed, stream: options.stdout ? .stdout : .stderr, timestamps: false)
+        let logOptions = streams.logOptions
+        let engine = self.engine
+        let engineID = container.engineID
+        return .hijack(multiplexed: multiplexed) { stream in
+            defer { try? handle.close() }
+            try? await DockerLogPump.run(
+                file: start, end: end, framer: framer, options: logOptions,
+                stillRunning: { (try await engine.get(engineID)).map(ContainerViewMapper.isRunning) ?? false },
+                present: { await stream.peerConnected() },
+                write: { try await stream.outbound.write($0) })
+            await stream.drain()
+            stream.finishWriting()
+        }
+    }
+
     static func runningAttachMessage(_ reference: String) -> String {
-        "cannot attach to container \(reference): it is already running, and SiliconShip binds a container's stdio when it starts it. "
-            + "Attach before it starts (docker run -it, docker start -ai), or follow its output with docker logs -f"
+        "cannot attach to container \(reference)'s input: it is already running, and SiliconShip binds a container's stdin when it starts it. "
+            + "Attach before it starts (docker run -it, docker start -ai), or attach to its output alone (docker attach --no-stdin)"
     }
 
     /// `POST /containers/{id}/wait?condition=`: the head at once, the status at the condition.

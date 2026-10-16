@@ -268,7 +268,7 @@ struct ToolHarness {
         execLimits: DockerExecLimits = .init(), limits: DockerHTTPLimits = .init()
     ) async throws -> ToolHarness {
         let tools = try FakeTools(snapshots: snapshots())
-        let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300))
+        let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300), logOptions: options)
         let identities = DockerIdentityStore(persistence: nil)
         let server = try await DockerAPIServerTests.Harness.start(limits: limits) { router in
             ContainerRoutes.register(on: &router, engine: tools, identities: identities, streams: streams, now: { Fixtures.now })
