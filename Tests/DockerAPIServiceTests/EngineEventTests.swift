@@ -281,7 +281,7 @@ struct EngineEventTests {
     @Test("an engine without the events route is read once a second, with this service's own reports; one that gains it is followed")
     func fallback() async throws {
         let feed = Feed()
-        feed.answer(false, false, true)
+        feed.answer(false)
         let engine = EventTests.Engine()
         let bus = DockerEventBus(
             limits: .init(pollInterval: .milliseconds(10), engineRecheck: .milliseconds(30)), source: engine.source, feed: feed)
@@ -294,7 +294,9 @@ struct EngineEventTests {
         // And this service's own reports are said while nothing else says them.
         await bus.container("kill", EventTests.container("web"), change: .none)
         #expect(await collector.take(1).map(\.action) == ["kill"])
+        #expect(!(await bus.followingEngine))
         // The engine gained the route: followed from then on.
+        feed.answer(true)
         #expect(await Self.waitFor { await bus.followingEngine })
         feed.send(.start)
         let followed = await collector.take(1)
@@ -338,5 +340,25 @@ struct EngineEventTests {
         await bus.cancel(id)
         _ = stream
         #expect(!(await bus.followingEngine))
+    }
+
+    @Test("the engine's own containers are not reported, and a resync does not report them destroyed; a container of a client's is")
+    func infrastructureHidden() async throws {
+        let feed = Feed()
+        let engine = EventTests.Engine()
+        let (bus, collector) = try await Self.followingBus(feed, engine: engine)
+        feed.send(.create, id: "buildkit", labels: [ResourceLabelKeys.plugin: "container-build"])
+        feed.send(.start, id: "buildkit", labels: [ResourceLabelKeys.plugin: "container-build"])
+        // The control, on the same path.
+        feed.send(.create, id: "abc123def456")
+        #expect(await collector.take(1).map(\.actorID) == [Self.dockerID])
+        // A gap: the listing, which leaves the builder out, is compared with what was seen.
+        engine.set([EventTests.container("abc1")])
+        feed.gap(true)
+        feed.end()
+        let resynced = await collector.take(1)
+        #expect(resynced.allSatisfy { $0.attributes["name"] != "buildkit" && $0.actorID != DockerIdentityTable.foreignID(engineID: "buildkit") })
+        #expect(await collector.settle().allSatisfy { $0.actorID != DockerIdentityTable.foreignID(engineID: "buildkit") })
+        await bus.shutdown()
     }
 }

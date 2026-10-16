@@ -14,12 +14,14 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerPersistence
 import ContainerResource
 import ContainerRuntimeClient
 import ContainerXPC
 import ContainerizationError
 import Foundation
 import Logging
+import SystemPackage
 import Testing
 import XPC
 
@@ -187,5 +189,23 @@ struct ContainerLabelUpdateTests {
             #expect(error.isCode(.invalidArgument))
         }
         #expect(APIServerCapability.allCases.contains(.containerLabels))
+    }
+
+    @Test("the API server registers the events and label routes, numbers events with its own nonce, and allows the name label")
+    func productionWiring() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        var start = APIServer.Start()
+        start.lifecycleGenerationOption = nil  // an unparsed option would trap when read
+        start.debug = false
+        start.appRoot = FilePath(f.root.path)
+        var routes: [XPCRoute: XPCServer.RouteHandler] = [:]
+        let service = try start.initializeContainersService(
+            pluginLoader: try f.loader(), containerSystemConfig: ContainerSystemConfig(), processNonce: "wired-nonce",
+            log: Logger(label: "ContainerLabelUpdateTests"), routes: &routes)
+        #expect(routes[.containerEvent] != nil)
+        #expect(routes[.containerUpdateLabels] != nil)
+        #expect(service.events.processNonce == "wired-nonce")
+        #expect(service.labelPolicy == APIServer.Start.containerLabelPolicy)
     }
 }

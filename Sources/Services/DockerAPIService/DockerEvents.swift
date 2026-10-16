@@ -413,6 +413,9 @@ public actor DockerEventBus {
     /// Reports an engine event, and keeps the last reading current with it so that a later
     /// difference starts from here.
     func apply(_ event: ContainerEvent) {
+        // The engine's own containers (a builder, a cluster node) are not a Docker client's to
+        // see, as no listing shows them (`withoutInfrastructure`).
+        if let owner = event.labels[ResourceLabelKeys.plugin], !owner.isEmpty { return }
         let engineID = event.id
         if let removed = recreating[engineID] {
             switch event.action {

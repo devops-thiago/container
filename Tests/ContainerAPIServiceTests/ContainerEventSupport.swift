@@ -73,6 +73,15 @@ final class EventCollector: Sendable {
         return next()
     }
 
+    /// Waits until `count` events have arrived in all, for up to `within`.
+    func waitFor(_ count: Int, within: Duration = .seconds(10)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: within)
+        while received.events.withLock({ $0.count }) < count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return received.events.withLock { $0.count } >= count
+    }
+
     /// What arrives within a short while.
     func settle(_ within: Duration = .milliseconds(200)) async -> [ContainerEvent] {
         try? await Task.sleep(for: within)
@@ -275,6 +284,15 @@ final class EventServiceFixture: Sendable {
     func service(
         restartDelay: @escaping @Sendable (Duration) async throws -> Void = { _ in }, labelPolicy: ContainerLabelPolicy = .fixed
     ) throws -> ContainersService {
+        let loader = try loader()
+        let hooks = self.hooks()
+        return try ContainersService(
+            appRoot: root, pluginLoader: loader, containerSystemConfig: ContainerSystemConfig(), log: log, restartDelay: restartDelay,
+            events: hub, labelPolicy: labelPolicy, hooks: hooks)
+    }
+
+    /// A plugin loader that finds the fixture's runtime plugin, which is never executed.
+    func loader() throws -> PluginLoader {
         try FileManager.default.createDirectory(at: containers, withIntermediateDirectories: true)
         let plugins = root.appendingPathComponent("plugins")
         let plugin = plugins.appendingPathComponent(runtimeName)
@@ -292,10 +310,13 @@ final class EventServiceFixture: Sendable {
             type = "runtime"
             """.utf8
         ).write(to: plugin.appendingPathComponent("config.toml"))
-        let loader = try PluginLoader(
+        return try PluginLoader(
             appRoot: root, installRoot: root, logRoot: nil,
             pluginDirectories: [plugins], pluginFactories: [DefaultPluginFactory(logger: log)])
-        let hooks = ContainersService.Hooks(
+    }
+
+    private func hooks() -> ContainersService.Hooks {
+        ContainersService.Hooks(
             launchRuntime: { [self] _, configuration, path in
                 if failNextLaunch.withLock({ fail in
                     defer { fail = false }
@@ -322,9 +343,6 @@ final class EventServiceFixture: Sendable {
             initFilesystem: { _, _ in
                 .block(format: "ext4", source: "/dev/null", destination: "/", options: ["ro"])
             })
-        return try ContainersService(
-            appRoot: root, pluginLoader: loader, containerSystemConfig: ContainerSystemConfig(), log: log, restartDelay: restartDelay,
-            events: hub, labelPolicy: labelPolicy, hooks: hooks)
     }
 
     func configuration(

@@ -71,13 +71,14 @@ struct ContainerEventHubTests {
         let big = Self.snapshot(labels: ["padding": String(repeating: "x", count: 32 * 1024)])
         let clock = ContinuousClock()
         let began = clock.now
-        for _ in 0..<40 {
+        for count in 1...40 {
             hub.emit(.start, snapshot: big, name: "big")
-            // Paced so that the reader, which does read, keeps up.
-            try await Task.sleep(for: .milliseconds(2))
+            // The next only once the reader has this one, so that it never falls behind, however
+            // loaded the machine is: only the stalled subscriber can.
+            #expect(await reader.waitFor(count))
         }
         // Emitting never waited for the stalled subscriber.
-        #expect(clock.now - began < .seconds(5))
+        #expect(clock.now - began < .seconds(20))
         #expect(hub.subscriberCount == 1)
         // The stalled one reads what reached its pipe, then the end of the stream.
         let stalledReader = EventCollector(stalled)
