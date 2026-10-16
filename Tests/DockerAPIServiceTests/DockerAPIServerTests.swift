@@ -160,7 +160,10 @@ struct DockerAPIServerTests {
             // version, 1.x, stays on its component.
             #expect(json["Version"] as? String == "28.0.0")
             let components = try #require(json["Components"] as? [[String: Any]])
-            #expect(components.first?["Version"] as? String == "1.1.0-252-g2b1a137")
+            // dockerd's Engine component at the server's version, and the engine's own after it.
+            #expect(components.map { $0["Name"] as? String } == ["Engine", "SiliconShip Engine"])
+            #expect(components.map { $0["Version"] as? String } == ["28.0.0", "1.1.0-252-g2b1a137"])
+            #expect((components[1]["Details"] as? [String: String])?["GitCommit"] == "abc123")
             #expect((json["Platform"] as? [String: Any])?["Name"] as? String == "SiliconShip")
         }
         try await harness.withClient { second in
@@ -169,6 +172,9 @@ struct DockerAPIServerTests {
             #expect(info.contains(#""NCPU":8"#))
             #expect(info.contains(#""ContainersRunning":1"#))
             #expect(info.contains(#""OSType":"linux""#))
+            // The same server version as /version's, as dockerd reports both.
+            #expect(info.contains(#""ServerVersion":"28.0.0""#))
+            #expect(!info.contains("1.1.0-252"))
         }
     }
 
