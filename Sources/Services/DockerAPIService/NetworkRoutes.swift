@@ -72,7 +72,7 @@ public struct DockerNetworkCreateBody: Decodable, Sendable {
 public struct DockerNetworkConnectBody: Decodable, Sendable {
     public struct EndpointBody: Decodable, Sendable {
         public var Aliases: [String]?
-        public var IPAMConfig: DockerIgnoredValue?
+        public var IPAMConfig: DockerEndpointIPAMConfig?
         public var Links: [String]?
     }
 
@@ -486,9 +486,7 @@ public enum NetworkRoutes {
                 guard !attached else {
                     throw DockerAPIError(.forbidden, "endpoint with name \(container.name) already exists in network \(NetworkMapper.name(network))")
                 }
-                if body.EndpointConfig?.IPAMConfig != nil {
-                    throw DockerAPIError.badRequest("a static address is not supported by SiliconShip: the network assigns one")
-                }
+                try DockerEndpointIPAMConfig.refuseAddress(body.EndpointConfig?.IPAMConfig)
                 networks = NetworkMapper.connecting(container, to: network, aliases: body.EndpointConfig?.Aliases ?? [])
             } else {
                 guard attached else {
