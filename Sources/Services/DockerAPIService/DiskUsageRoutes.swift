@@ -16,13 +16,6 @@
 
 import Foundation
 
-/// What the engine says about the disk its images use, beyond what the image routes already
-/// read. The agent answers it from the images service; tests answer it from a fake.
-public protocol EngineDiskUsage: Sendable {
-    /// What the images' content and unpacked snapshots take on disk, together.
-    func layersSize() async throws -> Int64
-}
-
 /// A volume's usage, as only `GET /system/df` reports it.
 public struct DockerVolumeUsage: Encodable, Sendable, Equatable {
     public var Size: Int64
@@ -43,17 +36,20 @@ public enum DiskUsageRoutes {
     static let types: Set<String> = ["container", "image", "volume", "build-cache"]
 
     public static func register(
-        on router: inout DockerRouter, disk: some EngineDiskUsage, images: some EngineImages, containers: some EngineContainers,
+        on router: inout DockerRouter, images: some EngineImages, containers: some EngineContainers,
         volumes: some EngineVolumes, identities: DockerIdentityStore, now: @escaping @Sendable () -> Date = { Date() }
     ) {
         router.add(.GET, "/system/df") { request, _ in
-            try await usage(request, disk: disk, images: images, containers: containers, volumes: volumes, identities: identities, now: now)
+            try await usage(request, images: images, containers: containers, volumes: volumes, identities: identities, now: now)
         }
     }
 
     /// Each kind asked for, as dockerd answers: every kind without `type`, else only those
     /// named. Each size is one the Docker CLI can add up into a reclaimable figure no larger
     /// than dockerd's for the same objects:
+    /// - `LayersSize`, df's image total, is the content the images' `Size` counts, each blob
+    ///   once, as dockerd adds up the layers; not the disk the engine's unpacked snapshots
+    ///   take, which Docker has no counterpart for;
     /// - an image's `SharedSize` is what of its content another image uses too, so an unused
     ///   image's `Size - SharedSize` is what removing it frees;
     /// - a container's `SizeRw` is what it wrote (`EngineContainers.writableSize`), left out
@@ -62,7 +58,7 @@ public enum DiskUsageRoutes {
     ///   engine cannot tell;
     /// - there is no build cache here (see `BuildRoutes`).
     static func usage(
-        _ request: DockerRequest, disk: some EngineDiskUsage, images: some EngineImages, containers: some EngineContainers,
+        _ request: DockerRequest, images: some EngineImages, containers: some EngineContainers,
         volumes: some EngineVolumes, identities: DockerIdentityStore, now: @Sendable () -> Date
     ) async throws -> DockerResponse {
         let asked = request.query["type"] ?? []
@@ -74,10 +70,11 @@ public enum DiskUsageRoutes {
 
         var answer = DockerDiskUsage(LayersSize: 0, Images: nil, Containers: nil, Volumes: nil, BuildCache: nil)
         if wants("image") {
-            answer.LayersSize = try await disk.layersSize()
             let records = try await images.list()
             let shared = DockerImageCatalog.sharedSizes(records)
-            answer.Images = DockerImageCatalog(records).images.map { image in
+            let catalog = DockerImageCatalog(records)
+            answer.LayersSize = DockerImageCatalog.layersSize(catalog.images)
+            answer.Images = catalog.images.map { image in
                 var summary = ImageViewMapper.summary(image, manifests: false, containers: [])
                 summary.Containers = Int64(DockerImageCatalog.containers(using: image, among: all).count)
                 summary.SharedSize = shared[image.id] ?? 0

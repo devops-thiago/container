@@ -26,11 +26,6 @@ import Testing
 struct DiskUsageAndStubTests {
     typealias F = StoreFixtures
 
-    /// The images' total on disk.
-    struct FakeDisk: EngineDiskUsage {
-        func layersSize() async throws -> Int64 { 123_456 }
-    }
-
     let router: DockerRouter
 
     init() {
@@ -45,7 +40,7 @@ struct DiskUsageAndStubTests {
         let volumes = FakeVolumes([FakeVolumes.volume("data"), FakeVolumes.volume("logs")], unmeasured: ["logs"])
         var router = DockerRouter()
         DiskUsageRoutes.register(
-            on: &router, disk: FakeDisk(), images: images, containers: engine, volumes: volumes,
+            on: &router, images: images, containers: engine, volumes: volumes,
             identities: DockerIdentityStore(persistence: nil), now: { Fixtures.now })
         UnsupportedRoutes.register(on: &router)
         self.router = router
@@ -69,7 +64,8 @@ struct DiskUsageAndStubTests {
     @Test("df reports the images with the containers using each, the containers with their size, and the volumes with their usage")
     func everything() async throws {
         let usage = try await json("/v1.48/system/df")
-        #expect(usage["LayersSize"] as? Int == 123_456)
+        // These fixture images list no content blobs, so there is nothing to add up.
+        #expect(usage["LayersSize"] as? Int == 0)
         #expect((usage["BuildCache"] as? [Any])?.isEmpty == true)
 
         let images = try #require(usage["Images"] as? [[String: Any]])
@@ -129,6 +125,18 @@ struct DiskUsageAndStubTests {
         #expect(shared[F.digest("f")] == nil)
     }
 
+    @Test("LayersSize is the images' content, each blob once, never what the engine's snapshots or own images take")
+    func layersSize() {
+        let app = Self.record("docker.io/library/app:1", id: "a", ["1": 100, "2": 2000])
+        let tool = Self.record("docker.io/library/tool:1", id: "b", ["3": 300, "2": 2000])
+        // The engine's own image, and a snapshot-sized blob only it has: neither is Docker's.
+        let vminit = Self.record("ghcr.io/apple/containerization/vminit:0.9", id: "f", ["9": 1_169_178_624], infrastructure: true)
+        let catalog = DockerImageCatalog([app, tool, vminit])
+        #expect(DockerImageCatalog.layersSize(catalog.images) == 2400)
+        // Control: the Sizes alone double-count the shared layer.
+        #expect(catalog.images.map(\.primary.size).reduce(0, +) == 4400)
+    }
+
     @Test("df's image sizes add up, as the Docker CLI adds them, to what removing the unused images frees")
     func reclaimableImages() async throws {
         let records = [
@@ -138,7 +146,7 @@ struct DiskUsageAndStubTests {
         let engine = FakeEngine(snapshots: [F.container("web", image: records[0], run: .running)])
         var router = DockerRouter()
         DiskUsageRoutes.register(
-            on: &router, disk: FakeDisk(), images: FakeImageStore(records), containers: engine, volumes: FakeVolumes(),
+            on: &router, images: FakeImageStore(records), containers: engine, volumes: FakeVolumes(),
             identities: DockerIdentityStore(persistence: nil))
         guard case .data(_, _, let body, _) = await router.respond(to: try DockerRequest(method: .GET, uri: "/system/df?type=image", headers: [:], body: ByteBuffer()))
         else { return }
@@ -150,6 +158,8 @@ struct DiskUsageAndStubTests {
         }
         // Removing tool frees its own layer; the shared one stays for app.
         #expect(reclaimable == 300)
+        // The total is each blob once: what the two Sizes count, less the layer they share.
+        #expect(usage["LayersSize"] as? Int == 2400)
         // Control: an image a container uses is not counted.
         #expect(images.first { $0["Id"] as? String == F.digest("a") }?["Containers"] as? Int == 1)
     }
@@ -178,7 +188,7 @@ struct DiskUsageAndStubTests {
         let engine = FakeEngine(snapshots: [Fixtures.snapshot(configuration, status: .stopped, started: nil)])
         var router = DockerRouter()
         DiskUsageRoutes.register(
-            on: &router, disk: FakeDisk(), images: FakeImageStore(), containers: engine,
+            on: &router, images: FakeImageStore(), containers: engine,
             volumes: FakeVolumes([FakeVolumes.volume("data"), FakeVolumes.volume("logs")]), identities: DockerIdentityStore(persistence: nil))
         guard case .data(_, _, let body, _) = await router.respond(to: try DockerRequest(method: .GET, uri: "/system/df?type=volume", headers: [:], body: ByteBuffer()))
         else { return }

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import NIOCore
 import Testing
 
 @testable import DockerAPIService
@@ -63,6 +64,28 @@ struct ContainerSizeExportTests {
         #expect(try await h.request("GET", "/containers/term/json?size=1").json()["SizeRw"] == nil)
         // Control: without size=1 there is no SizeRw.
         #expect(try await h.request("GET", "/containers/box/json").json()["SizeRw"] == nil)
+    }
+
+    @Test("container prune reclaims what the removed containers wrote, and nothing for one the engine cannot measure")
+    func pruneReclaimed() async throws {
+        let engine = FakeEngine(snapshots: [
+            Fixtures.dockerContainer(name: "wrote", dockerID: Fixtures.id("a1"), status: .stopped, exitCode: 0),
+            Fixtures.dockerContainer(name: "unknown", dockerID: Fixtures.id("a2"), status: .stopped, exitCode: 0),
+            Fixtures.dockerContainer(name: "up", dockerID: Fixtures.id("a3")),
+        ])
+        engine.writableSizes = [String(Fixtures.id("a1").prefix(12)): 8192, String(Fixtures.id("a3").prefix(12)): 1 << 20]
+        var router = DockerRouter()
+        ContainerRoutes.register(on: &router, engine: engine, identities: DockerIdentityStore(persistence: nil), streams: DockerContainerStreams(engine: engine))
+        guard case .data(let status, _, let body, _) = await router.respond(to: try DockerRequest(method: .POST, uri: "/v1.48/containers/prune", headers: [:], body: ByteBuffer()))
+        else {
+            Issue.record("expected a whole response")
+            return
+        }
+        #expect(status == .ok)
+        let report = try #require(try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8)) as? [String: Any])
+        #expect((report["ContainersDeleted"] as? [String])?.count == 2)
+        // Control: the running container is kept, so its megabyte is not counted.
+        #expect(report["SpaceReclaimed"] as? Int == 8192)
     }
 
     @Test("export streams the engine's tar of a running or stopped container, and removes it once sent")

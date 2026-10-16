@@ -388,11 +388,15 @@ public enum ContainerRoutes {
                 throw key == "until" ? DockerAPIError.badRequest("the 'until' filter is not supported") : DockerAPIError.badRequest("invalid filter '\(key)'")
             }
             var deleted: [String] = []
+            var reclaimed: Int64 = 0
             for container in try await containers() where !ContainerViewMapper.isRunning(container.snapshot) {
                 let labels = container.snapshot.configuration.labels
                 guard (filters["label"] ?? []).allSatisfy({ Self.labelMatches($0, labels) }),
                     !(filters["label!"] ?? []).contains(where: { Self.labelMatches($0, labels) })
                 else { continue }
+                // As dockerd: what each removed container wrote, measured before it goes; one
+                // the engine cannot measure adds nothing.
+                let size = await engine.writableSize(container.snapshot) ?? 0
                 do {
                     try await engine.delete(container.snapshot, force: false)
                 } catch {
@@ -401,8 +405,9 @@ public enum ContainerRoutes {
                 }
                 await removed(container)
                 deleted.append(container.dockerID)
+                reclaimed += size
             }
-            return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: 0))
+            return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: reclaimed))
         }
 
         static func labelMatches(_ condition: String, _ labels: [String: String]) -> Bool {

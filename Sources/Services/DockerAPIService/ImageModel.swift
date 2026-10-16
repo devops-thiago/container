@@ -407,6 +407,17 @@ public struct DockerImageCatalog: Sendable {
         }
     }
 
+    /// `LayersSize` in `GET /system/df`: the content each image's `Size` counts, a blob that
+    /// several images use once.
+    public static func layersSize(_ images: [DockerImage]) -> Int64 {
+        var seen = Set<String>()
+        var total: Int64 = 0
+        for blob in images.flatMap(\.primary.content) where seen.insert(blob.digest).inserted {
+            total += blob.size
+        }
+        return total
+    }
+
     /// Each image's `SharedSize`, by ID, as dockerd computes it for `GET /system/df`: what of the
     /// content its `Size` counts another image also uses. Every record counts as a user,
     /// the engine's own images included, since removing an image leaves what they still use.
