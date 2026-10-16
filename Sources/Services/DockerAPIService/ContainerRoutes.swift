@@ -16,6 +16,7 @@
 
 import ContainerResource
 import Foundation
+import Logging
 import NIOHTTP1
 
 /// The engine as the container routes see it. The agent answers it from the API server; tests
@@ -52,11 +53,23 @@ public protocol EngineContainers: Sendable {
     func deleteVolume(_ name: String) async throws
     /// Image ID by index digest, for the engine's images (see `DockerViewContext.imageIDs`).
     func imageIDs() async throws -> [String: String]
+    /// Whether the engine keeps a container's name, so that a rename is the engine's to make.
+    /// An engine from before it did answers false, and a rename is this service's alone.
+    func supportsRename() async -> Bool
+    /// Sets the container's name label (`DockerLabels.name`) in the engine: the only label the
+    /// engine lets change.
+    func rename(_ container: ContainerSnapshot, to name: String) async throws
 }
 
 extension EngineContainers {
     /// No mapping: containers this service did not create show their index digest.
     public func imageIDs() async throws -> [String: String] { [:] }
+
+    public func supportsRename() async -> Bool { false }
+
+    public func rename(_ container: ContainerSnapshot, to name: String) async throws {
+        throw DockerAPIError.notImplemented("the engine cannot rename a container")
+    }
 }
 
 /// The container routes: list, create, inspect, the lifecycle, rename and prune, and the streams
@@ -97,6 +110,21 @@ public enum ContainerRoutes {
         }
         router.add(.POST, "/commit") { _, _ in
             throw DockerAPIError.notImplemented("commit is not supported by SiliconShip: build an image from a Dockerfile instead")
+        }
+    }
+
+    /// Gives the engine the names renamed here while it could not keep them, so that its name
+    /// label, which every client reads, has them. Nothing when it still cannot; a name it
+    /// refuses (another container took it in the engine meanwhile) stays here.
+    public static func moveLocalRenamesToEngine(engine: some EngineContainers, identities: DockerIdentityStore, log: Logger) async {
+        guard await engine.supportsRename(), let snapshots = try? await engine.list() else { return }
+        for (container, name) in await identities.localRenames(snapshots) {
+            do {
+                try await engine.rename(container.snapshot, to: name)
+                await identities.renamedInEngine(container, to: name)
+            } catch {
+                log.warning("could not give the engine a container's name", metadata: ["container": "\(container.engineID)", "error": "\(error)"])
+            }
         }
     }
 
@@ -287,10 +315,23 @@ public enum ContainerRoutes {
             return .empty()
         }
 
+        /// A rename is the engine's when it can make one: the name label is then what every
+        /// client reads, this service's store only a cache of it, and the engine says the
+        /// rename. An older engine cannot, and the name lives in the store, as it used to.
         func rename(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
             let (container, all) = try await find(reference)
-            try await identities.rename(container, to: request.query("name") ?? "", among: all)
-            if let events, let renamed = await identities.join([container.snapshot]).first {
+            let name = try await identities.checkRename(container, to: request.query("name") ?? "", among: all)
+            if await engine.supportsRename() {
+                do {
+                    try await engine.rename(container.snapshot, to: name)
+                } catch let error as DockerAPIError where error.status == .conflict {
+                    throw DockerAPIError.conflict("Error when allocating new name: \(error.message)")
+                }
+                await identities.renamedInEngine(container, to: name)
+            } else {
+                try await identities.rename(container, to: name, among: all)
+            }
+            if let events, let renamed = await identities.join([try await engine.get(container.engineID) ?? container.snapshot]).first {
                 await events.container("rename", renamed, change: .none, extra: ["oldName": "/" + container.name])
             }
             return .empty()
