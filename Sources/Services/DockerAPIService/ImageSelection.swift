@@ -72,6 +72,8 @@ public struct ImageListFilter: Sendable {
     /// What a `reference` pattern is matched against: `alpine:3`, `alpine`,
     /// `docker.io/library/alpine:3` and `docker.io/library/alpine`.
     static func targets(_ record: EngineImageRecord) -> [String] {
+        // The reserved reference of an image with no name is not one a pattern can match.
+        guard !record.isDanglingMarker else { return [] }
         guard let parsed = record.parsed else { return [record.reference] }
         return [parsed.familiar, parsed.familiarName, parsed.normalized, parsed.name]
     }
@@ -96,9 +98,11 @@ public enum ImageDeletion {
     /// with `force`; a stopped container's, or one named in several repositories, needs it.
     public static func plan(_ match: DockerImageCatalog.Match, force: Bool, containers: [DockerContainer]) throws(DockerAPIError) -> Plan {
         let image = match.image
-        let all = image.records
+        // The reserved reference of an image with no name keeps nothing alive: it goes with the
+        // image's last name.
+        let all = image.records.filter { !$0.isDanglingMarker }
         let users = DockerImageCatalog.containers(using: image, among: containers)
-        if let record = match.record {
+        if let record = match.record, !record.isDanglingMarker {
             let same = sameReferences(record, in: all)
             if same.count < all.count {
                 return Plan(remove: same, items: same.map { .untagged($0.familiarReference) })
@@ -124,9 +128,12 @@ public enum ImageDeletion {
         return everything(image)
     }
 
-    /// Every reference, then the image.
+    /// Every reference, then the image. The reserved reference of an image with no name goes
+    /// unannounced, as dockerd reports such an image's delete with its ID alone.
     static func everything(_ image: DockerImage) -> Plan {
-        Plan(remove: image.records, items: image.records.map { .untagged($0.familiarReference) } + [.deleted(image.id)])
+        Plan(
+            remove: image.records,
+            items: image.records.filter { !$0.isDanglingMarker }.map { .untagged($0.familiarReference) } + [.deleted(image.id)])
     }
 
     /// The references a name stands for among an image's: the same repository and tag, or,

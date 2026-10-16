@@ -104,6 +104,12 @@ extension ImageRoutes {
             let target = try Self.target(repo: request.query("repo") ?? "", tag: request.query("tag") ?? "")
             let match = try await catalog().resolve(name)
             try await engine.tag((match.record ?? match.image.primary).reference, as: target.normalized)
+            // Named now, it is no longer dangling: its reserved reference goes, as in dockerd.
+            if target.name != EngineImageRecord.danglingRepository {
+                for marker in match.image.records where marker.isDanglingMarker {
+                    try? await engine.delete(marker.reference)
+                }
+            }
             await report("tag", match.image.id, name: target.familiar)
             return .empty(.created)
         }
@@ -154,7 +160,7 @@ extension ImageRoutes {
                 do {
                     for record in image.records {
                         try await engine.delete(record.reference)
-                        untagged.append(.untagged(record.familiarReference))
+                        if !record.isDanglingMarker { untagged.append(.untagged(record.familiarReference)) }
                     }
                     items += untagged + [.deleted(image.id)]
                     await report(untagged + [.deleted(image.id)], imageID: image.id)

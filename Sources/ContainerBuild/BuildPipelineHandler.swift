@@ -76,6 +76,7 @@ protocol BuildPipelineHandler: Sendable {
 public actor BuildPipeline {
     let handlers: [BuildPipelineHandler]
     public init(_ config: Builder.BuildConfig) async throws {
+        let output = config.terminal?.handle ?? config.output ?? FileHandle.standardError
         self.handlers =
             [
                 try BuildFSSync(URL(filePath: config.contextDir)),
@@ -83,11 +84,12 @@ public actor BuildPipeline {
                 try BuildImageResolver(
                     config.contentStore,
                     quiet: config.quiet,
-                    output: config.terminal?.handle ?? FileHandle.standardError,
+                    output: output,
                     pull: config.pull,
-                    containerSystemConfig: config.containerSystemConfig
+                    containerSystemConfig: config.containerSystemConfig,
+                    registryCredentials: config.registryCredentials
                 ),
-                try BuildStdio(quiet: config.quiet, output: config.terminal?.handle ?? FileHandle.standardError),
+                try BuildStdio(quiet: config.quiet, output: output),
             ]
     }
 

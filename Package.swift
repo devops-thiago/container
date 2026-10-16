@@ -198,8 +198,10 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 "ContainerAPIClient",
                 "ContainerBuild",
+                "ContainerImagesServiceClient",
                 "ContainerPersistence",
                 "ContainerResource",
+                "DockerAPIService",
             ]
         ),
         .testTarget(
@@ -796,11 +798,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "ContainerizationOS", package: "containerization"),
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerAPIClient",
+                "ContainerBuild",
                 "ContainerImagesServiceClient",
                 "ContainerLog",
                 "ContainerPersistence",

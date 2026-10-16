@@ -38,11 +38,6 @@ public enum UnsupportedRoutes {
         router.add(.GET, "/containers/{id}/export") { _, _ in
             throw DockerAPIError.notImplemented("export is not supported by SiliconShip: copy files out of the container with docker cp instead")
         }
-        router.add(.POST, "/build") { _, _ in
-            throw DockerAPIError.notImplemented(
-                "building through the Docker API is not supported by SiliconShip yet: the classic builder (DOCKER_BUILDKIT=0) is coming "
-                    + "(devops-thiago/SiliconShip#231)")
-        }
 
         // Swarm: init and join cannot succeed here; everything else is dockerd's answer on a
         // node that is in no swarm.
