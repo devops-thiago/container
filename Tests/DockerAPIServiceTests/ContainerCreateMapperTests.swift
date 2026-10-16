@@ -225,6 +225,28 @@ struct ContainerCreateMapperTests {
         #expect(plan.extras.networkMode == "shop_default")
     }
 
+    @Test("an endpoint's IPAMConfig is refused only when it asks for an address")
+    func endpointAddress() throws {
+        // `docker run --network n` with no `--ip` sends no IPAMConfig; another client may send
+        // it empty or with its fields empty.
+        for ipam in [#"{}"#, #"{"IPv4Address":"","IPv6Address":"","LinkLocalIPs":[]}"#, "null"] {
+            let plan = try Fixtures.plan(
+                #"{"Image":"alpine","HostConfig":{"NetworkMode":"shop_default"},"NetworkingConfig":{"EndpointsConfig":{"shop_default":{"IPAMConfig":\#(ipam)}}}}"#
+            )
+            #expect(plan.configuration.networks.map(\.network) == ["shop_default"])
+        }
+        // Control: an address, `docker run --ip`, `--ip6` or `--link-local-ip`, is refused, not dropped.
+        for ipam in [#"{"IPv4Address":"10.7.0.9"}"#, #"{"IPv6Address":"fd00::9"}"#, #"{"LinkLocalIPs":["169.254.0.9"]}"#] {
+            let error = errorMessage {
+                _ = try Fixtures.plan(
+                    #"{"Image":"alpine","HostConfig":{"NetworkMode":"shop_default"},"NetworkingConfig":{"EndpointsConfig":{"shop_default":{"IPAMConfig":\#(ipam)}}}}"#
+                )
+            }
+            #expect(error?.status == .badRequest)
+            #expect(error?.message == "a static address is not supported by SiliconShip: the network assigns one")
+        }
+    }
+
     @Test("Privileged and Devices are warned about only when given")
     func warnings() throws {
         let given = try Fixtures.plan(#"{"Image":"alpine","HostConfig":{"Privileged":true,"Devices":[{"PathOnHost":"/dev/kvm"}],"CpuShares":512}}"#)

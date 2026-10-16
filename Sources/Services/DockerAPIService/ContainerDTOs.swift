@@ -233,12 +233,42 @@ public struct DockerHostConfig: Decodable, Sendable {
     public init() {}
 }
 
-/// `NetworkingConfig.EndpointsConfig` values: only the aliases are read.
+/// An endpoint's `IPAMConfig`: the addresses a client asks a network for. The Docker CLI sends
+/// `docker network connect`'s with no address in it as `{}`, and other clients may send the
+/// fields empty, so only an address in it is a request for one, as in dockerd.
+public struct DockerEndpointIPAMConfig: Codable, Sendable, Equatable {
+    public var IPv4Address: String?
+    public var IPv6Address: String?
+    public var LinkLocalIPs: [String]?
+
+    public init(IPv4Address: String? = nil, IPv6Address: String? = nil, LinkLocalIPs: [String]? = nil) {
+        self.IPv4Address = IPv4Address
+        self.IPv6Address = IPv6Address
+        self.LinkLocalIPs = LinkLocalIPs
+    }
+
+    /// Whether it names any address.
+    public var requestsAddress: Bool {
+        !(IPv4Address ?? "").isEmpty || !(IPv6Address ?? "").isEmpty || (LinkLocalIPs ?? []).contains { !$0.isEmpty }
+    }
+
+    /// Refuses a request for an address: the engine's network assigns every one.
+    public static func refuseAddress(_ config: DockerEndpointIPAMConfig?) throws(DockerAPIError) {
+        if config?.requestsAddress == true {
+            throw .badRequest("a static address is not supported by SiliconShip: the network assigns one")
+        }
+    }
+}
+
+/// `NetworkingConfig.EndpointsConfig` values: the aliases are read, and an address asked for
+/// is refused.
 public struct DockerEndpointSettings: Codable, Sendable, Equatable {
     public var Aliases: [String]?
+    public var IPAMConfig: DockerEndpointIPAMConfig?
 
-    public init(Aliases: [String]? = nil) {
+    public init(Aliases: [String]? = nil, IPAMConfig: DockerEndpointIPAMConfig? = nil) {
         self.Aliases = Aliases
+        self.IPAMConfig = IPAMConfig
     }
 }
 
