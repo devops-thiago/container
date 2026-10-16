@@ -31,6 +31,16 @@ public struct RouteParameters: Sendable {
     }
 }
 
+/// How a route takes its request body.
+public enum DockerBodyPolicy: Sendable, Equatable {
+    /// Read into memory, up to the server's `DockerHTTPLimits.maxBodyBytes`.
+    case memory
+    /// Written to a file as it arrives, up to `maxBytes`, for bodies too large to hold in
+    /// memory (an archive upload). The route reads `DockerRequest.bodyFile`, which is deleted
+    /// once the response has gone.
+    case spool(maxBytes: Int)
+}
+
 /// Matches requests to routes.
 ///
 /// A pattern is a path of literal segments and parameters: `{id}` captures one segment, and
@@ -50,6 +60,7 @@ public struct DockerRouter: Sendable {
 
         let method: HTTPMethod
         let segments: [Segment]
+        let body: DockerBodyPolicy
         let handler: Handler
 
         var literalCount: Int {
@@ -99,16 +110,23 @@ public struct DockerRouter: Sendable {
         self.log = log
     }
 
-    public mutating func add(_ method: HTTPMethod, _ pattern: String, _ handler: @escaping Handler) {
+    public mutating func add(_ method: HTTPMethod, _ pattern: String, body: DockerBodyPolicy = .memory, _ handler: @escaping Handler) {
         let segments = pattern.split(separator: "/").map { part -> Route.Segment in
             if part.hasPrefix("{") && part.hasSuffix("+}") { return .greedy(String(part.dropFirst().dropLast(2))) }
             if part.hasPrefix("{") && part.hasSuffix("}") { return .parameter(String(part.dropFirst().dropLast())) }
             return .literal(String(part))
         }
         precondition(segments.filter { if case .greedy = $0 { true } else { false } }.count <= 1, "one greedy parameter per pattern")
-        routes.append(Route(method: method, segments: segments, handler: handler))
+        routes.append(Route(method: method, segments: segments, body: body, handler: handler))
         // Most literal segments first; ties keep the order they were added in.
         routes = routes.enumerated().sorted { ($0.element.literalCount, -$0.offset) > ($1.element.literalCount, -$1.offset) }.map(\.element)
+    }
+
+    /// How the route that will answer a request with this method and path takes its body.
+    /// Asked once the head has arrived, before any of the body is read.
+    public func bodyPolicy(method: HTTPMethod, segments: [String]) -> DockerBodyPolicy {
+        let method = method == .HEAD ? HTTPMethod.GET : method
+        return routes.first { $0.method == method && $0.match(segments) != nil }?.body ?? .memory
     }
 
     /// Runs the route for `request`. Never throws: an error becomes the client's error body.
