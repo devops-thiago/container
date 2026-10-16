@@ -17,6 +17,7 @@
 import ContainerResource
 import Foundation
 import NIOCore
+import NIOPosix
 import Synchronization
 import Testing
 
@@ -101,6 +102,13 @@ struct StreamHarness {
         return try #require(try JSONSerialization.jsonObject(with: Data(body[start...end].utf8)) as? [String: Any])
     }
 
+    /// Returns once every event loop has run what was queued on it before the call.
+    static func loopsRan() async throws {
+        for loop in MultiThreadedEventLoopGroup.singleton.makeIterator() {
+            try await loop.submit {}.get()
+        }
+    }
+
     /// Waits until `condition` holds, for at most `time`.
     static func eventually(within time: Duration = .seconds(5), _ condition: () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: time)
@@ -175,20 +183,22 @@ struct ContainerStreamTests {
 
     @Test("a client that does not read holds the process back instead of the agent buffering its output")
     func backpressure() async throws {
-        // Far more than the pipe, the agent and the sockets hold together (about 2 MB, measured),
-        // so a process that could write all of it unread would mean output buffered without
-        // bound somewhere.
+        // Far more than the pipe, the agent and the sockets hold together (about 1 MB, measured;
+        // 1.6 MB at most in 50 runs on a loaded Mac), so a process that could write half of it
+        // unread would mean output buffered without bound somewhere.
         let chunk = 64 << 10
-        let chunks = 1024
+        let chunks = 256
         let total = chunk * chunks
-        // Bytes the process has written, and whether it is inside a write that has not returned.
+        // Bytes the pipe has taken from the process, and whether it is inside a write that has
+        // not returned. Written through, as a real process writes: what the process's own
+        // async writer has accepted is not yet the agent's to hold.
         let progress = Mutex((written: 0, writing: false))
         let program: FakeProgram = { io in
             let data = ByteBuffer(repeating: UInt8(ascii: "x"), count: chunk)
             for _ in 0..<chunks {
                 progress.withLock { $0.writing = true }
                 do {
-                    try await io.stdout?.write(data)
+                    try await io.writeThrough(data)
                 } catch {
                     return 1
                 }
@@ -206,16 +216,21 @@ struct ContainerStreamTests {
             try await attach.send(StreamHarness.attachRequest("flood", streams: "stdout=1"))
             _ = try await attach.read(through: "\r\n\r\n")
             #expect(try await h.request("POST", "/containers/flood/start").status == 204)
-            // Nothing read yet. Wait until the process is held inside a write, making no progress
-            // across a look 100 ms apart. A busy machine only makes that take longer: nothing
-            // here depends on how much fits before it stalls, or how fast it gets there.
+            // Nothing read yet. Wait until the process is held inside a write the pipe does not
+            // take, with nothing moving across ten looks in a row. Before each look every event
+            // loop runs what was queued on it, so a still look means the loops ran and nothing
+            // moved, not that they had no turn. A busy machine only makes this take longer:
+            // nothing here depends on how much fits before it stalls, or how fast it gets there.
             var held: (written: Int, writing: Bool)?
-            for _ in 0..<300 {
+            var still = 0
+            for _ in 0..<500 {
                 let before = progress.withLock { $0 }
                 if before.written == total { break }
-                try await Task.sleep(for: .milliseconds(100))
+                try await StreamHarness.loopsRan()
+                try await Task.sleep(for: .milliseconds(20))
                 let after = progress.withLock { $0 }
-                if after.writing && after.written == before.written {
+                still = after.writing && after.written == before.written ? still + 1 : 0
+                if still == 10 {
                     held = after
                     break
                 }
