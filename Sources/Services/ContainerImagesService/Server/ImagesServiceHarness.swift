@@ -50,9 +50,12 @@ public struct ImagesServiceHarness: Sendable {
         let insecure = message.bool(key: .insecureFlag)
         let maxConcurrentDownloads = message.int64(key: .maxConcurrentDownloads)
 
+        let credential = try message.registryCredential()
+
         let progressUpdateService = ProgressUpdateService(message: message)
         let imageDescription = try await service.pull(
-            reference: ref, platform: platform, insecure: insecure, progressUpdate: progressUpdateService?.handler, maxConcurrentDownloads: Int(maxConcurrentDownloads))
+            reference: ref, platform: platform, insecure: insecure, progressUpdate: progressUpdateService?.handler, maxConcurrentDownloads: Int(maxConcurrentDownloads),
+            credential: credential)
 
         let imageData = try JSONEncoder().encode(imageDescription)
         let reply = message.reply()
@@ -75,9 +78,10 @@ public struct ImagesServiceHarness: Sendable {
             platform = try JSONDecoder().decode(ContainerizationOCI.Platform.self, from: platformData)
         }
         let insecure = message.bool(key: .insecureFlag)
+        let credential = try message.registryCredential()
 
         let progressUpdateService = ProgressUpdateService(message: message)
-        try await service.push(reference: ref, platform: platform, insecure: insecure, progressUpdate: progressUpdateService?.handler)
+        try await service.push(reference: ref, platform: platform, insecure: insecure, progressUpdate: progressUpdateService?.handler, credential: credential)
 
         let reply = message.reply()
         return reply
@@ -99,6 +103,29 @@ public struct ImagesServiceHarness: Sendable {
         }
         try await service.login(server: server, username: username, password: password, scheme: scheme)
         return message.reply()
+    }
+
+    /// Check the request's credential against the registry and keep nothing. A refusal is an
+    /// answer, the registry's status, rather than an error.
+    @Sendable
+    public func registryCheck(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let server = message.string(key: .registryServer), !server.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry server")
+        }
+        guard let scheme = message.string(key: .registryScheme) else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry scheme")
+        }
+        guard let credential = try message.registryCredential() else {
+            throw ContainerizationError(.invalidArgument, message: "missing registry credential")
+        }
+        let reply = message.reply()
+        switch try await service.checkLogin(server: server, credential: credential, scheme: scheme) {
+        case .accepted:
+            reply.set(key: .registryCheckStatus, value: Int64(200))
+        case .rejected(let status):
+            reply.set(key: .registryCheckStatus, value: Int64(status))
+        }
+        return reply
     }
 
     @Sendable

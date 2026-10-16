@@ -379,7 +379,9 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerAPIClient",
+                "ContainerImagesServiceClient",
                 "ContainerPersistence",
+                "ContainerResource",
                 "ContainerTestSupport",
                 "ContainerXPC",
             ]
@@ -428,8 +430,13 @@ let package = Package(
                 .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 "ContainerImagesService",
+                "ContainerImagesServiceClient",
                 "ContainerResource",
+                "ContainerXPC",
             ]
         ),
         .target(
