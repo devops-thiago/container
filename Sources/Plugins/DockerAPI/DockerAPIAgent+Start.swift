@@ -126,6 +126,7 @@ extension DockerAPIAgent {
                 DockerAPIAgent.exit(withError: error)
             }
             ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch, events: events)
+            BuildRoutes.register(on: &router, builder: EngineBuilderClient(log: log), images: EngineImagesClient(), scratch: scratch, events: events)
             AuthRoutes.register(on: &router, engine: EngineRegistryLoginClient())
             VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities, events: events)
             DiskUsageRoutes.register(
