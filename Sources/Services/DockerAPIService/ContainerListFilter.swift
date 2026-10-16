@@ -136,7 +136,7 @@ public struct ContainerListFilter: Sendable {
     private func matchesAncestor(_ container: DockerContainer) -> Bool {
         guard let values = filters["ancestor"] else { return true }
         let reference = container.snapshot.configuration.image.reference
-        let id = ContainerViewMapper.imageID(container)
+        let id = ContainerViewMapper.imageID(container, context: context)
         let shortID = id.split(separator: ":").last.map(String.init) ?? id
         var names: Set<String> = [reference, ContainerViewMapper.image(container)]
         for name in names where name.hasSuffix(":latest") {

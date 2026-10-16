@@ -175,18 +175,27 @@ struct ContainerStreamTests {
 
     @Test("a client that does not read holds the process back instead of the agent buffering its output")
     func backpressure() async throws {
+        // Far more than the pipe, the agent and the sockets hold together (about 2 MB, measured),
+        // so a process that could write all of it unread would mean output buffered without
+        // bound somewhere.
         let chunk = 64 << 10
-        let chunks = 512
-        let written = Mutex(0)
+        let chunks = 1024
+        let total = chunk * chunks
+        // Bytes the process has written, and whether it is inside a write that has not returned.
+        let progress = Mutex((written: 0, writing: false))
         let program: FakeProgram = { io in
             let data = ByteBuffer(repeating: UInt8(ascii: "x"), count: chunk)
             for _ in 0..<chunks {
+                progress.withLock { $0.writing = true }
                 do {
                     try await io.stdout?.write(data)
                 } catch {
                     return 1
                 }
-                written.withLock { $0 += chunk }
+                progress.withLock {
+                    $0.writing = false
+                    $0.written += chunk
+                }
             }
             return 0
         }
@@ -197,27 +206,34 @@ struct ContainerStreamTests {
             try await attach.send(StreamHarness.attachRequest("flood", streams: "stdout=1"))
             _ = try await attach.read(through: "\r\n\r\n")
             #expect(try await h.request("POST", "/containers/flood/start").status == 204)
-            // Nothing read yet: the process stalls once what the pipe, the agent and the two
-            // sockets hold is full, a few megabytes at most, and stays stalled.
-            var stalled = -1
-            for _ in 0..<40 {
-                let before = written.withLock { $0 }
+            // Nothing read yet. Wait until the process is held inside a write, making no progress
+            // across a look 100 ms apart. A busy machine only makes that take longer: nothing
+            // here depends on how much fits before it stalls, or how fast it gets there.
+            var held: (written: Int, writing: Bool)?
+            for _ in 0..<300 {
+                let before = progress.withLock { $0 }
+                if before.written == total { break }
                 try await Task.sleep(for: .milliseconds(100))
-                if written.withLock({ $0 }) == before {
-                    stalled = before
+                let after = progress.withLock { $0 }
+                if after.writing && after.written == before.written {
+                    held = after
                     break
                 }
             }
-            #expect(stalled > 0)
-            #expect(stalled < 8 << 20)
+            // The process is suspended in a write, with most of its output still unwritten:
+            // the unread client holds it back.
+            let stalled = try #require(held)
+            #expect(stalled.writing)
+            #expect(stalled.written > 0)
+            #expect(stalled.written < total / 2)
             // Control: once the client reads, all of it arrives.
             var received = attach.received.utf8.count
             while let piece = try await attach.iterator.next() {
                 received += piece.readableBytes
             }
-            #expect(received == chunk * chunks)
+            #expect(received == total)
         }
-        #expect(written.withLock { $0 } == chunk * chunks)
+        #expect(progress.withLock { $0.written } == total)
     }
 
     @Test("output still on its way when the process exits reaches a client that reads it late")
