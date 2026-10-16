@@ -53,6 +53,12 @@ public enum XPCKeys: String {
     /// One request, one identity: the embedder's log names it, and a late answer is tied to
     /// the request it was for rather than to whatever asks next.
     case hostDirectoryRequestID
+    /// Who asked for the folder, as the embedder's panel names it: `docker (pid 4242)`. Set by
+    /// a client on a create, bootstrap or copy for whoever it acts for, and by the engine on
+    /// the grant request it sends, from that or from the request's XPC peer. Display only,
+    /// never an authorization input; bounded and stripped of control characters
+    /// (`GrantRequester.sanitized`) wherever it is read.
+    case hostDirectoryRequester
     /// Why a lend came back without a bookmark: declined, nobody to ask, or nobody answered.
     /// Named so the CLI can say which, since each one asks something different of the user.
     case hostDirectoryOutcome
