@@ -118,6 +118,7 @@ extension DockerAPIAgent {
                 DockerAPIAgent.exit(withError: error)
             }
             ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch)
+            AuthRoutes.register(on: &router, engine: EngineRegistryLoginClient())
             VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities)
             NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities)
             let service = DockerAPIServer(router: router, limits: DockerHTTPLimits(spoolDirectory: scratch), log: log)

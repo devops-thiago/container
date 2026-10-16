@@ -233,11 +233,9 @@ extension ImageRoutes {
             let tag = request.query("tag") ?? ""
             let platform = request.query("platform").flatMap { $0.isEmpty ? nil : $0 }
             try ImageRoutes.validate(platform: platform)
-            // TODO(#229): X-Registry-Auth is the client's one-shot registry credential. Stage A's
-            // decision (2026-10-15) passes it to the images service as a one-shot credential that is
-            // neither stored nor logged; until that route takes one, it is accepted here and not
-            // used, and pushes use the logins the engine keeps. It must never be logged.
-            _ = request.headers["X-Registry-Auth"]
+            // The client's credential for this push, passed to the images service for it alone:
+            // neither kept nor logged. Without one, the engine's own logins are used.
+            let credential = DockerRegistryAuth.credential(header: request.headers.first(name: DockerRegistryAuth.header))
             var named = try DockerImageReference(name, defaultTag: false)
             if !tag.isEmpty {
                 guard DockerPullReference.isValidTag(tag) else { throw DockerAPIError.badRequest("invalid tag format") }
@@ -255,7 +253,8 @@ extension ImageRoutes {
                     let id = record.parsed?.tag ?? record.parsed?.digest ?? record.reference
                     let pushed: DockerDescriptor?
                     do {
-                        pushed = try await Self.push(record, platform: platform, id: id, engine: engine, writer: writer, interval: interval)
+                        pushed = try await Self.push(
+                            record, platform: platform, credential: credential, id: id, engine: engine, writer: writer, interval: interval)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
@@ -281,13 +280,14 @@ extension ImageRoutes {
         }
 
         static func push(
-            _ record: EngineImageRecord, platform: String?, id: String, engine: Engine, writer: DockerResponseWriter, interval: Duration
+            _ record: EngineImageRecord, platform: String?, credential: DockerRegistryCredential?, id: String, engine: Engine,
+            writer: DockerResponseWriter, interval: Duration
         ) async throws -> DockerDescriptor? {
             let (updates, continuation) = AsyncStream.makeStream(of: DockerPullProgress.self, bufferingPolicy: .bufferingNewest(1))
             let state = Mutex(DockerPullProgress())
             let pushing = Task {
                 defer { continuation.finish() }
-                return try await engine.push(reference: record.reference, platform: platform) { events in
+                return try await engine.push(reference: record.reference, platform: platform, credential: credential) { events in
                     continuation.yield(
                         state.withLock { progress in
                             progress.apply(events)
