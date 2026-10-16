@@ -89,6 +89,8 @@ struct DockerRouterTests {
         let answered = body(await router.respond(to: try request("/containers/web/json")))
         #expect(answered?.0 == .notFound)
         #expect(answered?.1 == #"{"message":"No such container: web"}"#)
+        // Slashes as dockerd writes them, unescaped: names carry one.
+        #expect(String(decoding: DockerAPIError.conflict("name \"/web\" is in use").jsonBody, as: UTF8.self) == #"{"message":"name \"/web\" is in use"}"#)
     }
 
     @Test("queries decode as Go encodes them, and filters come in both of the CLI's shapes")
