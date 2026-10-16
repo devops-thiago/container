@@ -80,7 +80,7 @@ extension EngineImagesClient {
                 platform = ClientImage.hostPlatform
             }
             try await image.push(
-                platform: platform, scheme: .https, containerSystemConfig: system,
+                platform: platform, scheme: try RequestScheme(DockerRegistryAuth.scheme(forReference: image.reference)), containerSystemConfig: system,
                 progressUpdate: { events in progress(events.compactMap(Self.event)) }, credential: credential.map(Self.engineCredential))
             guard platform == nil else { return nil }
             return DockerDescriptor(mediaType: image.descriptor.mediaType, digest: image.descriptor.digest, size: image.descriptor.size)

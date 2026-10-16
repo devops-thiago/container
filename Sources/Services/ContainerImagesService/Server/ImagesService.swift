@@ -340,9 +340,48 @@ public actor ImagesService {
         }
 
         try await self.withAuthentication(ref: reference, credential: credential) { auth in
-            try await self.imageStore.push(
-                reference: reference, platform: platform, insecure: insecure, auth: auth, progress: ContainerizationProgressAdapter.handler(from: progressUpdate))
+            let progress = ContainerizationProgressAdapter.handler(from: progressUpdate)
+            if let auth, Self.pushesOverExplicitHTTP(reference: reference, insecure: insecure, authenticated: true) {
+                try await self.pushOverExplicitHTTP(reference: reference, platform: platform, authentication: auth, progress: progress)
+                return
+            }
+            // Over HTTPS, without a login, or to a registry off loopback: the upstream client,
+            // which never sends a credential over plain HTTP.
+            try await self.imageStore.push(reference: reference, platform: platform, insecure: insecure, auth: auth, progress: progress)
         }
+    }
+
+    /// Whether a push of `reference` goes through the credential transport: over HTTP the
+    /// caller selected, with a login, to a registry on loopback. Everywhere else a credential
+    /// never travels over plain HTTP, as Docker sends one in clear only to its default
+    /// insecure registries, `127.0.0.0/8` and `::1`.
+    static func pushesOverExplicitHTTP(reference: String, insecure: Bool, authenticated: Bool) -> Bool {
+        guard insecure, authenticated, let host = try? Reference.parse(reference).resolvedDomain else {
+            return false
+        }
+        return LoopbackRegistry.isLoopback(host)
+    }
+
+    /// Push through the credential transport, as `ImageStore.push` does through the upstream
+    /// client: every platform `platform` matches, and the index of those.
+    private func pushOverExplicitHTTP(
+        reference: String,
+        platform: Platform?,
+        authentication: any Authentication,
+        progress: ProgressHandler?
+    ) async throws {
+        let image = try await imageStore.get(reference: reference)
+        guard [MediaTypes.dockerManifestList, MediaTypes.index].contains(image.mediaType) else {
+            throw ContainerizationError(
+                .internalError, message: "cannot push image \(reference): unsupported media type \(image.mediaType), expected an index or manifest list")
+        }
+        let parsed = try Reference.parse(reference)
+        guard let tag = parsed.tag ?? parsed.digest else {
+            throw ContainerizationError(.invalidArgument, message: "invalid tag/digest for image reference \(reference)")
+        }
+        let client = try ExplicitHTTPRegistryClient(reference: reference, authentication: authentication)
+        let operation = ImageStore.ExportOperation(name: parsed.path, tag: tag, contentStore: contentStore, client: client, progress: progress)
+        try await operation.export(index: image.descriptor, platforms: createPlatformMatcher(for: platform))
     }
 
     public func tag(old: String, new: String) async throws -> ImageDescription {
