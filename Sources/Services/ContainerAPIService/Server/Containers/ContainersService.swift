@@ -1560,6 +1560,33 @@ public actor ContainersService {
         return FileManager.default.allocatedSize(of: URL(fileURLWithPath: containerPath))
     }
 
+    /// What the container wrote to its root filesystem, as dockerd's `SizeRw` measures it (see
+    /// `ContainerWritableSize`), or nil when that cannot be told: while it runs, after it did
+    /// not stop cleanly, when its image's snapshot is gone, or for a root filesystem that is
+    /// not a clone of one.
+    public func containerWritableSize(id: String) async throws -> UInt64? {
+        _ = try self._getContainerState(id: id)
+        let path = self.containerRoot.appendingPathComponent(id)
+        guard let runtime = try? RuntimeConfiguration.readRuntimeConfiguration(from: path),
+            runtime.options?.rootFsOverride == nil,
+            let snapshot = runtime.containerRootFilesystem, snapshot.isBlock
+        else { return nil }
+        let rootfs = ContainerResource.Bundle(path: path).containerRootfsBlock
+        return try? ContainerWritableSize.measure(rootfs: rootfs, snapshot: URL(fileURLWithPath: snapshot.source))
+    }
+
+    /// The disk a stopped container's filesystem is read from: its own root filesystem, or,
+    /// before its first start has cloned one, the image snapshot it will be cloned from, which
+    /// is what it holds then.
+    nonisolated static func exportSource(bundle: URL, rootfs: URL) -> URL {
+        guard !FileManager.default.fileExists(atPath: rootfs.path(percentEncoded: false)),
+            let runtime = try? RuntimeConfiguration.readRuntimeConfiguration(from: bundle),
+            runtime.options?.rootFsOverride == nil,
+            let snapshot = runtime.containerRootFilesystem, snapshot.isBlock
+        else { return rootfs }
+        return URL(fileURLWithPath: snapshot.source)
+    }
+
     public func exportRootfs(id: String, archive: URL) async throws {
         self.log.debug("\(#function)")
 
@@ -1576,7 +1603,7 @@ public actor ContainersService {
             try await client.snapshotDisk(imagePath: rootfs.path, destinationPath: snapshot.path)
             try EXT4.EXT4Reader(blockDevice: FilePath(snapshot)).export(archive: FilePath(archive))
         case .stopped:
-            try EXT4.EXT4Reader(blockDevice: FilePath(rootfs)).export(archive: FilePath(archive))
+            try EXT4.EXT4Reader(blockDevice: FilePath(Self.exportSource(bundle: path, rootfs: rootfs))).export(archive: FilePath(archive))
         default:
             throw ContainerizationError(.invalidState, message: "container must be running or stopped")
         }

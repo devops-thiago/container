@@ -27,8 +27,11 @@ public protocol EngineVolumes: Sendable {
     func create(name: String, driverOpts: [String: String], labels: [String: String]) async throws -> VolumeConfiguration
     /// Deletes a volume. With `requiredLabels`, the engine deletes it only if it carries them.
     func delete(_ name: String, requiredLabels: [String: String]?) async throws
-    /// The bytes a volume holds, for what a prune reclaims.
-    func diskUsage(_ name: String) async throws -> UInt64
+    /// The bytes of a volume's files, as dockerd reports a local volume's size and what a prune
+    /// of it reclaims, or nil when the engine cannot tell (while a container has it mounted,
+    /// for one). Not the size of the disk image that holds them, whose own metadata Docker
+    /// would not count.
+    func dataSize(_ name: String) async throws -> UInt64?
 }
 
 /// A volume as `GET /volumes` and `GET /volumes/{name}` show it.
@@ -283,7 +286,7 @@ public enum VolumeRoutes {
             var deleted: [String] = []
             var reclaimed: UInt64 = 0
             for volume in selected {
-                let size = (try? await engine.diskUsage(volume.name)) ?? 0
+                let size = (try? await engine.dataSize(volume.name)) ?? 0
                 do {
                     try await engine.delete(volume.name, requiredLabels: required)
                 } catch {

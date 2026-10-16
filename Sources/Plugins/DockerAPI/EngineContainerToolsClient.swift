@@ -65,6 +65,10 @@ extension EngineContainersClient: EngineContainerTools {
         }
     }
 
+    func export(_ container: ContainerSnapshot, to archive: URL) async throws {
+        try await Self.translatedTool { try await ContainerClient().export(id: container.id, archive: archive) }
+    }
+
     func supportsCopyBeforeStart() async -> Bool {
         (try? await ClientHealthCheck.ping(timeout: .seconds(5)))?.supports(.copyBeforeStart) ?? false
     }

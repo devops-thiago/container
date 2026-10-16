@@ -26,16 +26,9 @@ import Testing
 struct DiskUsageAndStubTests {
     typealias F = StoreFixtures
 
-    /// The engine's sizes: the images' total, and each container's directory.
+    /// The images' total on disk.
     struct FakeDisk: EngineDiskUsage {
-        var sizes: [String: Int64]
-
         func layersSize() async throws -> Int64 { 123_456 }
-
-        func containerSize(_ engineID: String) async throws -> Int64? {
-            guard let size = sizes[engineID] else { throw DockerAPIError.notFound("no \(engineID)") }
-            return size
-        }
     }
 
     let router: DockerRouter
@@ -47,10 +40,12 @@ struct DiskUsageAndStubTests {
             F.container("job", image: ImageCatalogTests.alpine, run: .exited),
             F.container("cache", image: ImageCatalogTests.redis),
         ])
-        let volumes = FakeVolumes([FakeVolumes.volume("data"), FakeVolumes.volume("logs")])
+        // The engine measures what web and cache wrote; it cannot tell job's.
+        engine.writableSizes = ["web": 4096, "cache": 0]
+        let volumes = FakeVolumes([FakeVolumes.volume("data"), FakeVolumes.volume("logs")], unmeasured: ["logs"])
         var router = DockerRouter()
         DiskUsageRoutes.register(
-            on: &router, disk: FakeDisk(sizes: ["web": 4096, "cache": 0]), images: images, containers: engine, volumes: volumes,
+            on: &router, disk: FakeDisk(), images: images, containers: engine, volumes: volumes,
             identities: DockerIdentityStore(persistence: nil), now: { Fixtures.now })
         UnsupportedRoutes.register(on: &router)
         self.router = router
@@ -82,7 +77,8 @@ struct DiskUsageAndStubTests {
         #expect(!images.contains { $0["Id"] as? String == F.digest("f") })
         let alpine = try #require(images.first { $0["Id"] as? String == F.digest("a") })
         #expect(alpine["Containers"] as? Int == 2)
-        #expect(alpine["SharedSize"] as? Int == -1)
+        // Computed, as dockerd computes it for df: these images share no content.
+        #expect(alpine["SharedSize"] as? Int == 0)
         #expect(alpine["Size"] as? Int == 4_000_000)
         #expect(images.first { $0["Id"] as? String == F.digest("b") }?["Containers"] as? Int == 1)
         #expect(images.first { $0["Id"] as? String == F.digest("c") }?["Containers"] as? Int == 0)
@@ -91,9 +87,10 @@ struct DiskUsageAndStubTests {
         #expect(containers.count == 3)
         let byName = Dictionary(uniqueKeysWithValues: containers.map { (($0["Names"] as? [String])?.first ?? "", $0) })
         #expect(byName["/web"]?["SizeRw"] as? Int == 4096)
-        #expect(byName["/cache"]?["SizeRw"] as? Int == 0)
+        // Zero is left out, as dockerd's omitempty leaves it.
+        #expect(byName["/cache"]?.keys.contains("SizeRw") == false)
         // Control: a size the engine cannot give is left out, not made up.
-        #expect(byName["/job"]?["SizeRw"] == nil)
+        #expect(byName["/job"]?.keys.contains("SizeRw") == false)
         #expect(byName["/web"]?["State"] as? String == "running")
 
         let volumes = try #require(usage["Volumes"] as? [[String: Any]])
@@ -101,6 +98,60 @@ struct DiskUsageAndStubTests {
         let data = try #require(volumes.first?["UsageData"] as? [String: Any])
         #expect(data["Size"] as? Int == 1000)
         #expect(data["RefCount"] as? Int == 0)
+        // A volume the engine cannot measure is dockerd's "not computed".
+        #expect((volumes.last?["UsageData"] as? [String: Any])?["Size"] as? Int == -1)
+    }
+
+    /// Records for `id` whose content is `blobs` (digest character to size).
+    static func record(_ reference: String, id: Character, _ blobs: [Character: Int64], infrastructure: Bool = false) -> EngineImageRecord {
+        var record = F.record(reference, id: id, infrastructure: infrastructure)
+        record.content = blobs.sorted { $0.key < $1.key }.map { EngineImageBlob(digest: F.digest($0.key), size: $0.value) }
+        record.size = blobs.values.reduce(0, +)
+        return record
+    }
+
+    @Test("an image's SharedSize is what of its content another image uses, the engine's own included")
+    func sharedSize() {
+        let records = [
+            Self.record("docker.io/library/app:1", id: "a", ["1": 100, "2": 2000, "3": 30_000]),
+            // Another reference to the same image is the same image, not another user.
+            Self.record("docker.io/library/app:latest", id: "a", ["1": 100, "2": 2000, "3": 30_000]),
+            Self.record("docker.io/library/tool:1", id: "b", ["4": 400, "2": 2000]),
+            Self.record("docker.io/library/lone:1", id: "c", ["5": 500_000]),
+            Self.record("ghcr.io/apple/containerization/vminit:0.9", id: "f", ["3": 30_000, "6": 6], infrastructure: true),
+        ]
+        let shared = DockerImageCatalog.sharedSizes(records)
+        #expect(shared[F.digest("a")] == 32_000)
+        #expect(shared[F.digest("b")] == 2000)
+        // Control: content no other image uses is not shared, and so is all reclaimable.
+        #expect(shared[F.digest("c")] == 0)
+        // The engine's own images are not reported.
+        #expect(shared[F.digest("f")] == nil)
+    }
+
+    @Test("df's image sizes add up, as the Docker CLI adds them, to what removing the unused images frees")
+    func reclaimableImages() async throws {
+        let records = [
+            Self.record("docker.io/library/app:1", id: "a", ["1": 100, "2": 2000]),
+            Self.record("docker.io/library/tool:1", id: "b", ["3": 300, "2": 2000]),
+        ]
+        let engine = FakeEngine(snapshots: [F.container("web", image: records[0], run: .running)])
+        var router = DockerRouter()
+        DiskUsageRoutes.register(
+            on: &router, disk: FakeDisk(), images: FakeImageStore(records), containers: engine, volumes: FakeVolumes(),
+            identities: DockerIdentityStore(persistence: nil))
+        guard case .data(_, _, let body, _) = await router.respond(to: try DockerRequest(method: .GET, uri: "/system/df?type=image", headers: [:], body: ByteBuffer()))
+        else { return }
+        let usage = try #require(try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8)) as? [String: Any])
+        let images = try #require(usage["Images"] as? [[String: Any]])
+        // The moby client's legacy sum: Size - SharedSize of each image no container uses.
+        let reclaimable = images.filter { $0["Containers"] as? Int == 0 }.reduce(0) { total, image in
+            total + ((image["Size"] as? Int) ?? 0) - ((image["SharedSize"] as? Int) ?? 0)
+        }
+        // Removing tool frees its own layer; the shared one stays for app.
+        #expect(reclaimable == 300)
+        // Control: an image a container uses is not counted.
+        #expect(images.first { $0["Id"] as? String == F.digest("a") }?["Containers"] as? Int == 1)
     }
 
     @Test("df reports only the kinds asked for, and refuses one it does not know in dockerd's words")
@@ -127,13 +178,58 @@ struct DiskUsageAndStubTests {
         let engine = FakeEngine(snapshots: [Fixtures.snapshot(configuration, status: .stopped, started: nil)])
         var router = DockerRouter()
         DiskUsageRoutes.register(
-            on: &router, disk: FakeDisk(sizes: [:]), images: FakeImageStore(), containers: engine,
+            on: &router, disk: FakeDisk(), images: FakeImageStore(), containers: engine,
             volumes: FakeVolumes([FakeVolumes.volume("data"), FakeVolumes.volume("logs")]), identities: DockerIdentityStore(persistence: nil))
         guard case .data(_, _, let body, _) = await router.respond(to: try DockerRequest(method: .GET, uri: "/system/df?type=volume", headers: [:], body: ByteBuffer()))
         else { return }
         let usage = try #require(try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8)) as? [String: Any])
         let volumes = try #require(usage["Volumes"] as? [[String: Any]])
         #expect(volumes.map { ($0["UsageData"] as? [String: Any])?["RefCount"] as? Int } == [1, 0])
+    }
+
+    @Test("docker system prune -f: each call the CLI makes, in its order, is served with the report it decodes")
+    func systemPrune() async throws {
+        let stopped = F.container("job", image: ImageCatalogTests.alpine, run: .exited)
+        let running = F.container("web", image: ImageCatalogTests.alpine, run: .running)
+        let fixture = try ImageRoutesTests(containers: [stopped, running])
+        defer { try? FileManager.default.removeItem(at: fixture.scratch) }
+        let networks = FakeNetworks([FakeNetworks.network("unused")])
+        var router = DockerRouter()
+        ContainerRoutes.register(on: &router, engine: fixture.engine, identities: fixture.identities, streams: DockerContainerStreams(engine: fixture.engine))
+        NetworkRoutes.register(on: &router, engine: networks, containers: fixture.engine, identities: fixture.identities)
+        ImageRoutes.register(on: &router, engine: fixture.images, containers: fixture.engine, identities: fixture.identities, scratch: fixture.scratch)
+        BuildRoutes.register(on: &router, builder: FakeBuilder(images: fixture.images), images: fixture.images, scratch: fixture.scratch)
+
+        // docker/cli v29 `system prune` without --volumes or -a: containers, networks,
+        // dangling images, build cache; the moby client sends filters as a JSON map.
+        let calls: [(String, [String])] = [
+            ("/v1.48/containers/prune", ["ContainersDeleted", "SpaceReclaimed"]),
+            ("/v1.48/networks/prune", ["NetworksDeleted"]),
+            ("/v1.48/images/prune?filters=%7B%22dangling%22%3A%7B%22true%22%3Atrue%7D%7D", ["ImagesDeleted", "SpaceReclaimed"]),
+            ("/v1.48/build/prune", ["CachesDeleted", "SpaceReclaimed"]),
+        ]
+        var reports: [[String: Any]] = []
+        for (uri, keys) in calls {
+            guard case .data(let status, _, let body, _) = await router.respond(to: try DockerRequest(method: .POST, uri: uri, headers: [:], body: ByteBuffer()))
+            else {
+                Issue.record("expected a whole response to \(uri)")
+                return
+            }
+            #expect(status == .ok, "\(uri)")
+            let report = try #require(try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8)) as? [String: Any])
+            for key in keys where key.hasSuffix("Reclaimed") {
+                #expect(report[key] is Int, "\(uri) \(key)")
+            }
+            reports.append(report)
+        }
+        #expect((reports[0]["ContainersDeleted"] as? [String])?.count == 1)
+        #expect(fixture.engine.snapshot("web") != nil)
+        #expect(fixture.engine.snapshot("job") == nil)
+        #expect(reports[1]["NetworksDeleted"] as? [String] == ["unused"])
+        // Only the dangling image goes; control: the tagged ones stay.
+        #expect((reports[2]["ImagesDeleted"] as? [[String: String]])?.compactMap { $0["Deleted"] } == [F.digest("9")])
+        #expect(fixture.images.references.contains("docker.io/library/redis:8"))
+        #expect((reports[3]["CachesDeleted"] as? [Any])?.isEmpty == true)
     }
 
     @Test(
@@ -163,14 +259,13 @@ struct DiskUsageAndStubTests {
         #expect(decoded?["message"] == message)
     }
 
-    @Test("changes and export are 501s that say why; build is no stub")
+    @Test("changes is a 501 that says why; export and build are no stubs")
     func notImplemented() async throws {
         let changes = try await call(.GET, "/v1.48/containers/web/changes")
         #expect(changes.0 == .notImplemented)
         #expect(changes.1.contains("changes is not supported by SiliconShip"))
-        let export = try await call(.GET, "/v1.48/containers/web/export")
-        #expect(export.0 == .notImplemented)
-        #expect(export.1.contains("docker cp"))
+        // `GET /containers/{id}/export` is served by `ContainerToolRoutes`.
+        #expect(try await call(.GET, "/v1.48/containers/web/export") == (.notFound, #"{"message":"page not found"}"#))
         // `POST /build` is served by `BuildRoutes`, which these routes leave alone.
         #expect(try await call(.POST, "/v1.48/build?t=web") == (.notFound, #"{"message":"page not found"}"#))
         // Control: a path nobody serves is still dockerd's 404, and HEAD reaches a GET stub.

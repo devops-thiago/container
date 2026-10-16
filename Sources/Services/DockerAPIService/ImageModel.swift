@@ -184,6 +184,17 @@ public struct EngineImageManifest: Sendable, Equatable {
     }
 }
 
+/// One blob of an image's content: its manifest, config or a layer.
+public struct EngineImageBlob: Sendable, Equatable, Hashable {
+    public var digest: String
+    public var size: Int64
+
+    public init(digest: String, size: Int64) {
+        self.digest = digest
+        self.size = size
+    }
+}
+
 /// One reference the engine keeps, with what the image it names says about itself.
 ///
 /// The engine keeps images by reference; Docker keeps them by ID with any number of
@@ -206,10 +217,13 @@ public struct EngineImageRecord: Sendable, Equatable {
     public var manifestDigest: String?
     /// The engine's own images (the init and builder images), which a Docker client never sees.
     public var infrastructure: Bool
+    /// What `size` adds up: that manifest, its config and its layers, each once.
+    public var content: [EngineImageBlob]
 
     public init(
         reference: String, target: DockerDescriptor, id: String, size: Int64, config: DockerImageConfigDocument?,
-        layerSizes: [Int64] = [], manifests: [EngineImageManifest] = [], manifestDigest: String? = nil, infrastructure: Bool = false
+        layerSizes: [Int64] = [], manifests: [EngineImageManifest] = [], manifestDigest: String? = nil, infrastructure: Bool = false,
+        content: [EngineImageBlob] = []
     ) {
         self.reference = reference
         self.target = target
@@ -220,6 +234,7 @@ public struct EngineImageRecord: Sendable, Equatable {
         self.manifests = manifests
         self.manifestDigest = manifestDigest
         self.infrastructure = infrastructure
+        self.content = content
     }
 
     /// The reference parsed, or nil for one Docker's grammar does not accept.
@@ -389,6 +404,24 @@ public struct DockerImageCatalog: Sendable {
             let description = container.snapshot.configuration.image
             return ContainerViewMapper.imageID(container) == image.id || targets.contains(description.digest)
                 || references.contains(description.reference)
+        }
+    }
+
+    /// Each image's `SharedSize`, by ID, as dockerd computes it for `GET /system/df`: what of the
+    /// content its `Size` counts another image also uses. Every record counts as a user,
+    /// the engine's own images included, since removing an image leaves what they still use.
+    public static func sharedSizes(_ records: [EngineImageRecord]) -> [String: Int64] {
+        let byImage = Dictionary(grouping: records, by: \.id)
+        var users: [String: Int] = [:]
+        for group in byImage.values {
+            for digest in Set(group.flatMap { $0.content.map(\.digest) }) {
+                users[digest, default: 0] += 1
+            }
+        }
+        return byImage.compactMapValues { group in
+            guard !group.allSatisfy(\.infrastructure) else { return nil }
+            let image = DockerImage(id: group[0].id, records: group.filter { !$0.infrastructure })
+            return Set(image.primary.content).filter { (users[$0.digest] ?? 0) > 1 }.reduce(0) { $0 + $1.size }
         }
     }
 }
