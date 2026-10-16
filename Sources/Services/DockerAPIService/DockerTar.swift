@@ -234,7 +234,7 @@ struct DockerTarRejection: Error, Equatable, CustomStringConvertible {
 }
 
 /// What an extraction left at the top of its root: the names `copyIn` takes one by one.
-struct DockerExtractedEntry: Equatable, Sendable {
+struct DockerExtractedEntry: Equatable {
     let name: String
     let isDirectory: Bool
     /// The mode the archive gave it, for a file.
