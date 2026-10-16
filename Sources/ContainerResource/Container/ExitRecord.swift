@@ -24,9 +24,14 @@ import Foundation
 public struct ExitRecord: Codable, Sendable, Equatable {
     public let exitCode: Int32
     public let exitedAt: Date
+    /// Whether the run ended because a stop or a kill was asked for it, as
+    /// ``ContainerSnapshot/stopRequested`` says. Kept with the exit it explains, so an engine
+    /// start reads the answer the run's end gave. Nil in a record written before it was kept.
+    public let stopRequested: Bool?
 
-    public init(exitCode: Int32, exitedAt: Date) {
+    public init(exitCode: Int32, exitedAt: Date, stopRequested: Bool? = nil) {
         self.exitCode = exitCode
         self.exitedAt = exitedAt
+        self.stopRequested = stopRequested
     }
 }

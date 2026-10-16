@@ -56,6 +56,18 @@ public actor ContainersService {
         var run: UUID? = nil
         /// A stop or a kill was asked for this run, so its end does not start it again.
         var exitRequested = false
+        /// A stop or a SIGKILL was sent to this run, by anyone: its end is that request's.
+        var stopSent = false
+        /// The other signals sent to this run's process. Its end is a requested one only when
+        /// the exit shows one of them ended it (128 + the signal's number).
+        var signalsSent: Set<Int32> = []
+
+        /// Whether the run's end, with this exit, was a stop or a kill asked for it.
+        func endWasRequested(exit: ExitStatus?) -> Bool {
+            if stopSent { return true }
+            guard let code = exit?.exitCode, code > 128 else { return false }
+            return signalsSent.contains(code - 128)
+        }
         /// The restart waiting out its delay, while the status is `.restarting`.
         var pendingRestart: UUID? = nil
         var pendingRestartTask: Task<Void, Never>? = nil
@@ -285,7 +297,9 @@ public actor ContainersService {
                         startedDate: nil,
                         exitCode: exit?.exitCode,
                         exitedAt: exit?.exitedAt,
-                        restartCount: restartRecord.restartCount
+                        restartCount: restartRecord.restartCount,
+                        // What the run's end recorded; a container that never ran was not stopped.
+                        stopRequested: exit.map { $0.stopRequested } ?? false
                     ),
                     restartRecord: restartRecord
                 )
@@ -549,7 +563,8 @@ public actor ContainersService {
                         incarnation: incarnation,
                         status: .stopped,
                         networks: [],
-                        startedDate: nil
+                        startedDate: nil,
+                        stopRequested: false
                     )
                     guard
                         await self.hostDirectoryAccess.resolve(
@@ -598,6 +613,7 @@ public actor ContainersService {
         try bundle.clearExitStatus()
         state.snapshot.exitCode = nil
         state.snapshot.exitedAt = nil
+        state.snapshot.stopRequested = false
         recentExits.forget(id)
         containers[id] = state
         return state
@@ -766,6 +782,8 @@ public actor ContainersService {
             state.client = runtimeClient
             state.run = run
             state.exitRequested = false
+            state.stopSent = false
+            state.signalsSent = []
             await self.setContainerState(id, state, context: context)
         } catch {
             let label = try? self.pluginLoader.fullLaunchdLabel(
@@ -981,6 +999,11 @@ public actor ContainersService {
         guard state.client != nil || waiting else { return state }
 
         let ends = signal.map { RestartRules.signalEndsRestarts($0, stopSignal: state.snapshot.configuration.stopSignal) } ?? true
+        if let signal, signal != .kill {
+            state.signalsSent.insert(signal.rawValue)
+        } else {
+            state.stopSent = true
+        }
         if byUser && !self.engineShuttingDown && !state.restartRecord.stoppedByUser {
             state.restartRecord.stoppedByUser = true
             await self.persistRestartRecord(state.restartRecord, for: id)
@@ -998,6 +1021,9 @@ public actor ContainersService {
         }
         state.cancelPendingRestart()
         state.snapshot.status = .stopped
+        // The run had already ended by itself and this stop only cancels the wait, so the
+        // container keeps showing that end, as Docker shows "Exited (1)": stopRequested stays
+        // false, with the crash's code.
         await self.setContainerState(id, state, context: context)
         self.log.info("restart cancelled by a stop", metadata: ["id": "\(id)"])
         if (try? self.getContainerCreationOptions(id: id))?.autoRemove == true {
@@ -1740,6 +1766,10 @@ public actor ContainersService {
         let path = self.containerRoot.appendingPathComponent(id)
         let bundle = ContainerResource.Bundle(path: path)
         state.snapshot.networks = []
+        let stopRequested = state.endWasRequested(exit: code)
+        state.stopSent = false
+        state.signalsSent = []
+        state.snapshot.stopRequested = stopRequested
         // Keep why it stopped, not just that it did — in memory for this apiserver, and
         // on disk so the answer survives a restart.
         if let code {
@@ -1747,7 +1777,7 @@ public actor ContainersService {
             state.snapshot.exitedAt = code.exitedAt
             do {
                 try bundle.setExitStatus(
-                    ExitRecord(exitCode: code.exitCode, exitedAt: code.exitedAt))
+                    ExitRecord(exitCode: code.exitCode, exitedAt: code.exitedAt, stopRequested: stopRequested))
             } catch {
                 self.log.warning(
                     "failed to record exit status",
@@ -1769,6 +1799,10 @@ public actor ContainersService {
             restartCount: state.restartRecord.restartCount)
         state.exitRequested = false
         if restarts {
+            // A signal that ended the process without ending its restarts: the policy starts
+            // it again, so the container is not down because of it.
+            state.snapshot.stopRequested = false
+            if stopRequested { self.persistStopRequested(of: state.snapshot) }
             let ranFor = state.snapshot.startedDate.map { Duration.seconds(max(0, (code?.exitedAt ?? Date()).timeIntervalSince($0))) } ?? .zero
             let delay = state.backoff.next(ranFor: ranFor)
             state.restartRecord.restartCount += 1
@@ -1976,6 +2010,8 @@ public actor ContainersService {
             for (id, var state) in await self.containers where state.snapshot.status == .restarting && state.client == nil {
                 state.cancelPendingRestart()
                 state.snapshot.status = .stopped
+                // Only the wait ends here; the container keeps the crash that set the restart
+                // off, so stopRequested stays false.
                 await self.setContainerState(id, state, context: context)
             }
         }
@@ -2053,6 +2089,20 @@ public actor ContainersService {
                 await self.engineStartFailed(id: id, error: error, context: context)
                 return nil
             }
+        }
+    }
+
+    /// Keep the snapshot's `stopRequested` with its recorded exit, so an engine start reads
+    /// it: for a requested end that the restart policy overrode.
+    private func persistStopRequested(of snapshot: ContainerSnapshot) {
+        guard let code = snapshot.exitCode, let exitedAt = snapshot.exitedAt else { return }
+        let bundle = ContainerResource.Bundle(path: self.containerRoot.appendingPathComponent(snapshot.id))
+        do {
+            try bundle.setExitStatus(ExitRecord(exitCode: code, exitedAt: exitedAt, stopRequested: snapshot.stopRequested))
+        } catch {
+            self.log.warning(
+                "failed to record exit status",
+                metadata: ["id": "\(snapshot.id)", "error": "\(error)"])
         }
     }
 
