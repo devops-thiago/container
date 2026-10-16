@@ -47,6 +47,13 @@ public protocol EngineContainers: Sendable {
     func kill(_ container: ContainerSnapshot, signal: String) async throws
     func delete(_ container: ContainerSnapshot, force: Bool) async throws
     func deleteVolume(_ name: String) async throws
+    /// Image ID by index digest, for the engine's images (see `DockerViewContext.imageIDs`).
+    func imageIDs() async throws -> [String: String]
+}
+
+extension EngineContainers {
+    /// No mapping: containers this service did not create show their index digest.
+    public func imageIDs() async throws -> [String: String] { [:] }
 }
 
 /// The container routes: list, create, inspect, the lifecycle, rename and prune, and the streams
@@ -99,7 +106,8 @@ public enum ContainerRoutes {
         }
 
         func context() async throws -> DockerViewContext {
-            DockerViewContext(now: now(), builtinNetwork: try await engine.builtinNetwork())
+            // An image list that fails costs foreign containers their config digest, not the view.
+            DockerViewContext(now: now(), builtinNetwork: try await engine.builtinNetwork(), imageIDs: (try? await engine.imageIDs()) ?? [:])
         }
 
         func find(_ reference: String) async throws -> (DockerContainer, [DockerContainer]) {
