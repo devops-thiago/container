@@ -259,24 +259,33 @@ extension ContainerToolRoutes.Routes {
     /// The body is spooled to disk under its own bound, unpacked into the scratch directory
     /// through `DockerTarExtractor`'s checks, and each name at the top of it is copied in. The
     /// archive must be uncompressed, as the CLI sends it.
+    ///
+    /// A container that is not running has no filesystem to copy into until its VM is up: what
+    /// it is sent is unpacked and checked now, and copied in at its next start
+    /// (`DockerPendingCopies`). Its paths cannot be looked at before then, so `path` is not
+    /// checked to be a directory and `noOverwriteDirNonDir` is not applied; the copy makes a
+    /// missing `path`.
     func extract(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let path = try Self.archivePath(request)
         let noOverwriteDirNonDir = try request.bool("noOverwriteDirNonDir")
         let container = try await find(reference)
-        guard ContainerViewMapper.isRunning(container.snapshot) else {
-            // dockerd writes into a stopped container's filesystem; here it is reachable only
-            // while the container runs, so an upload before the start (Testcontainers'
-            // withCopyToContainer) cannot be served.
-            throw DockerAPIError.conflict(
-                "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
-        }
-        switch try await probe(container, path, follow: true) {
-        case .notFound:
-            throw Self.fileNotFound(path, reference)
-        case .found(let stat) where !stat.isDirectory:
-            throw DockerAPIError.badRequest("extraction point is not a directory")
-        default:
-            break
+        let heldForStart = !ContainerViewMapper.isRunning(container.snapshot)
+        if heldForStart {
+            // An engine from before it could copy before a start reaches a container's
+            // filesystem only while it runs.
+            guard await engine.supportsCopyBeforeStart() else {
+                throw DockerAPIError.conflict(
+                    "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
+            }
+        } else {
+            switch try await probe(container, path, follow: true) {
+            case .notFound:
+                throw Self.fileNotFound(path, reference)
+            case .found(let stat) where !stat.isDirectory:
+                throw DockerAPIError.badRequest("extraction point is not a directory")
+            default:
+                break
+            }
         }
         guard let archive = request.bodyFile else {
             guard request.body.readableBytes == 0 else { throw DockerAPIError.internalError("the archive was not stored") }
@@ -285,7 +294,8 @@ extension ContainerToolRoutes.Routes {
         try Self.refuseCompressed(archive)
 
         let scratch = try makeScratch()
-        defer { try? FileManager.default.removeItem(at: scratch) }
+        var keepScratch = false
+        defer { if !keepScratch { try? FileManager.default.removeItem(at: scratch) } }
         let root = scratch.appending(path: "root", directoryHint: .isDirectory)
         guard mkdir(root.path(percentEncoded: false), 0o700) == 0 else {
             throw DockerAPIError.internalError("could not make a directory for the archive")
@@ -298,6 +308,13 @@ extension ContainerToolRoutes.Routes {
             throw DockerAPIError.badRequest(rejection.message)
         }
 
+        if heldForStart {
+            await streams.copies.add(
+                DockerPendingCopies.Upload(scratch: scratch, root: root, entries: entries, destination: path, requester: request.peer?.requester),
+                engineID: container.engineID)
+            keepScratch = true
+            return .empty(.ok)
+        }
         if noOverwriteDirNonDir {
             for entry in entries {
                 let target = (path.hasSuffix("/") ? path : path + "/") + entry.name

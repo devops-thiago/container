@@ -45,14 +45,23 @@ public actor DockerContainerProcesses {
     private let drain: Duration
     private let log: Logger
     private let events: DockerEventBus?
+    private let copies: DockerPendingCopies
+    /// The engine's copy into a container, for the uploads `copies` holds; nil when the engine
+    /// has none, and nothing is ever held then.
+    private let tools: (any EngineContainerTools)?
 
-    init(engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger, events: DockerEventBus? = nil) {
+    init(
+        engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger, events: DockerEventBus? = nil,
+        copies: DockerPendingCopies = DockerPendingCopies(), tools: (any EngineContainerTools)? = nil
+    ) {
         self.engine = engine
         self.attaches = attaches
         self.waits = waits
         self.drain = drain
         self.log = log
         self.events = events
+        self.copies = copies
+        self.tools = tools
     }
 
     /// Whether a process this service started is running in `engineID`.
@@ -104,6 +113,13 @@ public actor DockerContainerProcesses {
                 pipes.forEach { $0.closeContainerEnd() }
             }
             bootstrapped = try await engine.bootstrap(container.snapshot, stdio: stdio, requester: requester)
+            // Uploaded while it was not running: in place before anything runs in it.
+            if let tools {
+                let snapshot = container.snapshot
+                try await copies.apply(engineID) { source, destination, mode, requester in
+                    try await tools.copyIn(snapshot, source: source, destination: destination, mode: mode, requester: requester)
+                }
+            }
             if !claimed.isEmpty {
                 session = try await DockerStdioSession.connect(stdin: stdinPipe?.takeHost(), stdout: stdoutPipe?.takeHost(), stderr: stderrPipe?.takeHost())
             }
@@ -178,6 +194,8 @@ public struct DockerContainerStreams: Sendable {
     public let waits: DockerWaitStore
     public let processes: DockerContainerProcesses
     public let execs: DockerExecStore
+    /// Archives uploaded into containers that are not running, copied in at their next start.
+    public let copies: DockerPendingCopies
 
     /// - Parameter drain: how long an output pipe may stay quiet without reaching EOF after its
     ///   process exited before it is no longer read.
@@ -195,12 +213,15 @@ public struct DockerContainerStreams: Sendable {
         }
         self.attaches = attaches
         self.waits = waits
-        // The engine's container tools, when it has them: an attach to a running container
-        // reads its log with them.
+        let copies = DockerPendingCopies()
+        self.copies = copies
+        // The engine's container tools, when it has them: the uploads held for a start are
+        // copied in with them, and an attach to a running container reads its log with them.
         let tools = engine as? any EngineContainerTools
         self.tools = tools
         self.logOptions = logOptions
-        self.processes = DockerContainerProcesses(engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events)
+        self.processes = DockerContainerProcesses(
+            engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events, copies: copies, tools: tools)
         self.execs = DockerExecStore(limits: execLimits)
         self.drain = drain
     }
@@ -218,5 +239,6 @@ public struct DockerContainerStreams: Sendable {
         await attaches.shutdown()
         await waits.shutdown()
         await execs.shutdown()
+        await copies.shutdown()
     }
 }
