@@ -186,11 +186,13 @@ public enum ContainerRoutes {
             }
         }
 
-        /// What follows a deletion: waits on it answer, attaches waiting for it go.
+        /// What follows a deletion: waits on it answer, attaches waiting for it go, and so do
+        /// its execs that are not running.
         func removed(_ engineID: String, failure: String? = nil) async {
             await identities.forget(engineID: engineID)
             await streams.waits.removed(engineID, failure: failure)
             await streams.attaches.release(engineID: engineID)
+            await streams.execs.release(engineID: engineID)
         }
 
         func stopTimeout(_ request: DockerRequest) throws(DockerAPIError) -> Int32 {
