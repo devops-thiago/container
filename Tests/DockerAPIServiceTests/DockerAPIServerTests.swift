@@ -237,6 +237,34 @@ struct DockerAPIServerTests {
         }
     }
 
+    @Test("stdin sent with the upgrade request arrives on its own, without waiting for more input")
+    func earlyBytesAlone() async throws {
+        let harness = try await Harness.start {
+            $0.add(.POST, "/containers/{id}/attach") { _, _ in
+                // A route that takes a moment, as a real one does, and a body that reads later.
+                try await Task.sleep(for: .milliseconds(50))
+                return .hijack(multiplexed: false) { stream in
+                    try await Task.sleep(for: .milliseconds(100))
+                    var iterator = stream.inbound.makeAsyncIterator()
+                    while let chunk = try await iterator.next() {
+                        try await stream.write(ByteBuffer(string: "[\(String(buffer: chunk))]"))
+                    }
+                    stream.finishWriting()
+                }
+            }
+        }
+        defer { Task { try? await harness.stop() } }
+        try await harness.withClient { client in
+            try await client.send("POST /v1.48/containers/web/attach?stream=1&stdin=1 HTTP/1.1\r\nHost: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nearly")
+            _ = try await client.read(through: "\r\n\r\n")
+            // Nothing else is sent until the early bytes have come back on their own.
+            #expect(try await client.read(through: "]") == "[early]")
+            // Control: bytes sent after the upgrade arrive the same way.
+            try await client.send("late")
+            #expect(try await client.read(through: "]") == "[late]")
+        }
+    }
+
     @Test("without a tty the hijacked output is framed")
     func hijackMultiplexed() async throws {
         let harness = try await Harness.start {

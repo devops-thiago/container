@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import NIOCore
 
 /// Which of a process's streams a frame carries.
@@ -28,10 +29,23 @@ public enum StdStream: UInt8, Sendable {
 ///
 /// Without a tty the output is multiplexed, so `write(_:stream:)` frames it; with one it goes
 /// raw. Finishing writes is the half-close the CLI waits for before it reads the exit code.
-public struct DockerHijackedStream {
+public struct DockerHijackedStream: Sendable {
     public let inbound: NIOAsyncChannelInboundStream<ByteBuffer>
     public let outbound: NIOAsyncChannelOutboundWriter<ByteBuffer>
     public let multiplexed: Bool
+    /// The connection underneath, when there is one, for what the async channel does not
+    /// expose: whether the client is still there and whether its output has left.
+    let channel: (any Channel)?
+
+    public init(
+        inbound: NIOAsyncChannelInboundStream<ByteBuffer>, outbound: NIOAsyncChannelOutboundWriter<ByteBuffer>, multiplexed: Bool,
+        channel: (any Channel)? = nil
+    ) {
+        self.inbound = inbound
+        self.outbound = outbound
+        self.multiplexed = multiplexed
+        self.channel = channel
+    }
 
     public func write(_ buffer: ByteBuffer, stream: StdStream = .stdout) async throws {
         try await outbound.write(multiplexed ? StdMultiplexer.frame(buffer, stream: stream) : buffer)
@@ -40,6 +54,56 @@ public struct DockerHijackedStream {
     /// Half-closes the connection: the client sees the end of output, and may still send.
     public func finishWriting() {
         outbound.finish()
+    }
+
+    /// Whether the client still holds its end of the connection.
+    ///
+    /// A client that only closed its sending side (stdin ended) and one that hung up look the
+    /// same to a reader on a unix socket: both are EOF. They differ in whether the socket still
+    /// has a peer, which `LOCAL_PEERPID` answers: it fails with `ENOTCONN` once the client has
+    /// closed the connection, and succeeds after a half-close.
+    public func peerConnected() async -> Bool {
+        guard let channel else { return true }
+        guard channel.isActive else { return false }
+        guard let provider = channel as? any SocketOptionProvider else { return true }
+        do {
+            let _: pid_t = try await provider.unsafeGetSocketOption(level: SocketOptionLevel(SOL_LOCAL), name: SocketOptionName(LOCAL_PEERPID)).get()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Waits until what was written has left for the client, or the client has gone.
+    ///
+    /// The async writer hands writes to the channel without waiting for the socket, and a
+    /// connection whose input already ended closes outright when its output is finished,
+    /// dropping whatever the socket had not yet taken. So the last output of a process is
+    /// waited out before the half-close, for as long as a client is there to read it.
+    public func drain() async {
+        guard let channel else { return }
+        var looks = 0
+        while !Task.isCancelled, channel.isActive {
+            guard let buffered = try? await channel.getOption(.bufferedWritableBytes).get(), buffered > 0 else { return }
+            looks += 1
+            if looks.isMultiple(of: 20), await !peerConnected() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+extension Channel {
+    /// Waits until the channel has written everything handed to it: it has closed, the task is
+    /// cancelled, or `timeout` (when there is one) has passed.
+    ///
+    /// Closing a channel drops the writes it still holds, which `NIOAsyncChannel` does as soon
+    /// as its body returns; this is what to wait out first.
+    func waitUntilWritten(within timeout: Duration? = nil) async {
+        let deadline = timeout.map { ContinuousClock.now.advanced(by: $0) }
+        while !Task.isCancelled, isActive, deadline.map({ ContinuousClock.now < $0 }) ?? true {
+            guard let buffered = try? await getOption(.bufferedWritableBytes).get(), buffered > 0 else { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
     }
 }
 

@@ -167,6 +167,11 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
                 }
             }
             cancelRunning = { task.cancel() }
+            // A client that left while the route ran is not cancelled by anything else: the
+            // route's own task is done, and this one did not exist when the client went.
+            if !context.channel.isActive {
+                task.cancel()
+            }
             let done = context.eventLoop.makePromise(of: Void.self)
             done.completeWithTask { await task.value }
             done.futureResult.assumeIsolated().whenComplete { _ in
@@ -213,12 +218,19 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
                 wrappingChannelSynchronously: channel,
                 configuration: .init(isOutboundHalfClosureEnabled: true))
             pipeline.removeHandler(context: context, promise: nil)
-            pipeline.removeHandler(decoder, promise: nil)
+            // The decoder hands on the bytes it still holds as a read with no read-complete
+            // after it, and the async channel delivers reads only at a read-complete: without
+            // one, stdin typed before the 101 would wait for the client's next bytes.
+            let decoderRemoved = channel.eventLoop.makePromise(of: Void.self)
+            decoderRemoved.futureResult.assumeIsolated().whenComplete { _ in
+                channel.pipeline.syncOperations.fireChannelReadComplete()
+            }
+            pipeline.removeHandler(decoder, promise: decoderRemoved)
             let log = self.log
             Task {
                 do {
                     try await stream.executeThenClose { inbound, outbound in
-                        try await body(DockerHijackedStream(inbound: inbound, outbound: outbound, multiplexed: multiplexed))
+                        try await body(DockerHijackedStream(inbound: inbound, outbound: outbound, multiplexed: multiplexed, channel: channel))
                     }
                 } catch {
                     log.debug("hijacked stream ended", metadata: ["error": "\(error)"])

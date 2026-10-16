@@ -677,6 +677,7 @@ let package = Package(
             name: "container-docker-api",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "ContainerizationOS", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -687,6 +688,7 @@ let package = Package(
                 "ContainerPlugin",
                 "ContainerVersion",
                 "DockerAPIService",
+                "TerminalProgress",
             ],
             path: "Sources/Plugins/DockerAPI",
             exclude: ["config.toml"]
