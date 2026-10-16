@@ -262,7 +262,14 @@ extension ContainerToolRoutes.Routes {
     func extract(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let path = try Self.archivePath(request)
         let noOverwriteDirNonDir = try request.bool("noOverwriteDirNonDir")
-        let container = try await running(reference)
+        let container = try await find(reference)
+        guard ContainerViewMapper.isRunning(container.snapshot) else {
+            // dockerd writes into a stopped container's filesystem; here it is reachable only
+            // while the container runs, so an upload before the start (Testcontainers'
+            // withCopyToContainer) cannot be served.
+            throw DockerAPIError.conflict(
+                "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
+        }
         switch try await probe(container, path, follow: true) {
         case .notFound:
             throw Self.fileNotFound(path, reference)

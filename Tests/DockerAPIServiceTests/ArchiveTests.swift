@@ -368,6 +368,11 @@ struct ArchiveRouteTests {
         #expect(try notDirectory.json()["message"] as? String == "extraction point is not a directory")
         #expect(try await h.request("PUT", "/containers/box/archive?path=/nope", body: tar.archive).status == 404)
         #expect(try await h.request("GET", "/containers/off/archive?path=/").status == 409)
+        // An upload before the start, as Testcontainers sends it, says why it is refused.
+        let beforeStart = try await h.request("PUT", "/containers/off/archive?path=%2F&noOverwriteDirNonDir=false&copyUIDGID=false", body: tar.archive)
+        #expect(beforeStart.status == 409)
+        #expect((try beforeStart.json()["message"] as? String)?.hasSuffix("copies files into a running container only, so start it first") == true)
+        #expect(h.tools.copyCalls.isEmpty)
         let noPath = try await h.request("GET", "/containers/box/archive")
         #expect(try noPath.json()["message"] as? String == "bad parameter: path cannot be empty")
         let gzip: [UInt8] = [0x1F, 0x8B, 8, 0] + [UInt8](repeating: 0, count: 600)
