@@ -78,6 +78,8 @@ public enum XPCKeys: String {
     /// The events a subscriber asked to have replayed are not all kept, or were another
     /// process's: it has to list again.
     case eventsGap
+    /// JSON `[String: String]`: labels to set on a container.
+    case containerLabels
     /// Error key.
     case error
     /// FD to a container resource key.
@@ -219,6 +221,8 @@ public enum XPCRoute: String {
     case containerLogs
     /// A subscription to container events: the reply carries the read end of a pipe of them.
     case containerEvent
+    /// Set labels on a container, of the keys the server allows to change.
+    case containerUpdateLabels
     case containerStats
     case containerDiskUsage
     case containerCopyIn

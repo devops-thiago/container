@@ -395,6 +395,28 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    /// Set labels on a container, of the keys the service lets change.
+    @Sendable
+    public func updateLabels(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard ManagedContainer.nameValid(id) else {
+            throw ContainerizationError(.invalidArgument, message: "container ID \(id) is not a valid container ID")
+        }
+        guard let data = message.dataNoCopy(key: .containerLabels) else {
+            throw ContainerizationError(.invalidArgument, message: "labels cannot be empty")
+        }
+        let labels: [String: String]
+        do {
+            labels = try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            throw ContainerizationError(.invalidArgument, message: "labels are not a string map", cause: error)
+        }
+        try await service.updateLabels(id: id, labels: labels, expectedIncarnation: message.string(key: .expectedIncarnation))
+        return message.reply()
+    }
+
     @Sendable
     public func copyIn(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         guard let id = message.string(key: .id) else {

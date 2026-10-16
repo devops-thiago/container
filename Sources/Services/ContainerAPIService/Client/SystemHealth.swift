@@ -99,6 +99,8 @@ public struct SystemHealth: Sendable, Codable {
 public enum APIServerCapability: String, Sendable, CaseIterable {
     /// `XPCRoute.containerEvent`: a subscription to container events.
     case containerEvents
+    /// `XPCRoute.containerUpdateLabels`: setting the labels the server allows to change.
+    case containerLabels
 
     /// As the health check carries them.
     public static func encode(_ capabilities: [APIServerCapability]) -> String {

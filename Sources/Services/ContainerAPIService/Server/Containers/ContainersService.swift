@@ -116,6 +116,8 @@ public actor ContainersService {
     public nonisolated let events: ContainerEventHub
     /// How the service reaches what lies outside it; tests replace parts.
     private let hooks: Hooks
+    /// Which labels may change after create, and which one holds a container's name.
+    public nonisolated let labelPolicy: ContainerLabelPolicy
     /// Every write is counted: a container made, removed, started, stopped, exited, restarted
     /// or whose health changed is what a client's listing would show differently.
     private var containers: [String: ContainerState] {
@@ -157,6 +159,7 @@ public actor ContainersService {
 
     /// - Parameter events: where the service writes its container events; one of its own, for
     ///   a random process nonce, when nil.
+    /// - Parameter labelPolicy: which labels may change after create; by default none.
     public init(
         appRoot: URL,
         pluginLoader: PluginLoader,
@@ -164,11 +167,12 @@ public actor ContainersService {
         log: Logger,
         debugHelpers: Bool = false,
         restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-        events: ContainerEventHub? = nil
+        events: ContainerEventHub? = nil,
+        labelPolicy: ContainerLabelPolicy = .fixed
     ) throws {
         try self.init(
             appRoot: appRoot, pluginLoader: pluginLoader, containerSystemConfig: containerSystemConfig, log: log, debugHelpers: debugHelpers,
-            restartDelay: restartDelay, events: events, hooks: Hooks())
+            restartDelay: restartDelay, events: events, labelPolicy: labelPolicy, hooks: Hooks())
     }
 
     init(
@@ -179,6 +183,7 @@ public actor ContainersService {
         debugHelpers: Bool = false,
         restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         events: ContainerEventHub? = nil,
+        labelPolicy: ContainerLabelPolicy = .fixed,
         hooks: Hooks
     ) throws {
         let containerRoot = appRoot.appendingPathComponent("containers")
@@ -193,6 +198,7 @@ public actor ContainersService {
         self.restartDelay = restartDelay
         self.events = events ?? ContainerEventHub(processNonce: UUID().uuidString, log: log)
         self.hooks = hooks
+        self.labelPolicy = labelPolicy
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.hostDirectoryAccess = HostDirectoryAccess(log: log)
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
@@ -1465,6 +1471,54 @@ public actor ContainersService {
         await self.settlePeerHosts()
     }
 
+    /// Set labels on a container, of the keys `labelPolicy` lets change: in memory, in the
+    /// bundle, and in the configuration its runtime helper reads at its first start, so the
+    /// change outlives the engine. A change of the name label is a `rename` event.
+    ///
+    /// - Parameter expectedIncarnation: the exact container the caller observed; another one
+    ///   made since under the same ID is not changed.
+    public func updateLabels(id: String, labels: [String: String], expectedIncarnation: String? = nil) async throws {
+        try self.labelPolicy.validate(labels)
+        try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            var state = try await self.getContainerState(id: id, context: context)
+            try Self.require(labels: nil, incarnation: expectedIncarnation, on: state, id: id)
+            let policy = self.labelPolicy
+            if let nameKey = policy.nameKey, let name = labels[nameKey] {
+                for other in await self.containers.values where other.snapshot.id != id {
+                    guard policy.name(id: other.snapshot.id, labels: other.snapshot.configuration.labels) != name else {
+                        throw ContainerizationError(.exists, message: "the name \(name) is already in use by container \(other.snapshot.id)")
+                    }
+                }
+            }
+            let before = state.snapshot.configuration.labels
+            var configuration = state.snapshot.configuration
+            configuration.labels.merge(labels) { _, new in new }
+            guard configuration.labels != before else { return }
+            try await self.persist(configuration, for: id)
+            state.snapshot.configuration = configuration
+            await self.setContainerState(id, state, context: context)
+            if let nameKey = policy.nameKey, before[nameKey] != configuration.labels[nameKey] {
+                await self.emit(.rename, state.snapshot, attributes: ["oldName": policy.name(id: id, labels: before)])
+            }
+        }
+    }
+
+    /// Write a changed configuration wherever the container's configuration is kept: the
+    /// bundle's, once a start has made it, and the one its runtime helper makes that from.
+    private func persist(_ configuration: ContainerConfiguration, for id: String) throws {
+        let path = self.containerRoot.appendingPathComponent(id)
+        let bundle = ContainerResource.Bundle(path: path)
+        if (try? bundle.configuration) != nil {
+            try bundle.set(configuration: configuration)
+        }
+        if let runtime = try? RuntimeConfiguration.readRuntimeConfiguration(from: path) {
+            let changed = RuntimeConfiguration(
+                path: runtime.path, initialFilesystem: runtime.initialFilesystem, kernel: runtime.kernel, containerConfiguration: configuration,
+                containerRootFilesystem: runtime.containerRootFilesystem, options: runtime.options, runtimeData: runtime.runtimeData)
+            try JSONEncoder().encode(changed).write(to: changed.runtimeConfigurationPath, options: .atomic)
+        }
+    }
+
     public func containerDiskUsage(id: String) async throws -> UInt64 {
         log.debug(
             "ContainersService: enter",
@@ -2247,7 +2301,9 @@ public actor ContainersService {
         _ action: ContainerEvent.Action, _ snapshot: ContainerSnapshot, exitCode: Int32? = nil, health: HealthStatus? = nil,
         attributes: [String: String] = [:]
     ) {
-        self.events.emit(action, snapshot: snapshot, name: snapshot.id, exitCode: exitCode, health: health, attributes: attributes)
+        self.events.emit(
+            action, snapshot: snapshot, name: self.labelPolicy.name(id: snapshot.id, labels: snapshot.configuration.labels), exitCode: exitCode,
+            health: health, attributes: attributes)
     }
 
     /// How long a stop or a kill waits for the helper to say how the process ended. It has

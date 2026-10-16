@@ -272,7 +272,9 @@ final class EventServiceFixture: Sendable {
     var lastRuntime: FakeRuntime? { runtimes.withLock { $0.last } }
     var runtimeCount: Int { runtimes.withLock { $0.count } }
 
-    func service(restartDelay: @escaping @Sendable (Duration) async throws -> Void = { _ in }) throws -> ContainersService {
+    func service(
+        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { _ in }, labelPolicy: ContainerLabelPolicy = .fixed
+    ) throws -> ContainersService {
         try FileManager.default.createDirectory(at: containers, withIntermediateDirectories: true)
         let plugins = root.appendingPathComponent("plugins")
         let plugin = plugins.appendingPathComponent(runtimeName)
@@ -322,7 +324,7 @@ final class EventServiceFixture: Sendable {
             })
         return try ContainersService(
             appRoot: root, pluginLoader: loader, containerSystemConfig: ContainerSystemConfig(), log: log, restartDelay: restartDelay,
-            events: hub, hooks: hooks)
+            events: hub, labelPolicy: labelPolicy, hooks: hooks)
     }
 
     func configuration(

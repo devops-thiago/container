@@ -424,6 +424,27 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Set labels on a container. The server lets only some keys change (its
+    /// `ContainerLabelPolicy`); any other is refused, and nothing is changed.
+    ///
+    /// - Parameter expectedIncarnation: the exact container observed; another one made since
+    ///   under the same ID is not changed.
+    public func updateLabels(id: String, labels: [String: String], expectedIncarnation: String? = nil) async throws {
+        let request = XPCMessage(route: .containerUpdateLabels)
+        request.set(key: .id, value: id)
+        request.set(key: .containerLabels, value: try JSONEncoder().encode(labels))
+        if let expectedIncarnation {
+            request.set(key: .expectedIncarnation, value: expectedIncarnation)
+        }
+        do {
+            try await xpcClient.send(request, responseTimeout: .seconds(10))
+        } catch let error as ContainerizationError {
+            throw error
+        } catch {
+            throw ContainerizationError(.internalError, message: "failed to set labels on container \(id)", cause: error)
+        }
+    }
+
     /// Subscribe to the API server's container events.
     ///
     /// - Parameter since: the last event read from an earlier subscription. The events after it
