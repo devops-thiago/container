@@ -104,7 +104,10 @@ extension DockerAPIAgent {
                 log.error("no state directory", metadata: ["error": "\(error)"])
                 DockerAPIAgent.exit(withError: error)
             }
-            ContainerRoutes.register(on: &router, engine: EngineContainersClient(), identities: identities)
+            let engine = EngineContainersClient()
+            let streams = DockerContainerStreams(engine: engine, log: log)
+            ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
+            ImageRoutes.register(on: &router, engine: EngineImagesClient())
             let service = DockerAPIServer(router: router, log: log)
             let uid = getuid()
 
@@ -149,6 +152,8 @@ extension DockerAPIAgent {
             let ownerWatch = Task {
                 await watchdog.waitForOwnerLoss()
                 log.info("docker api helper has no owning app; stopping")
+                // Attaches and waits end now rather than with a connection reset.
+                await streams.shutdown()
                 cleanup()
                 Foundation.exit(0)
             }

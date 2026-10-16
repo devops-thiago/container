@@ -22,7 +22,9 @@ import Testing
 
 @testable import DockerAPIService
 
-/// An engine in memory: containers made by create, with the lifecycle the routes drive.
+/// An engine in memory: containers made by create, with the lifecycle the routes drive. A
+/// bootstrap makes a `FakeProcess` that runs the container's program, if one was given for
+/// it, or waits to be stopped.
 final class FakeEngine: EngineContainers, @unchecked Sendable {
     private let lock = NSLock()
     private var snapshots: [ContainerSnapshot]
@@ -31,6 +33,19 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
     var images: [String: DockerImageDefaults]
     private(set) var calls: [String] = []
     private(set) var plans: [DockerCreatePlan] = []
+    /// What each bootstrap bound, as `"<id> stdin stdout stderr"` with `-` for a missing stream.
+    private(set) var bootstraps: [String] = []
+    private var processes: [String: FakeProcess] = [:]
+    /// The program a container's process runs; without one it waits to be stopped.
+    var programs: [String: FakeProgram] = [:]
+    /// Containers the engine deletes itself when their process exits, as `--rm` asks.
+    var autoRemove: Set<String> = []
+    /// Containers in which something keeps stdout open after the process exits.
+    var holdOutputOpen: Set<String> = []
+    /// The next bootstrap fails with this.
+    var bootstrapError: (any Error)?
+    /// The next process start fails with this.
+    var startError: (any Error)?
 
     init(snapshots: [ContainerSnapshot] = [], images: [String: DockerImageDefaults] = ["alpine": Fixtures.image()]) {
         self.snapshots = snapshots
@@ -41,7 +56,7 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
         lock.withLock { calls.append(call) }
     }
 
-    private func update(_ id: String, _ change: (inout ContainerSnapshot) -> Void) {
+    func update(_ id: String, _ change: (inout ContainerSnapshot) -> Void) {
         lock.withLock {
             if let index = snapshots.firstIndex(where: { $0.id == id }) { change(&snapshots[index]) }
         }
@@ -51,8 +66,16 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
         lock.withLock { snapshots.first { $0.id == id } }
     }
 
+    func process(_ id: String) -> FakeProcess? {
+        lock.withLock { processes[id] }
+    }
+
     func list() async throws -> [ContainerSnapshot] {
         lock.withLock { snapshots }
+    }
+
+    func get(_ engineID: String) async throws -> ContainerSnapshot? {
+        snapshot(engineID)
     }
 
     func builtinNetwork() async throws -> String? { Fixtures.builtin }
@@ -78,22 +101,56 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
             configuration.creationDate = Fixtures.now.addingTimeInterval(Double(creates))
             snapshots.append(
                 ContainerSnapshot(configuration: configuration, incarnation: "inc-\(creates)", status: .stopped, networks: []))
+            if plan.autoRemove { autoRemove.insert(configuration.id) }
             return "inc-\(creates)"
         }
     }
 
-    func start(_ container: ContainerSnapshot) async throws {
-        record("start \(container.id)")
-        update(container.id) {
-            $0.status = .running
-            $0.startedDate = Fixtures.now
-            $0.exitCode = nil
-            $0.exitedAt = nil
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess {
+        let id = container.id
+        let failure: (any Error)? = lock.withLock {
+            let names = [stdio.stdin, stdio.stdout, stdio.stderr].enumerated().map { $1 == nil ? "-" : ["stdin", "stdout", "stderr"][$0] }
+            bootstraps.append(([id] + names).joined(separator: " "))
+            defer { bootstrapError = nil }
+            return bootstrapError
         }
+        if let failure { throw failure }
+        let process = try FakeProcess(id: id, stdio: stdio, holdOutputOpen: lock.withLock { holdOutputOpen.contains(id) }) { [weak self] process in
+            guard let self else { return }
+            let failure: (any Error)? = self.lock.withLock {
+                defer { self.startError = nil }
+                return self.startError
+            }
+            if let failure { throw failure }
+            self.record("start \(id)")
+            self.update(id) {
+                $0.status = .running
+                $0.startedDate = Fixtures.now
+                $0.exitCode = nil
+                $0.exitedAt = nil
+            }
+            process.run(self.lock.withLock { self.programs[id] })
+        } onExit: { [weak self] code in
+            guard let self else { return }
+            let remove = self.lock.withLock { self.autoRemove.contains(id) }
+            self.update(id) {
+                $0.status = .stopped
+                $0.exitCode = code
+                $0.exitedAt = Fixtures.now.addingTimeInterval(1)
+            }
+            if remove {
+                self.lock.withLock { self.snapshots.removeAll { $0.id == id } }
+            }
+        }
+        lock.withLock { processes[id] = process }
+        return process
     }
 
     func stop(_ container: ContainerSnapshot, timeout: Int32, signal: String?) async throws {
         record("stop \(container.id) \(timeout) \(signal ?? "-")")
+        if let process = process(container.id), await process.exit(0) {
+            return
+        }
         update(container.id) {
             $0.status = .stopped
             $0.exitCode = 0
@@ -103,6 +160,9 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
 
     func kill(_ container: ContainerSnapshot, signal: String) async throws {
         record("kill \(container.id) \(signal)")
+        if let process = process(container.id), await process.exit(137) {
+            return
+        }
         update(container.id) {
             $0.status = .stopped
             $0.exitCode = 137
@@ -112,6 +172,9 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
 
     func delete(_ container: ContainerSnapshot, force: Bool) async throws {
         record("delete \(container.id) \(force)")
+        if let process = process(container.id) {
+            _ = await process.exit(137)
+        }
         lock.withLock { snapshots.removeAll { $0.id == container.id } }
     }
 
@@ -142,7 +205,8 @@ struct ContainerRoutesTests {
     init(snapshots: [ContainerSnapshot]) {
         engine = FakeEngine(snapshots: snapshots)
         var router = DockerRouter()
-        ContainerRoutes.register(on: &router, engine: engine, identities: identities, now: { Fixtures.now })
+        ContainerRoutes.register(
+            on: &router, engine: engine, identities: identities, streams: DockerContainerStreams(engine: engine), now: { Fixtures.now })
         self.router = router
     }
 
