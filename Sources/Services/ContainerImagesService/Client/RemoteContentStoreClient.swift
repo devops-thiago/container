@@ -54,7 +54,14 @@ public struct RemoteContentStoreClient: ContentStore {
         guard let url = try await self._get(digest: digest) else {
             return nil
         }
-        return try LocalContent(path: url)
+        return try Self.content(at: url)
+    }
+
+    /// The blob the images service named, opened here: the service only says where it is.
+    /// An interrupted open is restarted and any other failure names its errno; see
+    /// `ContentBlobOpen`.
+    static func content(at url: URL, opener: ContentBlobOpen.Opener = ContentBlobOpen.system) throws -> Content {
+        try ContentBlob(path: url, opener: opener)
     }
 
     public func get<T: Decodable>(digest: String) async throws -> T? {
