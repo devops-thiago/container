@@ -364,6 +364,9 @@ struct BuildRoutesTests {
         #expect(try prepare(B.tar([("build/Containerfile", "FROM nested\n")]), dockerfile: "build/Containerfile").dockerfile == Data("FROM nested\n".utf8))
 
         #expect(refusal(B.tar([("hello", "hi")]))?.message == "Cannot locate specified Dockerfile: Dockerfile")
+        // With dockerd's status, 500; a path outside the context is the client's error, a 400.
+        #expect(refusal(B.tar([("hello", "hi")]))?.status == .internalServerError)
+        #expect(refusal(B.tar(B.context), dockerfile: "../Dockerfile")?.status == .badRequest)
         // The lowercase fallback is for the default name alone.
         #expect(refusal(B.tar([("dockerfile.dev", "FROM x\n")]), dockerfile: "Dockerfile.dev")?.message == "Cannot locate specified Dockerfile: Dockerfile.dev")
         // A directory is not a Dockerfile.
@@ -605,7 +608,8 @@ struct BuildRoutesTests {
         let harness = try await harness()
         defer { Task { try? await harness.stop() } }
         let missing = try await post(harness, "t=m231-x", body: B.tar([("hello", "hi")]))
-        #expect(missing.head.hasPrefix("HTTP/1.1 400"))
+        // dockerd's status for it.
+        #expect(missing.head.hasPrefix("HTTP/1.1 500"))
         #expect(missing.text == #"{"message":"Cannot locate specified Dockerfile: Dockerfile"}"#)
         let escape = try await post(harness, "t=m231-x", body: B.tar([.file("../x", "x")]))
         #expect(escape.head.hasPrefix("HTTP/1.1 400"))
@@ -644,7 +648,7 @@ struct BuildRoutesTests {
         _ = try await post(harness, "t=m231-cred", body: B.tar(B.context), headers: ["X-Registry-Config: \(header)"])
         builder.state.withLock { $0.failure = nil }
         let refused = try await post(harness, "t=m231-cred", body: B.tar([("hello", "hi")]), headers: ["X-Registry-Config: \(header)"])
-        #expect(refused.head.hasPrefix("HTTP/1.1 400"))
+        #expect(refused.head.hasPrefix("HTTP/1.1 500"))
 
         // Control: the builder was given them, keyed as the engine names registries.
         let given = try #require(builder.requests.first?.credentials)

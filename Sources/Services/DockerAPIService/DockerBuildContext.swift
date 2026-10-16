@@ -138,8 +138,9 @@ struct DockerBuildContext {
         if name == defaultDockerfile, let file = try regularFile(name.lowercased(), in: context) {
             return (name.lowercased(), file)
         }
-        // dockerd's words, which the CLI prints after "Error response from daemon:".
-        throw .badRequest("Cannot locate specified Dockerfile: \(name)")
+        // dockerd's words and status (500: its error carries no type), which the CLI prints
+        // after "Error response from daemon:".
+        throw .internalError("Cannot locate specified Dockerfile: \(name)")
     }
 
     /// The regular file at `name` in `context`, or nil when there is none. A name that climbs
