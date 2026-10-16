@@ -422,6 +422,40 @@ extension Builder {
         guard dockerfile != "-" else {
             throw BuildInputError("a Dockerfile from standard input is not supported here")
         }
+        let (buildFileData, ignoreFileData) = try readBuildFile(at: dockerfile)
+        return try await build(
+            request,
+            dockerfile: buildFileData,
+            dockerignore: ignoreFileData,
+            terminal: terminal,
+            containerSystemConfig: containerSystemConfig,
+            log: log,
+            progressUpdate: progressUpdate,
+            willBuild: willBuild
+        )
+    }
+
+    /// Run a build whose Dockerfile has already been read: check its size, start the builder
+    /// and connect to it, build, then load the export into the image store, unpack it for this
+    /// host and tag it. `request.file` is not read and nothing is borrowed: the caller has the
+    /// context folder already, as a service that unpacked an uploaded context does.
+    ///
+    /// BuildKit writes its own output to `terminal`, else to `output` as plain text, else to
+    /// standard error. `registryCredentials` are used for the base image pulls the build makes
+    /// (see ``BuildConfig/registryCredentials``).
+    public static func build(
+        _ request: BuildRequest,
+        dockerfile buildFileData: Data,
+        dockerignore ignoreFileData: Data?,
+        terminal: Terminal?,
+        output: FileHandle? = nil,
+        registryCredentials: [String: RegistryCredential] = [:],
+        containerSystemConfig: ContainerSystemConfig,
+        log: Logger,
+        progressUpdate: @escaping ProgressUpdateHandler,
+        willBuild: @escaping @Sendable () async -> Void = {}
+    ) async throws -> BuildOutcome {
+        try checkBuildFileSize(buildFileData)
         let contextDir = HostPath.absolute(request.contextDir)
 
         let builder = try await connect(
@@ -436,8 +470,6 @@ extension Builder {
         // must do the same, or the connection and its event loops stay behind; a second
         // shutdown after the build does nothing.
         do {
-            let (buildFileData, ignoreFileData) = try readBuildFile(at: dockerfile)
-            try checkBuildFileSize(buildFileData)
             let secretsData = try readSecrets(request.secrets)
 
             let buildID = UUID().uuidString
@@ -476,6 +508,8 @@ extension Builder {
                 cacheOut: request.cacheOut,
                 pull: request.pull,
                 containerSystemConfig: containerSystemConfig,
+                output: output,
+                registryCredentials: registryCredentials
             )
             await willBuild()
             try await builder.build(config)

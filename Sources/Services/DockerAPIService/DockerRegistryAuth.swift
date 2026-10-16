@@ -66,6 +66,31 @@ public enum DockerRegistryAuth {
         return try? credential(json: data)
     }
 
+    /// The header a build sends: every credential the client has, as a map of `AuthConfig`s by
+    /// registry address, base64url JSON.
+    public static let configHeader = "X-Registry-Config"
+
+    /// The credentials an `X-Registry-Config` header carries, by registry host as `registry(_:)`
+    /// names it (`docker.io`, `localhost:5000`). As dockerd does, a header that does not decode
+    /// is no credentials rather than an error, and so is an entry with nothing in it.
+    ///
+    /// The map key names the registry; an entry's own `serveraddress` is used only when the key
+    /// is empty.
+    public static func credentials(configHeader value: String?) -> [String: DockerRegistryCredential] {
+        guard let value, !value.isEmpty, let data = decodeBase64(value),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        var credentials: [String: DockerRegistryCredential] = [:]
+        for (address, entry) in object {
+            guard let entry = entry as? [String: Any], let json = try? JSONSerialization.data(withJSONObject: entry),
+                var credential = try? credential(json: json)
+            else { continue }
+            if !address.isEmpty { credential.serverAddress = address }
+            credentials[registry(credential.serverAddress).host] = credential
+        }
+        return credentials
+    }
+
     /// The credential the body of `POST /auth` carries. A body that is not an `AuthConfig` is
     /// refused, as dockerd refuses it.
     public static func credential(body: Data) throws(DockerAPIError) -> DockerRegistryCredential {

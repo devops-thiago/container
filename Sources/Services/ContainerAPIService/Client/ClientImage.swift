@@ -446,13 +446,17 @@ extension ClientImage {
         return (totalCount: total, activeCount: active, totalSize: size, reclaimableSize: reclaimable)
     }
 
+    /// The image `reference` names when it is here (with `platform`, when one is given), else
+    /// a pull of it. `credential` is used for that pull alone, as ``pull(reference:platform:scheme:containerSystemConfig:progressUpdate:maxConcurrentDownloads:credential:)``
+    /// uses it.
     public static func fetch(
         reference: String,
         platform: Platform? = nil,
         scheme: RequestScheme = .https,
         containerSystemConfig: ContainerSystemConfig,
         progressUpdate: ProgressUpdateHandler? = nil,
-        maxConcurrentDownloads: Int = 3
+        maxConcurrentDownloads: Int = 3,
+        credential: RegistryCredential? = nil
     ) async throws -> ClientImage {
         do {
             let match = try await self.get(reference: reference, containerSystemConfig: containerSystemConfig)
@@ -468,7 +472,7 @@ extension ClientImage {
             }
             return try await Self.pull(
                 reference: reference, platform: platform, scheme: scheme, containerSystemConfig: containerSystemConfig, progressUpdate: progressUpdate,
-                maxConcurrentDownloads: maxConcurrentDownloads)
+                maxConcurrentDownloads: maxConcurrentDownloads, credential: credential)
         }
     }
 }
