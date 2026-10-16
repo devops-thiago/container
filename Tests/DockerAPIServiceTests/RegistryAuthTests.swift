@@ -126,20 +126,44 @@ struct RegistryAuthTests {
     }
 
     @Test(
-        "a login names its registry as dockerd reads the address",
+        "a login names its registry as dockerd reads the address: the host alone picks the scheme, plain HTTP only on loopback",
         arguments: [
             ("https://index.docker.io/v1/", "docker.io", "https"),
             ("", "docker.io", "https"),
             ("docker.io", "docker.io", "https"),
-            ("localhost:5000", "localhost:5000", "https"),
+            ("localhost:5000", "localhost:5000", "http"),
             ("http://localhost:5000", "localhost:5000", "http"),
+            ("https://localhost:5000", "localhost:5000", "http"),
             ("https://ghcr.io/v2/", "ghcr.io", "https"),
             ("HTTP://127.0.0.1:5000/", "127.0.0.1:5000", "http"),
+            ("127.0.0.1", "127.0.0.1", "http"),
+            ("[::1]:5000", "[::1]:5000", "http"),
+            ("http://[::1]", "[::1]", "http"),
+            // An address that says http does not make a registry off loopback plain HTTP.
+            ("http://registry.example:5000", "registry.example:5000", "https"),
+            ("http://192.168.1.10:5000/", "192.168.1.10:5000", "https"),
+            ("http://localhost.example.com:5000", "localhost.example.com:5000", "https"),
+            ("localhost.example.com", "localhost.example.com", "https"),
+            ("http://index.docker.io/v1/", "docker.io", "https"),
         ])
     func registry(address: String, host: String, scheme: String) {
         let parsed = DockerRegistryAuth.registry(address)
         #expect(parsed.host == host)
         #expect(parsed.scheme == scheme)
+    }
+
+    @Test(
+        "a pull or push reaches a registry on loopback over plain HTTP, and every other over HTTPS",
+        arguments: [
+            ("localhost:5000/m534/alpine:1", "http"), ("localhost/m534/alpine", "http"), ("127.0.0.1:5000/m534/alpine:1", "http"),
+            ("127.0.0.1/m534/alpine@sha256:" + String(repeating: "a", count: 64), "http"), ("[::1]:5000/m534/alpine:1", "http"),
+            ("[::1]/m534/alpine", "http"),
+            ("localhost.example.com:5000/m534/alpine:1", "https"), ("192.168.1.10:5000/m534/alpine:1", "https"),
+            ("registry.example:5000/m534/alpine:1", "https"), ("[fd00::1]:5000/m534/alpine:1", "https"),
+            ("alpine", "https"), ("docker.io/library/alpine:3.22", "https"), ("ghcr.io/m534/alpine:1", "https"), ("NOT A REFERENCE", "https"),
+        ])
+    func referenceScheme(reference: String, scheme: String) {
+        #expect(DockerRegistryAuth.scheme(forReference: reference) == scheme)
     }
 
     @Test("printing a credential shows none of it")
@@ -225,8 +249,20 @@ struct RegistryAuthTests {
         let (answered, body) = try await auth(FakeRegistryLogin(.rejected(status: status)), body: Self.json)
         #expect(answered == .unauthorized)
         let reason = status == 401 ? "Unauthorized" : "Forbidden"
-        #expect(body == #"{"message":"login attempt to https://localhost:5000/v2/ failed with status: \#(status) \#(reason)"}"#)
+        #expect(body == #"{"message":"login attempt to http://localhost:5000/v2/ failed with status: \#(status) \#(reason)"}"#)
         #expect(!body.contains("s3cret-pw"))
+    }
+
+    @Test("a login to a loopback registry is checked over plain HTTP; one that names http elsewhere is checked over HTTPS")
+    func loginScheme() async throws {
+        let engine = FakeRegistryLogin(.accepted)
+        for address in ["localhost:5000", "127.0.0.1:5000", "[::1]:5000", "http://registry.example:5000", "http://localhost.example.com:5000"] {
+            let (status, _) = try await auth(engine, body: #"{"username":"ana","password":"s3cret-pw","serveraddress":"\#(address)"}"#)
+            #expect(status == .ok, "\(address)")
+        }
+        let asked = engine.asked.withLock { $0 }
+        #expect(asked.map(\.host) == ["localhost:5000", "127.0.0.1:5000", "[::1]:5000", "registry.example:5000", "localhost.example.com:5000"])
+        #expect(asked.map(\.scheme) == ["http", "http", "http", "https", "https"])
     }
 
     @Test("a body that is not an AuthConfig is refused before the registry is asked")

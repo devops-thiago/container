@@ -37,8 +37,12 @@ struct EngineImagesClient: EngineImages {
         do {
             let system = try await EngineContainersClient.systemConfig()
             let before = try? await ClientImage.get(reference: reference, containerSystemConfig: system).digest
+            // Plain HTTP for a registry on loopback, as dockerd reaches its default insecure
+            // registries; HTTPS for every other.
+            let registry = try ClientImage.normalizeReference(reference, containerSystemConfig: system)
             let image = try await ClientImage.pull(
-                reference: reference, platform: platform, containerSystemConfig: system,
+                reference: reference, platform: platform, scheme: try RequestScheme(DockerRegistryAuth.scheme(forReference: registry)),
+                containerSystemConfig: system,
                 progressUpdate: { events in progress(events.compactMap(Self.event)) }, credential: credential.map(Self.engineCredential))
             progress([.extracting])
             _ = try await image.getCreateSnapshot(platform: platform)

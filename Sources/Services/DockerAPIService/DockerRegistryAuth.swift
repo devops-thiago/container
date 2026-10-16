@@ -14,8 +14,10 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationOCI
 import Foundation
 import NIOHTTP1
+import RegistryTransport
 
 /// A registry credential a Docker client sent with one request: `X-Registry-Auth` on a pull or
 /// push, or the body of `POST /auth`. It is passed to the engine for that request only, never
@@ -142,14 +144,13 @@ public enum DockerRegistryAuth {
     }
 
     /// The registry a login names: its host, without a scheme or path, and the scheme to reach
-    /// it over. As dockerd reads `serveraddress`, the scheme is https unless the address says
-    /// http, and an empty address is Docker Hub. Docker Hub's legacy index address
-    /// (`https://index.docker.io/v1/`), which the CLI sends for it, is `docker.io`.
+    /// it over. As dockerd reads `serveraddress`, a scheme the address names is dropped and the
+    /// host alone decides (``scheme(forRegistry:)``), and an empty address is Docker Hub. Docker
+    /// Hub's legacy index address (`https://index.docker.io/v1/`), which the CLI sends for it,
+    /// is `docker.io`.
     public static func registry(_ serverAddress: String) -> (host: String, scheme: String) {
         var address = serverAddress.trimmingCharacters(in: .whitespaces)
-        var scheme = "https"
         for prefix in ["https://", "http://"] where address.lowercased().hasPrefix(prefix) {
-            scheme = String(prefix.dropLast(3))
             address = String(address.dropFirst(prefix.count))
         }
         let host = address.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
@@ -157,8 +158,27 @@ public enum DockerRegistryAuth {
         case "", "index.docker.io", "registry-1.docker.io", "docker.io", "registry.hub.docker.com":
             return ("docker.io", "https")
         default:
-            return (host, scheme)
+            return (host, scheme(forRegistry: host))
         }
+    }
+
+    /// The scheme a registry is reached over, for a login, a pull and a push alike: plain HTTP
+    /// for one on loopback (`localhost`, `127.0.0.0/8`, `::1`), with or without a port, which
+    /// dockerd treats as insecure registries by default; HTTPS for every other.
+    ///
+    /// dockerd tries HTTPS without verification before plain HTTP for those; this goes
+    /// straight to HTTP, as the engine selects a scheme and never probes. dockerd also resolves
+    /// a name and treats it as insecure when every address is loopback; here only `localhost`
+    /// and IP literals are, so no DNS answer sends a credential in clear.
+    public static func scheme(forRegistry host: String) -> String {
+        LoopbackRegistry.isLoopback(host) ? "http" : "https"
+    }
+
+    /// The scheme for the registry `reference` names (``scheme(forRegistry:)``); HTTPS for a
+    /// reference that does not parse or names no registry.
+    public static func scheme(forReference reference: String) -> String {
+        guard let domain = try? Reference.parse(reference).domain else { return "https" }
+        return scheme(forRegistry: domain)
     }
 }
 
