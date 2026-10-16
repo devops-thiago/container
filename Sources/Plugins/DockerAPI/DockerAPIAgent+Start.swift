@@ -107,6 +107,7 @@ extension DockerAPIAgent {
             let engine = EngineContainersClient()
             let streams = DockerContainerStreams(engine: engine, log: log)
             ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
+            ContainerToolRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
             ImageRoutes.register(on: &router, engine: EngineImagesClient())
             let service = DockerAPIServer(router: router, log: log)
             let uid = getuid()
