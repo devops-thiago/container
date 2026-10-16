@@ -37,8 +37,9 @@ extension ContainerRoutes.Routes {
         let running = ContainerViewMapper.isRunning(container.snapshot)
         let held = await streams.processes.holds(container.engineID)
         guard follow else {
-            // Past output only: the log, when it was asked for, then the end.
-            guard replay, options.stdout || options.stderr, streams.tools != nil else {
+            // Past output only: the log, when it was asked for, then the end. A container that
+            // never ran has none, and the engine has no log for it.
+            guard replay, options.stdout || options.stderr, streams.tools != nil, ContainerViewMapper.hasRun(container.snapshot) else {
                 return .hijack(multiplexed: multiplexed) { $0.finishWriting() }
             }
             return try await attachToLog(container, options: options, multiplexed: multiplexed, fromStart: true, follow: false)

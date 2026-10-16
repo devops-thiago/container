@@ -185,7 +185,11 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     }
 
     func log(_ container: ContainerSnapshot) async throws -> FileHandle {
-        try FileHandle(forReadingFrom: logFile)
+        // As the engine: a container that never ran has no log yet.
+        guard let current = base.snapshot(container.id), ContainerViewMapper.hasRun(current) else {
+            throw DockerAPIError.internalError("no log for container \(container.id)")
+        }
+        return try FileHandle(forReadingFrom: logFile)
     }
 
     func stats(_ container: ContainerSnapshot) async throws -> ContainerStats {

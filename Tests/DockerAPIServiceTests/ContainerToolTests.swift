@@ -222,6 +222,15 @@ struct LogRouteTests {
         #expect(past.text == "one\ntwo\n")
         // Control: without logs, nothing of the past.
         #expect(try await h.request("POST", "/containers/term/attach?stdout=1&stream=0").text == "")
+        // A container that never ran has no past to replay, and no log to ask for.
+        h.tools.base.update(String(ToolHarness.stoppedID.prefix(12))) {
+            $0.startedDate = nil
+            $0.exitCode = nil
+            $0.exitedAt = nil
+        }
+        let created = try await h.request("POST", "/containers/off/attach?logs=1&stdout=1&stream=0")
+        #expect(created.status == 200)
+        #expect(created.text == "")
     }
 
     @Test("an attach to a running container that asks for stdin is still refused, and says how to attach to its output")
