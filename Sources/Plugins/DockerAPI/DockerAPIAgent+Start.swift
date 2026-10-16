@@ -130,7 +130,7 @@ extension DockerAPIAgent {
             AuthRoutes.register(on: &router, engine: EngineRegistryLoginClient())
             VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities, events: events)
             DiskUsageRoutes.register(
-                on: &router, disk: EngineDiskUsageClient(), images: EngineImagesClient(), containers: engine, volumes: EngineVolumesClient(),
+                on: &router, images: EngineImagesClient(), containers: engine, volumes: EngineVolumesClient(),
                 identities: identities)
             UnsupportedRoutes.register(on: &router)
             NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities, events: events)

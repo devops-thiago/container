@@ -87,7 +87,11 @@ public enum BuildRoutes {
     ) {
         let routes = Routes(builder: builder, images: images, scratch: scratch, limits: limits, events: events)
         router.add(.POST, "/build", body: .spool(maxBytes: limits.maxBodyBytes)) { request, _ in try await routes.build(request) }
-        // The builder keeps its cache in its own VM and offers no way to prune it from here.
+        // `docker builder prune` and `docker system prune` send this. The builder keeps its
+        // cache in BuildKit, in its own VM; BuildKit prunes only through its gRPC control API
+        // (`moby.buildkit.v1.Control/Prune`), for which this service has no client, and only
+        // while the builder runs. So nothing is pruned, and the answer says so: no figure is
+        // larger than what was freed.
         router.add(.POST, "/build/prune") { _, _ in try .json(PruneReport(CachesDeleted: [], SpaceReclaimed: 0)) }
     }
 

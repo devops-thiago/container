@@ -354,7 +354,9 @@ public struct DockerContainerSummary: Codable, Sendable, Equatable {
     public var HostConfig: HostConfigSummary
     public var NetworkSettings: NetworkSettingsSummary
     public var Mounts: [DockerMountPoint]
-    /// Only in `GET /system/df`: what the container's directory in the engine takes.
+    /// With `size=1`, and in `GET /system/df`: what the container wrote to its root
+    /// filesystem. Left out when it is zero, as dockerd leaves it out, or when the engine
+    /// cannot tell.
     public var SizeRw: Int64? = nil
 }
 
@@ -471,4 +473,6 @@ public struct DockerContainerInspect: Codable, Sendable, Equatable {
     public var Mounts: [DockerMountPoint]
     public var Config: DockerContainerConfigView
     public var NetworkSettings: DockerNetworkSettings
+    /// With `size=1`: what the container wrote to its root filesystem, when the engine can tell.
+    public var SizeRw: Int64? = nil
 }

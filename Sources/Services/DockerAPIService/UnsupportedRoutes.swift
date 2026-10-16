@@ -35,9 +35,6 @@ public enum UnsupportedRoutes {
             throw DockerAPIError.notImplemented(
                 "changes is not supported by SiliconShip: a container's filesystem is a disk of its own, not a layer over its image")
         }
-        router.add(.GET, "/containers/{id}/export") { _, _ in
-            throw DockerAPIError.notImplemented("export is not supported by SiliconShip: copy files out of the container with docker cp instead")
-        }
 
         // Swarm: init and join cannot succeed here; everything else is dockerd's answer on a
         // node that is in no swarm.

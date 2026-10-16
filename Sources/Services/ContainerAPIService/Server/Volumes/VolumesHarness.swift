@@ -113,4 +113,17 @@ public struct VolumesHarness: Sendable {
         reply.set(key: .volumeSize, value: size)
         return reply
     }
+
+    /// The bytes of the volume's files; the reply leaves them out when the engine cannot tell.
+    @Sendable
+    public func dataSize(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let name = message.string(key: .volumeName) else {
+            throw ContainerizationError(.invalidArgument, message: "volume name cannot be empty")
+        }
+        let reply = message.reply()
+        if let size = try await service.volumeDataSize(name: name) {
+            reply.set(key: .volumeDataSize, value: size)
+        }
+        return reply
+    }
 }

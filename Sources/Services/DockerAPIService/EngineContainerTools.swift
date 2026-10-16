@@ -51,6 +51,10 @@ public protocol EngineContainerTools: Sendable {
     /// `destination/<name of source>`. A file gets `mode`. `requester` is as
     /// `EngineContainers.create` takes it.
     func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws
+    /// Writes the container's filesystem to `archive` as an uncompressed tar: a running
+    /// container's as it is now, a stopped one's as it was left, and one never started its
+    /// image's. `archive` is in `scratchDirectory()`.
+    func export(_ container: ContainerSnapshot, to archive: URL) async throws
     /// Whether `copyIn` reaches a container between its bootstrap and its start, which is
     /// when an archive uploaded into a created container is copied in. An engine from before
     /// it did answers false, and such an upload is refused as a conflict.
@@ -59,6 +63,11 @@ public protocol EngineContainerTools: Sendable {
 
 extension EngineContainerTools {
     public func supportsCopyBeforeStart() async -> Bool { false }
+
+    /// An engine that cannot export says so.
+    public func export(_ container: ContainerSnapshot, to archive: URL) async throws {
+        throw DockerAPIError.notImplemented("the engine cannot export a container")
+    }
 }
 
 /// What a command this service ran in a container left behind.

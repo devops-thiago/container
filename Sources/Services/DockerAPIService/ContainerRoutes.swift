@@ -59,6 +59,10 @@ public protocol EngineContainers: Sendable {
     /// Sets the container's name label (`DockerLabels.name`) in the engine: the only label the
     /// engine lets change.
     func rename(_ container: ContainerSnapshot, to name: String) async throws
+    /// What the container wrote to its root filesystem, as dockerd reports `SizeRw`, or nil
+    /// when the engine cannot tell without a larger figure than dockerd's (while it runs, for
+    /// one).
+    func writableSize(_ container: ContainerSnapshot) async -> Int64?
 }
 
 extension EngineContainers {
@@ -70,6 +74,9 @@ extension EngineContainers {
     public func rename(_ container: ContainerSnapshot, to name: String) async throws {
         throw DockerAPIError.notImplemented("the engine cannot rename a container")
     }
+
+    /// An engine that cannot measure it says nothing.
+    public func writableSize(_ container: ContainerSnapshot) async -> Int64? { nil }
 }
 
 /// The container routes: list, create, inspect, the lifecycle, rename and prune, and the streams
@@ -89,7 +96,7 @@ public enum ContainerRoutes {
         router.add(.GET, "/containers/json") { request, _ in try await routes.list(request) }
         router.add(.POST, "/containers/create") { request, _ in try await routes.create(request) }
         router.add(.POST, "/containers/prune") { request, _ in try await routes.prune(request) }
-        router.add(.GET, "/containers/{id}/json") { _, parameters in try await routes.inspect(try parameters["id"]) }
+        router.add(.GET, "/containers/{id}/json") { request, parameters in try await routes.inspect(try parameters["id"], request) }
         router.add(.DELETE, "/containers/{id}") { request, parameters in try await routes.delete(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/start") { request, parameters in try await routes.start(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/stop") { request, parameters in try await routes.stop(try parameters["id"], request) }
@@ -149,15 +156,27 @@ public enum ContainerRoutes {
             return (try DockerIdentityTable.resolve(reference, in: all), all)
         }
 
+        /// `size=1` adds each container's `SizeRw`, where the engine can tell it.
         func list(_ request: DockerRequest) async throws -> DockerResponse {
             let context = try await context()
             let filter = try ContainerListFilter(filters: try request.filters(), all: try request.bool("all"), limit: try request.int("limit"), context: context)
-            return try .json(filter.apply(try await containers()).map { ContainerViewMapper.summary($0, context: context) })
+            let sized = try request.bool("size")
+            var summaries: [DockerContainerSummary] = []
+            for container in filter.apply(try await containers()) {
+                var summary = ContainerViewMapper.summary(container, context: context)
+                if sized { summary.SizeRw = ContainerViewMapper.listedSize(await engine.writableSize(container.snapshot)) }
+                summaries.append(summary)
+            }
+            return try .json(summaries)
         }
 
-        func inspect(_ reference: String) async throws -> DockerResponse {
+        /// `size=1` adds `SizeRw`, where the engine can tell it. `SizeRootFs` is not reported:
+        /// the image's unpacked size here is a disk image's, not comparable with dockerd's.
+        func inspect(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
             let (container, _) = try await find(reference)
-            return try .json(ContainerViewMapper.inspect(container, context: try await context()))
+            var inspect = ContainerViewMapper.inspect(container, context: try await context())
+            if try request.bool("size") { inspect.SizeRw = await engine.writableSize(container.snapshot) }
+            return try .json(inspect)
         }
 
         func create(_ request: DockerRequest) async throws -> DockerResponse {
@@ -369,11 +388,15 @@ public enum ContainerRoutes {
                 throw key == "until" ? DockerAPIError.badRequest("the 'until' filter is not supported") : DockerAPIError.badRequest("invalid filter '\(key)'")
             }
             var deleted: [String] = []
+            var reclaimed: Int64 = 0
             for container in try await containers() where !ContainerViewMapper.isRunning(container.snapshot) {
                 let labels = container.snapshot.configuration.labels
                 guard (filters["label"] ?? []).allSatisfy({ Self.labelMatches($0, labels) }),
                     !(filters["label!"] ?? []).contains(where: { Self.labelMatches($0, labels) })
                 else { continue }
+                // As dockerd: what each removed container wrote, measured before it goes; one
+                // the engine cannot measure adds nothing.
+                let size = await engine.writableSize(container.snapshot) ?? 0
                 do {
                     try await engine.delete(container.snapshot, force: false)
                 } catch {
@@ -382,8 +405,9 @@ public enum ContainerRoutes {
                 }
                 await removed(container)
                 deleted.append(container.dockerID)
+                reclaimed += size
             }
-            return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: 0))
+            return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: reclaimed))
         }
 
         static func labelMatches(_ condition: String, _ labels: [String: String]) -> Bool {

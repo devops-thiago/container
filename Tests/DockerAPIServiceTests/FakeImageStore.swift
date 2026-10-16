@@ -178,9 +178,12 @@ final class FakeImageStore: EngineImages, Sendable {
 /// The volume service in memory.
 final class FakeVolumes: EngineVolumes, Sendable {
     let state: Mutex<(volumes: [VolumeConfiguration], calls: [String])>
+    /// Volumes the engine cannot measure, as one a running container has mounted.
+    let unmeasured: Set<String>
 
-    init(_ volumes: [VolumeConfiguration] = []) {
+    init(_ volumes: [VolumeConfiguration] = [], unmeasured: Set<String> = []) {
         state = Mutex((volumes, []))
+        self.unmeasured = unmeasured
     }
 
     var calls: [String] { state.withLock { $0.calls } }
@@ -220,8 +223,8 @@ final class FakeVolumes: EngineVolumes, Sendable {
         }
     }
 
-    func diskUsage(_ name: String) async throws -> UInt64 {
-        1000
+    func dataSize(_ name: String) async throws -> UInt64? {
+        unmeasured.contains(name) ? nil : 1000
     }
 }
 

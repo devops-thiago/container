@@ -215,7 +215,9 @@ final class ImageRecordCache: Sendable {
         let config = try await image.blob(manifest.config.digest).flatMap { try? JSONDecoder().decode(DockerImageConfigDocument.self, from: $0) }
         return EngineImageRecord(
             reference: image.reference, target: target, id: manifest.config.digest, size: chosen.contentSize, config: config,
-            layerSizes: manifest.layers.map(\.size), manifests: manifests, manifestDigest: chosen.descriptor.digest)
+            layerSizes: manifest.layers.map(\.size), manifests: manifests, manifestDigest: chosen.descriptor.digest,
+            content: [EngineImageBlob(digest: chosen.descriptor.digest, size: chosen.descriptor.size)]
+                + ([manifest.config] + manifest.layers).map { EngineImageBlob(digest: $0.digest, size: $0.size) })
     }
 }
 

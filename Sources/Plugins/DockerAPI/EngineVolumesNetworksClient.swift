@@ -35,8 +35,8 @@ struct EngineVolumesClient: EngineVolumes {
         try await Self.translated { try await ClientVolume.delete(name: name, requiredLabels: requiredLabels) }
     }
 
-    func diskUsage(_ name: String) async throws -> UInt64 {
-        try await Self.translated { try await ClientVolume.volumeDiskUsage(name: name) }
+    func dataSize(_ name: String) async throws -> UInt64? {
+        try await Self.translated { try await ClientVolume.volumeDataSize(name: name) }
     }
 
     /// The volume service's errors arrive as its own type in process and as words over XPC.

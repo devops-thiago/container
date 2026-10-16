@@ -182,6 +182,8 @@ public enum XPCKeys: String {
     case volumes
     case volumeName
     case volumeSize
+    /// The bytes of a volume's files, as Docker reports a volume's size.
+    case volumeDataSize
     case volumeDriver
     case volumeDriverOpts
     case volumeLabels
@@ -191,6 +193,8 @@ public enum XPCKeys: String {
     /// Container statistics
     case statistics
     case containerSize
+    /// What a container wrote to its root filesystem, as Docker reports `SizeRw`.
+    case containerWritableSize
 
     /// Container list filters
     case listFilters
@@ -225,6 +229,9 @@ public enum XPCRoute: String {
     case containerUpdateLabels
     case containerStats
     case containerDiskUsage
+    /// What a container wrote to its root filesystem; the reply leaves it out when the engine
+    /// cannot tell.
+    case containerWritableSize
     case containerCopyIn
     case containerCopyOut
     case containerExport
@@ -248,6 +255,8 @@ public enum XPCRoute: String {
     case volumeInspect
 
     case volumeDiskUsage
+    /// The bytes of a volume's files; the reply leaves them out when the engine cannot tell.
+    case volumeDataSize
     case systemDiskUsage
 
     case ping

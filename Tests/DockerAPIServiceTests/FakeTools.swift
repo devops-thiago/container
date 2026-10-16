@@ -126,6 +126,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     func deleteVolume(_ name: String) async throws { try await base.deleteVolume(name) }
     func supportsRename() async -> Bool { await base.supportsRename() }
     func rename(_ container: ContainerSnapshot, to name: String) async throws { try await base.rename(container, to: name) }
+    func writableSize(_ container: ContainerSnapshot) async -> Int64? { await base.writableSize(container) }
 
     // MARK: EngineContainerTools
 
@@ -219,6 +220,28 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         guard FileManager.default.fileExists(atPath: from) else { throw DockerAPIError.internalError("copyOut: source not found '\(source)'") }
         try FileManager.default.copyItem(atPath: from, toPath: destination.path)
     }
+
+    /// What an export fails with, instead of writing the archive.
+    var exportError: (any Error)?
+    /// The archive each export was asked to write.
+    private(set) var exports: [URL] = []
+
+    /// The container's filesystem as the engine exports it: a tar of `root`.
+    func export(_ container: ContainerSnapshot, to archive: URL) async throws {
+        let failure: (any Error)? = lock.withLock {
+            exports.append(archive)
+            return exportError
+        }
+        if let failure { throw failure }
+        guard FileManager.default.createFile(atPath: archive.path, contents: Data()) else {
+            throw DockerAPIError.internalError("could not create \(archive.path)")
+        }
+        let handle = try FileHandle(forWritingTo: archive)
+        defer { try? handle.close() }
+        try await DockerTarWriter(rootStat: nil).write(root, as: ".") { try handle.write(contentsOf: Data($0.readableBytesView)) }
+    }
+
+    var exportCalls: [URL] { lock.withLock { exports } }
 
     var copyInStatusCalls: [RuntimeStatus?] { lock.withLock { copyInStatuses } }
 

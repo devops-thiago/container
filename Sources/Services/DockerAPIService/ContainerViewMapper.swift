@@ -281,6 +281,11 @@ public enum ContainerViewMapper {
             Mounts: mounts(configuration))
     }
 
+    /// `SizeRw` in a list or `GET /system/df`, which dockerd leaves out when it is zero.
+    static func listedSize(_ size: Int64?) -> Int64? {
+        size == 0 ? nil : size
+    }
+
     public static func inspect(_ container: DockerContainer, context: DockerViewContext) -> DockerContainerInspect {
         let snapshot = container.snapshot
         let configuration = snapshot.configuration

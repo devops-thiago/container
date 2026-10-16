@@ -201,6 +201,11 @@ struct EngineContainersClient: EngineContainers {
         try await Self.translated { try await ClientVolume.delete(name: name) }
     }
 
+    func writableSize(_ container: ContainerSnapshot) async -> Int64? {
+        // An engine from before it measured this has no such route: nothing is reported then.
+        (try? await ContainerClient().writableSize(id: container.id)).map { Int64(clamping: $0) }
+    }
+
     private static func incarnation(_ container: ContainerSnapshot) -> String? {
         container.incarnation.isEmpty ? nil : container.incarnation
     }

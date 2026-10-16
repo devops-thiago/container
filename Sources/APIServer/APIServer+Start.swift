@@ -521,6 +521,7 @@ extension APIServer {
             routes[XPCRoute.containerKill] = XPCServer.route(harness.kill)
             routes[XPCRoute.containerStats] = XPCServer.route(harness.stats)
             routes[XPCRoute.containerDiskUsage] = XPCServer.route(harness.diskUsage)
+            routes[XPCRoute.containerWritableSize] = XPCServer.route(harness.writableSize)
             routes[XPCRoute.containerCopyIn] = harness.copyIn(_:session:)
             routes[XPCRoute.containerCopyOut] = harness.copyOut(_:session:)
             routes[XPCRoute.containerExport] = XPCServer.route(harness.export)
@@ -607,6 +608,7 @@ extension APIServer {
             routes[XPCRoute.volumeList] = XPCServer.route(harness.list)
             routes[XPCRoute.volumeInspect] = XPCServer.route(harness.inspect)
             routes[XPCRoute.volumeDiskUsage] = XPCServer.route(harness.diskUsage)
+            routes[XPCRoute.volumeDataSize] = XPCServer.route(harness.dataSize)
 
             return service
         }

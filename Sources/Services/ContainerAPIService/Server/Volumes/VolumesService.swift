@@ -182,6 +182,18 @@ public actor VolumesService {
         return try await self._volumeDiskUsage(name)
     }
 
+    /// The bytes of the files in a volume, as dockerd reports a local volume's size (see
+    /// `VolumeDataSize`), or nil while a container has it mounted or when it cannot be read.
+    /// Unlike `volumeDiskUsage`, it reads the volume's filesystem: the disk image's own
+    /// metadata is not counted.
+    public func volumeDataSize(name: String) async throws -> UInt64? {
+        _ = try await lock.withLock { _ in try await self._inspect(name) }
+        let image = URL(fileURLWithPath: volumePath(for: name)).appendingPathComponent(Self.blockFile)
+        // A volume of many files takes a while to read: not on this actor, which every other
+        // volume request waits for.
+        return try? await Task.detached { try VolumeDataSize.measure(image: image) }.value
+    }
+
     /// Calculate disk usage for volumes
     /// - Returns: Tuple of (total count, active count, total size, reclaimable size)
     public func calculateDiskUsage() async throws -> (Int, Int, UInt64, UInt64) {

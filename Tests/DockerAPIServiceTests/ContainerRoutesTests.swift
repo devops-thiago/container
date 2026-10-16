@@ -196,6 +196,14 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
 
     func supportsRename() async -> Bool { lock.withLock { keepsNames } }
 
+    /// What each container wrote, by engine ID, as the engine measures it; one not here is
+    /// one the engine cannot measure.
+    var writableSizes: [String: Int64] = [:]
+
+    func writableSize(_ container: ContainerSnapshot) async -> Int64? {
+        lock.withLock { writableSizes[container.id] }
+    }
+
     func rename(_ container: ContainerSnapshot, to name: String) async throws {
         try lock.withLock {
             guard keepsNames else { throw DockerAPIError.notImplemented("no label route") }
