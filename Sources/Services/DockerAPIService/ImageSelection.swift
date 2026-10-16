@@ -143,8 +143,9 @@ public enum ImageDeletion {
 
     static let pruneAccepted: Set<String> = ["dangling", "label", "label!"]
 
-    /// The images `POST /images/prune` removes: the dangling ones, or with `dangling=false`
-    /// every one, that match the label filters and that no container uses, running or not.
+    /// The images `POST /images/prune` removes: the dangling ones (named by neither a tag nor
+    /// a digest, so an image pulled by digest stays), or with `dangling=false` every one, that
+    /// match the label filters and that no container uses, running or not.
     public static func pruneSelection(
         _ catalog: DockerImageCatalog, filters: [String: [String]], containers: [DockerContainer]
     ) throws(DockerAPIError) -> [DockerImage] {

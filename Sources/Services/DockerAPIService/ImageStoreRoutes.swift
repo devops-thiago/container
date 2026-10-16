@@ -207,8 +207,8 @@ extension ImageRoutes {
             }
         }
 
-        /// `Loaded image: alpine:latest` for a tag, `Loaded image ID: sha256:…` for an image
-        /// loaded without one.
+        /// `Loaded image: alpine:latest` for a reference that names the image by a tag or a
+        /// digest, `Loaded image ID: sha256:…` for an image loaded without one.
         static func loadedLines(_ loaded: DockerLoadedImages, catalog: DockerImageCatalog) -> [String] {
             var lines: [String] = []
             for reference in loaded.references {
@@ -216,7 +216,7 @@ extension ImageRoutes {
                     image.records.first { $0.reference == reference }.map { (image, $0) }
                 }.first
                 guard let (image, record) = match else { continue }
-                let line = record.isTagged ? "Loaded image: \(record.familiarReference)\n" : "Loaded image ID: \(image.id)\n"
+                let line = record.isNamed ? "Loaded image: \(record.familiarReference)\n" : "Loaded image ID: \(image.id)\n"
                 if !lines.contains(line) { lines.append(line) }
             }
             if !loaded.rejectedMembers.isEmpty {

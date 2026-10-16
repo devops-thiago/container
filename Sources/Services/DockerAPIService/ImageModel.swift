@@ -236,6 +236,13 @@ public struct EngineImageRecord: Sendable, Equatable {
     public var isTagged: Bool {
         parsed?.tag != nil
     }
+
+    /// Whether it names the image at all, by a tag or by a digest (`alpine@sha256:…`, what a
+    /// pull by digest leaves).
+    public var isNamed: Bool {
+        guard let parsed else { return false }
+        return parsed.tag != nil || parsed.digest != nil
+    }
 }
 
 /// A Docker image: the engine's references that share an ID.
@@ -275,9 +282,11 @@ public struct DockerImage: Sendable, Equatable {
             })
     }
 
-    /// No tag names it: what `dangling=true` lists and a plain prune removes.
+    /// Neither a tag nor a digest names it: what `dangling=true` lists and a plain prune
+    /// removes. An image pulled by digest is not dangling, as in Docker 29's containerd image
+    /// store, where only images it has stripped of their names (`moby-dangling@…`) are.
     public var isDangling: Bool {
-        !records.contains(where: \.isTagged)
+        !records.contains(where: \.isNamed)
     }
 
     /// The hex of the ID, without the algorithm.

@@ -31,10 +31,13 @@ struct ImageCatalogTests {
     static let alpineDigest = F.record("docker.io/library/alpine@" + F.digest("a"), id: "a", created: 1_700_000_300)
     static let redis = F.record("docker.io/library/redis:8", id: "b", created: 1_700_000_200, labels: ["tier": "cache"])
     static let ghcr = F.record("ghcr.io/org/app:1", id: "c", target: "d", created: 1_700_000_100, labels: ["tier": "web", "m229": "1"])
-    static let dangling = F.record("docker.io/library/old@" + F.digest("e"), id: "e", created: 1_700_000_000, labels: ["m229": "1"])
+    /// Pulled by digest: named, so not dangling.
+    static let pinned = F.record("docker.io/library/old@" + F.digest("e"), id: "e", created: 1_700_000_000, labels: ["m229": "1"])
+    /// Named by neither a tag nor a digest: dangling.
+    static let untagged = F.record("docker.io/library/scratch", id: "9", created: 1_699_999_000)
     static let vminit = F.record("ghcr.io/apple/containerization/vminit:0.9", id: "f", infrastructure: true)
 
-    static let catalog = DockerImageCatalog([alpine, alpineTag, mine, redis, ghcr, dangling, vminit])
+    static let catalog = DockerImageCatalog([alpine, alpineTag, mine, redis, ghcr, pinned, untagged, vminit])
 
     @Test("a reference is put in Docker's normal form and printed familiar")
     func references() throws {
@@ -61,7 +64,7 @@ struct ImageCatalogTests {
 
     @Test("references with one ID are one image, newest first, without the engine's own")
     func grouping() throws {
-        #expect(Self.catalog.images.map(\.id) == [F.digest("a"), F.digest("b"), F.digest("c"), F.digest("e")])
+        #expect(Self.catalog.images.map(\.id) == [F.digest("a"), F.digest("b"), F.digest("c"), F.digest("e"), F.digest("9")])
         let alpine = Self.catalog.images[0]
         #expect(alpine.repoTags == ["alpine:3.22", "alpine:latest", "m229-x:1"])
         #expect(alpine.repoDigests == ["alpine@" + F.digest("a"), "m229-x@" + F.digest("a")])
@@ -70,7 +73,11 @@ struct ImageCatalogTests {
         let old = Self.catalog.images[3]
         #expect(old.repoTags.isEmpty)
         #expect(old.repoDigests == ["old@" + F.digest("e")])
-        #expect(old.isDangling)
+        // A digest names it: not dangling, as in Docker 29.
+        #expect(!old.isDangling)
+        let scratch = Self.catalog.images[4]
+        #expect(scratch.repoTags.isEmpty)
+        #expect(scratch.isDangling)
         // Control: the init image is not anywhere a client can reach.
         #expect(throws: DockerAPIError.self) { try Self.catalog.resolve("ghcr.io/apple/containerization/vminit:0.9") }
         #expect(throws: DockerAPIError.self) { try Self.catalog.resolve(F.digest("f")) }
@@ -178,12 +185,13 @@ struct ImageCatalogTests {
         func ids(_ filters: [String: [String]]) throws -> [String] {
             try ImageListFilter(filters: filters, catalog: catalog).apply(catalog).map { String($0.id.suffix(1)) }
         }
-        #expect(try ids([:]) == ["a", "b", "c", "e"])
-        #expect(try ids(["dangling": ["true"]]) == ["e"])
-        #expect(try ids(["dangling": ["false"]]) == ["a", "b", "c"])
+        #expect(try ids([:]) == ["a", "b", "c", "e", "9"])
+        // The image pulled by digest is not dangling; only the one named by neither is.
+        #expect(try ids(["dangling": ["true"]]) == ["9"])
+        #expect(try ids(["dangling": ["false"]]) == ["a", "b", "c", "e"])
         #expect(try ids(["label": ["tier"]]) == ["b", "c"])
         #expect(try ids(["label": ["tier=web"]]) == ["c"])
-        #expect(try ids(["before": ["redis:8"]]) == ["c", "e"])
+        #expect(try ids(["before": ["redis:8"]]) == ["c", "e", "9"])
         #expect(try ids(["since": ["redis:8"]]) == ["a"])
         #expect(try ids(["reference": ["alpine"]]) == ["a"])
         #expect(try ids(["reference": ["ghcr.io/*/app"]]) == ["c"])
@@ -274,15 +282,16 @@ struct ImageCatalogTests {
         #expect(try ImageDeletion.plan(try single.resolve("bbbb"), force: true, containers: stopped).items.last == .deleted(F.digest("b")))
     }
 
-    @Test("a prune takes dangling images, or with dangling=false every unused one, by label, never one in use or the engine's")
+    @Test("a prune takes dangling images (not those pulled by digest), or with dangling=false every unused one, by label, never one in use or the engine's")
     func pruneSelection() throws {
         let catalog = Self.catalog
         func ids(_ filters: [String: [String]], _ containers: [DockerContainer] = []) throws -> [String] {
             try ImageDeletion.pruneSelection(catalog, filters: filters, containers: containers).map { String($0.id.suffix(1)) }
         }
-        #expect(try ids([:]) == ["e"])
-        #expect(try ids(["dangling": ["false"]]) == ["a", "b", "c", "e"])
-        #expect(try ids(["dangling": ["false"]], [container("c1", Self.alpine, .exited)]) == ["b", "c", "e"])
+        // A plain prune keeps the image pulled by digest and takes the one named by neither.
+        #expect(try ids([:]) == ["9"])
+        #expect(try ids(["dangling": ["false"]]) == ["a", "b", "c", "e", "9"])
+        #expect(try ids(["dangling": ["false"]], [container("c1", Self.alpine, .exited)]) == ["b", "c", "e", "9"])
         #expect(try ids(["dangling": ["false"], "label": ["m229=1"]]) == ["c", "e"])
         #expect(try ids(["dangling": ["false"], "label": ["m229=1"], "label!": ["tier=web"]]) == ["e"])
         // Control: an image without the label is never picked by a label filter.

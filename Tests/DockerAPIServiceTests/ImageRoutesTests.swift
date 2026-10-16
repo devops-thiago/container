@@ -71,7 +71,7 @@ struct ImageRoutesTests {
     func readRoutes() async throws {
         let routes = try ImageRoutesTests()
         let list = try #require(try await routes.call(.GET, "/images/json").json() as? [[String: Any]])
-        #expect(list.map { $0["Id"] as? String } == [F.digest("a"), F.digest("b"), F.digest("c"), F.digest("e")])
+        #expect(list.map { $0["Id"] as? String } == [F.digest("a"), F.digest("b"), F.digest("c"), F.digest("e"), F.digest("9")])
         #expect(list.allSatisfy { $0["Manifests"] == nil })
         let filtered = try #require(
             try await routes.call(.GET, "/images/json?manifests=1&filters=%7B%22reference%22%3A%5B%22redis%22%5D%7D").json() as? [[String: Any]])
@@ -145,6 +145,13 @@ struct ImageRoutesTests {
         #expect(none["ImagesDeleted"] == nil)
         #expect(!routes.images.calls.contains("gc"))
 
+        // A plain prune takes the image named by neither a tag nor a digest, and keeps the one
+        // pulled by digest.
+        let plain = try #require(try await routes.call(.POST, "/images/prune").json() as? [String: Any])
+        #expect((plain["ImagesDeleted"] as? [[String: String]])?.compactMap { $0["Deleted"] } == [F.digest("9")])
+        #expect(!routes.images.references.contains("docker.io/library/scratch"))
+        #expect(routes.images.references.contains("docker.io/library/old@" + F.digest("e")))
+
         let report = try #require(
             try await routes.call(.POST, "/images/prune?filters=%7B%22dangling%22%3A%5B%22false%22%5D%2C%22label%22%3A%5B%22m229%3D1%22%5D%7D").json()
                 as? [String: Any])
@@ -209,7 +216,8 @@ struct ImageRoutesTests {
         let identities = routes.identities
         let scratch = routes.scratch
         images.state.withLock {
-            $0.loadResult = DockerLoadedImages(references: ["docker.io/library/redis:8", "docker.io/library/old@" + F.digest("e")], rejectedMembers: ["../x"])
+            $0.loadResult = DockerLoadedImages(
+                references: ["docker.io/library/redis:8", "docker.io/library/old@" + F.digest("e"), "docker.io/library/scratch"], rejectedMembers: ["../x"])
         }
         let harness = try await DockerAPIServerTests.Harness.start(limits: .init(maxBodyBytes: 1024, spoolDirectory: scratch)) {
             ImageRoutes.register(on: &$0, engine: images, containers: engine, identities: identities, scratch: scratch, maxLoadBytes: 1 << 20)
@@ -222,7 +230,7 @@ struct ImageRoutesTests {
         let lines = String(decoding: answer.body, as: UTF8.self).split(separator: "\n").map(String.init)
         #expect(
             lines == [
-                #"{"stream":"Loaded image: redis:8\n"}"#, #"{"stream":"Loaded image ID: \#(F.digest("e"))\n"}"#,
+                #"{"stream":"Loaded image: redis:8\n"}"#, #"{"stream":"Loaded image: old@\#(F.digest("e"))\n"}"#, #"{"stream":"Loaded image ID: \#(F.digest("9"))\n"}"#,
                 #"{"stream":"Skipped archive entries with unsafe paths: ../x\n"}"#,
             ])
         #expect(images.state.withLock { $0.loaded } == [Data(archive)])
