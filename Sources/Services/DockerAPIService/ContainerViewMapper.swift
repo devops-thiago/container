@@ -18,14 +18,19 @@ import ContainerResource
 import Foundation
 
 /// What a view of a container depends on besides the container: the time it is seen at, for
-/// "Up 5 minutes", and which engine network is the one Docker calls `bridge`.
+/// "Up 5 minutes", which engine network is the one Docker calls `bridge`, and the image IDs of
+/// the engine's images by the digest of what their references name.
 public struct DockerViewContext: Sendable {
     public var now: Date
     public var builtinNetwork: String?
+    /// Image ID (the host platform's config digest) by index digest, for the containers this
+    /// service did not create: the engine records only the index they were made from.
+    public var imageIDs: [String: String]
 
-    public init(now: Date, builtinNetwork: String?) {
+    public init(now: Date, builtinNetwork: String?, imageIDs: [String: String] = [:]) {
         self.now = now
         self.builtinNetwork = builtinNetwork
+        self.imageIDs = imageIDs
     }
 }
 
@@ -128,8 +133,17 @@ public enum ContainerViewMapper {
         return reference
     }
 
+    /// The image's ID as this service recorded it at create; for another container, the
+    /// engine's index digest.
     public static func imageID(_ container: DockerContainer) -> String {
         container.extras?.imageID ?? container.snapshot.configuration.labels[DockerLabels.imageID] ?? container.snapshot.configuration.image.digest
+    }
+
+    /// The image's ID as `GET /images/json` reports it: as recorded at create, else the config
+    /// digest of the index the engine recorded, else that index's digest.
+    public static func imageID(_ container: DockerContainer, context: DockerViewContext) -> String {
+        let digest = container.snapshot.configuration.image.digest
+        return container.extras?.imageID ?? container.snapshot.configuration.labels[DockerLabels.imageID] ?? context.imageIDs[digest] ?? digest
     }
 
     /// The labels a client set, without this service's own.
@@ -250,7 +264,7 @@ public enum ContainerViewMapper {
             Id: container.dockerID,
             Names: ["/" + container.name],
             Image: image(container),
-            ImageID: imageID(container),
+            ImageID: imageID(container, context: context),
             Command: command(configuration.initProcess),
             Created: Int64(configuration.creationDate.timeIntervalSince1970),
             Ports: ports(container),
@@ -324,7 +338,7 @@ public enum ContainerViewMapper {
                             .init(Start: timestamp($0.start), End: timestamp($0.end), ExitCode: Int($0.exitCode), Output: $0.output)
                         })
                 }),
-            Image: imageID(container),
+            Image: imageID(container, context: context),
             ResolvConfPath: "",
             HostnamePath: "",
             HostsPath: "",

@@ -24,6 +24,37 @@ public protocol EngineImages: Sendable {
     /// Pulls `reference` for `platform` (the host's when nil) and unpacks it, reporting progress
     /// as it goes. A failure a client should see in words throws a `DockerAPIError`.
     func pull(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerPulledImage
+    /// Every reference the engine keeps, the engine's own images marked as such.
+    func list() async throws -> [EngineImageRecord]
+    /// Makes `target` name what the engine reference `source` names. `target` is in Docker's
+    /// normal form (`docker.io/library/alpine:latest`).
+    func tag(_ source: String, as target: String) async throws
+    /// Deletes one engine reference. The content stays until `collectGarbage`.
+    func delete(_ reference: String) async throws
+    /// Removes the content no reference needs any more, as `container image delete` does after
+    /// a delete. Returns the bytes freed.
+    func collectGarbage() async throws -> UInt64
+    /// Pushes the engine reference to its registry, for `platform` or every platform it has.
+    /// Returns what the registry now has under the tag when that is the index as kept here;
+    /// nil when only some platforms went, which the engine pushes as an index of its own.
+    func push(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor?
+    /// Writes the engine references, for `platform` (the host's when nil), as one archive at `file`.
+    func save(references: [String], platform: String?, to file: URL) async throws
+    /// Loads the archive at `file` and unpacks it for the host.
+    func load(from file: URL) async throws -> DockerLoadedImages
+}
+
+/// What a load left in place.
+public struct DockerLoadedImages: Sendable, Equatable {
+    /// The engine references the archive made.
+    public var references: [String]
+    /// Archive members that were not extracted (unsafe paths or links).
+    public var rejectedMembers: [String]
+
+    public init(references: [String], rejectedMembers: [String] = []) {
+        self.references = references
+        self.rejectedMembers = rejectedMembers
+    }
 }
 
 /// An image a pull left in place.
@@ -40,11 +71,17 @@ public struct DockerPulledImage: Sendable, Equatable {
     }
 }
 
-/// The image routes `docker run` needs: pull.
+/// The image routes: pull, and with the engine's containers at hand, everything else.
 public enum ImageRoutes {
     /// - Parameter progressInterval: the least time between two progress lines.
     public static func register(on router: inout DockerRouter, engine: some EngineImages, progressInterval: Duration = .milliseconds(100)) {
         router.add(.POST, "/images/create") { request, _ in try pull(request, engine: engine, progressInterval: progressInterval) }
+    }
+
+    static func validate(platform: String?) throws(DockerAPIError) {
+        if let platform, platform.wholeMatch(of: #/[a-z0-9_.-]+\/[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)?/#) == nil {
+            throw .badRequest("invalid platform \(platform): expected os/arch[/variant]")
+        }
     }
 
     /// `POST /images/create?fromImage=&tag=&platform=`: Docker's JSON progress stream.
@@ -61,9 +98,7 @@ public enum ImageRoutes {
         }
         let reference = try DockerPullReference(fromImage: fromImage, tag: request.query("tag"))
         let platform = request.query("platform").flatMap { $0.isEmpty ? nil : $0 }
-        if let platform, platform.wholeMatch(of: #/[a-z0-9_.-]+\/[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)?/#) == nil {
-            throw .badRequest("invalid platform \(platform): expected os/arch[/variant]")
-        }
+        try validate(platform: platform)
         // TODO(#229): X-Registry-Auth is the client's one-shot registry credential. Stage A's
         // decision (2026-10-15) passes it to the images service as a one-shot credential that is
         // neither stored nor logged; until that route takes one, it is accepted here and not

@@ -28,12 +28,15 @@ public struct DockerRequest: Sendable {
     public let query: [String: [String]]
     public let headers: HTTPHeaders
     public let body: ByteBuffer
+    /// The body, when the HTTP layer spooled it to a file instead (`DockerBodySpool`); `body` is
+    /// then empty. The file is deleted once the answer has been sent.
+    public let bodyFile: URL?
 
     public var path: String { "/" + segments.joined(separator: "/") }
 
     public init(
         method: HTTPMethod, segments: [String], apiVersion: DockerAPIVersion = .current,
-        query: [String: [String]] = [:], headers: HTTPHeaders = [:], body: ByteBuffer = ByteBuffer()
+        query: [String: [String]] = [:], headers: HTTPHeaders = [:], body: ByteBuffer = ByteBuffer(), bodyFile: URL? = nil
     ) {
         self.method = method
         self.segments = segments
@@ -41,6 +44,7 @@ public struct DockerRequest: Sendable {
         self.query = query
         self.headers = headers
         self.body = body
+        self.bodyFile = bodyFile
     }
 
     /// Splits a request target into its version, path segments and query.
@@ -49,7 +53,7 @@ public struct DockerRequest: Sendable {
     /// The query is decoded as Go's `url.ParseQuery` does, `+` included, because the Docker CLI
     /// encodes with Go. A version outside what this service implements is refused with dockerd's
     /// wording, which the CLI shows as it is.
-    public init(method: HTTPMethod, uri: String, headers: HTTPHeaders, body: ByteBuffer) throws(DockerAPIError) {
+    public init(method: HTTPMethod, uri: String, headers: HTTPHeaders, body: ByteBuffer, bodyFile: URL? = nil) throws(DockerAPIError) {
         let target = uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         var raw = target[0].split(separator: "/").map(String.init)
         var version = DockerAPIVersion.current
@@ -71,7 +75,23 @@ public struct DockerRequest: Sendable {
         }
         self.init(
             method: method, segments: segments, apiVersion: version,
-            query: target.count > 1 ? Self.parseQuery(String(target[1])) : [:], headers: headers, body: body)
+            query: target.count > 1 ? Self.parseQuery(String(target[1])) : [:], headers: headers, body: body, bodyFile: bodyFile)
+    }
+
+    /// The path segments of a request target without its version prefix, decoded, for deciding
+    /// how to read a request before it is parsed. Nil when it cannot be parsed.
+    static func routeSegments(of uri: String) -> [String]? {
+        let path = uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        var raw = path.split(separator: "/").map(String.init)
+        if let first = raw.first, first.hasPrefix("v"), DockerAPIVersion(first.dropFirst()) != nil {
+            raw.removeFirst()
+        }
+        var segments: [String] = []
+        for segment in raw {
+            guard let decoded = segment.removingPercentEncoding else { return nil }
+            segments.append(decoded)
+        }
+        return segments
     }
 
     static func parseQuery(_ text: String) -> [String: [String]] {

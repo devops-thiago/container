@@ -107,8 +107,19 @@ extension DockerAPIAgent {
             let engine = EngineContainersClient()
             let streams = DockerContainerStreams(engine: engine, log: log)
             ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
-            ImageRoutes.register(on: &router, engine: EngineImagesClient())
-            let service = DockerAPIServer(router: router, log: log)
+            // The images service reads a loaded archive and writes a saved one itself, so both
+            // live where it can reach them.
+            let scratch: URL
+            do {
+                scratch = try PathUtils.sharedTemporaryDirectory()
+            } catch {
+                log.error("no shared temporary directory", metadata: ["error": "\(error)"])
+                DockerAPIAgent.exit(withError: error)
+            }
+            ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch)
+            VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities)
+            NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities)
+            let service = DockerAPIServer(router: router, limits: DockerHTTPLimits(spool: .imageLoad(directory: scratch)), log: log)
             let uid = getuid()
 
             let server: any Channel

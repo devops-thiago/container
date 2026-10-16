@@ -14,24 +14,30 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import Logging
 import NIOCore
 import NIOHTTP1
+import NIOPosix
 
 /// Limits on what one connection may make the service hold.
 public struct DockerHTTPLimits: Sendable {
-    /// The largest request body read into memory. Larger bodies (image loads, archive uploads)
-    /// are refused with 413 until the routes that take them stream them.
+    /// The largest request body read into memory. A larger body is refused with 413, unless
+    /// `spool` writes it to a file.
     public var maxBodyBytes: Int
     /// The most header fields a request may have.
     public var maxHeaderFields: Int
     /// The most requests read ahead of the one being answered on a keep-alive connection.
     public var maxQueuedRequests: Int
+    /// The bodies written to a file as they arrive, with their own bound, instead of being
+    /// held in memory under `maxBodyBytes`.
+    public var spool: DockerBodySpool?
 
-    public init(maxBodyBytes: Int = 16 << 20, maxHeaderFields: Int = 100, maxQueuedRequests: Int = 8) {
+    public init(maxBodyBytes: Int = 16 << 20, maxHeaderFields: Int = 100, maxQueuedRequests: Int = 8, spool: DockerBodySpool? = nil) {
         self.maxBodyBytes = maxBodyBytes
         self.maxHeaderFields = maxHeaderFields
         self.maxQueuedRequests = maxQueuedRequests
+        self.spool = spool
     }
 }
 
@@ -55,8 +61,26 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     private var body = ByteBuffer()
     /// Set when the request being read broke a limit; its remaining parts are dropped.
     private var refused: DockerAPIError?
-    private var queue: [(HTTPRequestHead, Result<DockerRequest, DockerAPIError>)] = []
+    /// Requests read and not yet answered. A spooled one is ready once its file is written.
+    private var queue: [(HTTPRequestHead, EventLoopFuture<Result<DockerRequest, DockerAPIError>>)] = []
     private var answering = false
+    /// The body being written to a file, while one is.
+    private var spooling: Spooling?
+    /// Bytes handed to the file and not yet written. Reading stops past `spoolHighWater`.
+    private var spoolInFlight = 0
+    private var readingPaused = false
+    private static let spoolHighWater = 4 << 20
+    private static let spoolLowWater = 1 << 20
+    /// The spooled body of the request being answered, deleted once the answer is sent.
+    private var answeringFile: URL?
+
+    private struct Spooling {
+        let url: URL
+        let handle: NIOFileHandle
+        var written: Int64 = 0
+        /// The writes so far, in order.
+        var writes: EventLoopFuture<Void>
+    }
     /// The connection has been handed to a hijacked stream and is no longer HTTP.
     private var hijacked = false
     /// The route or stream producer running for this connection, cancelled if the client goes,
@@ -84,8 +108,15 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
             head = next
             body.clear()
             refused = next.headers.count > limits.maxHeaderFields ? DockerAPIError(.badRequest, "too many header fields") : nil
+            if refused == nil, let spool = limits.spool, let segments = DockerRequest.routeSegments(of: next.uri), spool.accepts(next.method, segments) {
+                startSpooling(spool, context: context)
+            }
         case .body(var chunk):
             guard refused == nil else { return }
+            if spooling != nil {
+                spool(chunk, context: context)
+                return
+            }
             if body.readableBytes + chunk.readableBytes > limits.maxBodyBytes {
                 refused = DockerAPIError(.payloadTooLarge, "request body is larger than \(limits.maxBodyBytes) bytes")
                 body.clear()
@@ -95,19 +126,24 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         case .end:
             guard let head else { return }
             self.head = nil
-            let request: Result<DockerRequest, DockerAPIError>
-            if let refused {
-                request = .failure(refused)
+            let request: EventLoopFuture<Result<DockerRequest, DockerAPIError>>
+            if let spooling {
+                self.spooling = nil
+                request = finishSpooling(spooling, head: head, context: context)
+            } else if let refused {
+                request = context.eventLoop.makeSucceededFuture(.failure(refused))
             } else {
                 do {
-                    request = .success(try DockerRequest(method: head.method, uri: head.uri, headers: head.headers, body: body))
+                    request = context.eventLoop.makeSucceededFuture(
+                        .success(try DockerRequest(method: head.method, uri: head.uri, headers: head.headers, body: body)))
                 } catch {
-                    request = .failure(error)
+                    request = context.eventLoop.makeSucceededFuture(.failure(error))
                 }
             }
             body = ByteBuffer()
             guard queue.count < limits.maxQueuedRequests else {
                 // A client this far ahead of its answers is not one we need to keep up with.
+                Self.removeFile(of: request)
                 context.close(promise: nil)
                 return
             }
@@ -119,19 +155,125 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     private func answerNext(context: ChannelHandlerContext) {
         guard !answering, !hijacked, !queue.isEmpty else { return }
         answering = true
-        let (head, parsed) = queue.removeFirst()
+        let (head, pending) = queue.removeFirst()
+        pending.assumeIsolated().whenSuccess { parsed in
+            self.answer(parsed, for: head, context: context)
+        }
+    }
+
+    private func answer(_ parsed: Result<DockerRequest, DockerAPIError>, for head: HTTPRequestHead, context: ChannelHandlerContext) {
         let router = self.router
         let promise = context.eventLoop.makePromise(of: DockerResponse.self)
         switch parsed {
         case .success(let request):
+            answeringFile = request.bodyFile
             let task = Task { await router.respond(to: request) }
             cancelRunning = { task.cancel() }
+            // A client that left while its body was being written is not waited for.
+            if !context.channel.isActive {
+                task.cancel()
+            }
             promise.completeWithTask { await task.value }
         case .failure(let error):
             promise.succeed(.error(error))
         }
         promise.futureResult.assumeIsolated().whenSuccess { response in
             self.send(response, for: head, context: context)
+        }
+    }
+
+    // MARK: Spooling
+
+    private func startSpooling(_ spool: DockerBodySpool, context: ChannelHandlerContext) {
+        let url = spool.directory.appending(path: "docker-api-body-\(UUID().uuidString)")
+        do {
+            let handle = try NIOFileHandle(
+                _deprecatedPath: url.path(percentEncoded: false), mode: .write, flags: .allowFileCreation(posixMode: 0o600))
+            spooling = Spooling(url: url, handle: handle, writes: context.eventLoop.makeSucceededVoidFuture())
+        } catch {
+            log.error("could not store a request body", metadata: ["error": "\(error)"])
+            refused = .internalError("could not store the request body: \(error)")
+        }
+    }
+
+    /// Queues `chunk` behind the writes before it, and stops reading while too much is queued.
+    private func spool(_ chunk: ByteBuffer, context: ChannelHandlerContext) {
+        guard var spooling, let limit = limits.spool?.maxBytes else { return }
+        let bytes = chunk.readableBytes
+        guard spooling.written + Int64(bytes) <= limit else {
+            refused = DockerAPIError(.payloadTooLarge, "request body is larger than \(limit) bytes")
+            self.spooling = nil
+            discard(spooling)
+            return
+        }
+        spooling.written += Int64(bytes)
+        spoolInFlight += bytes
+        let fileIO = DockerScratchFile.fileIO
+        let handle = spooling.handle
+        let eventLoop = context.eventLoop
+        spooling.writes = spooling.writes.flatMap { fileIO.write(fileHandle: handle, buffer: chunk, eventLoop: eventLoop) }
+        spooling.writes.assumeIsolated().whenComplete { _ in
+            self.spoolInFlight -= bytes
+            if self.readingPaused && self.spoolInFlight <= Self.spoolLowWater {
+                self.readingPaused = false
+                try? context.channel.syncOptions?.setOption(.autoRead, value: true)
+            }
+        }
+        self.spooling = spooling
+        if !readingPaused && spoolInFlight > Self.spoolHighWater {
+            readingPaused = true
+            try? context.channel.syncOptions?.setOption(.autoRead, value: false)
+        }
+    }
+
+    /// The request, once its body is all in the file.
+    private func finishSpooling(
+        _ spooling: Spooling, head: HTTPRequestHead, context: ChannelHandlerContext
+    ) -> EventLoopFuture<Result<DockerRequest, DockerAPIError>> {
+        let promise = context.eventLoop.makePromise(of: Result<DockerRequest, DockerAPIError>.self)
+        spooling.writes.assumeIsolated().whenComplete { result in
+            try? spooling.handle.close()
+            do {
+                try result.get()
+                promise.succeed(.success(try DockerRequest(method: head.method, uri: head.uri, headers: head.headers, body: ByteBuffer(), bodyFile: spooling.url)))
+            } catch let error as DockerAPIError {
+                Self.removeFile(spooling.url)
+                promise.succeed(.failure(error))
+            } catch {
+                Self.removeFile(spooling.url)
+                promise.succeed(.failure(.internalError("could not store the request body: \(error)")))
+            }
+        }
+        return promise.futureResult
+    }
+
+    /// Drops a body being spooled: its file goes once the writes queued for it are done.
+    private func discard(_ spooling: Spooling) {
+        spooling.writes.assumeIsolated().whenComplete { _ in
+            try? spooling.handle.close()
+            Self.removeFile(spooling.url)
+        }
+    }
+
+    /// Deletes a file off the event loop: an image archive can take a while to unlink.
+    private static func removeFile(_ url: URL) {
+        NIOThreadPool.singleton.submit { _ in try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// Deletes the spooled body of a request that will not be answered.
+    private static func removeFile(of request: EventLoopFuture<Result<DockerRequest, DockerAPIError>>) {
+        request.whenSuccess { parsed in
+            if case .success(let request) = parsed, let url = request.bodyFile { removeFile(url) }
+        }
+    }
+
+    /// Forgets the requests not yet answered and what they spooled, and the body being read.
+    private func dropPending() {
+        for (_, request) in queue { Self.removeFile(of: request) }
+        queue.removeAll()
+        if let spooling {
+            self.spooling = nil
+            discard(spooling)
         }
     }
 
@@ -188,6 +330,10 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     private func finished(keepAlive: Bool, context: ChannelHandlerContext) {
         answering = false
         cancelRunning = nil
+        if let answeringFile {
+            self.answeringFile = nil
+            Self.removeFile(answeringFile)
+        }
         guard keepAlive else {
             context.close(promise: nil)
             return
@@ -206,7 +352,11 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         body: @escaping @Sendable (DockerHijackedStream) async throws -> Void
     ) {
         hijacked = true
-        queue.removeAll()
+        dropPending()
+        if let answeringFile {
+            self.answeringFile = nil
+            Self.removeFile(answeringFile)
+        }
         let channel = context.channel
         let pipeline = context.pipeline.syncOperations
         do {
@@ -262,7 +412,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         if !hijacked, let event = event as? ChannelEvent, event == .inputClosed {
             cancelRunning?()
             cancelRunning = nil
-            queue.removeAll()
+            dropPending()
             context.close(promise: nil)
             return
         }
@@ -272,7 +422,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     func channelInactive(context: ChannelHandlerContext) {
         cancelRunning?()
         cancelRunning = nil
-        queue.removeAll()
+        dropPending()
         context.fireChannelInactive()
     }
 
