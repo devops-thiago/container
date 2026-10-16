@@ -163,18 +163,19 @@ public actor DockerContainerProcesses {
     }
 }
 
-/// The state the stream routes share: attaches waiting for a start, waits, and the processes
-/// this service started.
+/// The state the stream routes share: attaches waiting for a start, waits, the processes
+/// this service started, and the execs clients created.
 public struct DockerContainerStreams: Sendable {
     public let attaches: DockerAttachStore
     public let waits: DockerWaitStore
     public let processes: DockerContainerProcesses
+    public let execs: DockerExecStore
 
     /// - Parameter drain: how long an output pipe may stay quiet without reaching EOF after its
     ///   process exited before it is no longer read.
     public init(
         engine: some EngineContainers, attachLimits: DockerAttachLimits = .init(), waitLimits: DockerWaitLimits = .init(),
-        drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService")
+        execLimits: DockerExecLimits = .init(), drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService")
     ) {
         let attaches = DockerAttachStore(limits: attachLimits)
         let waits = DockerWaitStore(limits: waitLimits) { engineID in
@@ -183,11 +184,18 @@ public struct DockerContainerStreams: Sendable {
         self.attaches = attaches
         self.waits = waits
         self.processes = DockerContainerProcesses(engine: engine, attaches: attaches, waits: waits, drain: drain, log: log)
+        self.execs = DockerExecStore(limits: execLimits)
+        self.drain = drain
     }
 
-    /// Lets go of everything waiting: attaches end, waits end with no answer.
+    /// How long an output pipe may stay quiet without reaching EOF after its process exited.
+    let drain: Duration
+
+    /// Lets go of everything waiting: attaches end, waits end with no answer, execs not running
+    /// are forgotten.
     public func shutdown() async {
         await attaches.shutdown()
         await waits.shutdown()
+        await execs.shutdown()
     }
 }
