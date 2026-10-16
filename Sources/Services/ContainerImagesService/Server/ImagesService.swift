@@ -97,9 +97,12 @@ public actor ImagesService {
         return try await imageStore.list().map { $0.description.fromCZ }
     }
 
-    public func pull(reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?, maxConcurrentDownloads: Int = 3) async throws
-        -> ImageDescription
-    {
+    /// Pulls `reference`. With `credential`, the pull signs in with it and with nothing else;
+    /// it is neither kept nor logged.
+    public func pull(
+        reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?, maxConcurrentDownloads: Int = 3,
+        credential: RegistryCredential? = nil
+    ) async throws -> ImageDescription {
         // A change to what the image list shows, counted however it ends.
         defer { StateGeneration.shared.advance() }
         self.log.debug(
@@ -123,7 +126,7 @@ public actor ImagesService {
             )
         }
 
-        let img = try await Self.withAuthentication(ref: reference) { auth in
+        let img = try await self.withAuthentication(ref: reference, credential: credential) { auth in
             let progress = ContainerizationProgressAdapter.handler(from: progressUpdate)
             if insecure, let auth {
                 return try await self.pullOverExplicitHTTP(
@@ -208,6 +211,43 @@ public actor ImagesService {
         log.info("registry login kept", metadata: ["server": "\(server)"])
     }
 
+    /// Check a credential against the registry and keep nothing: `docker login` through the
+    /// Docker Engine API, whose client keeps the credential itself and sends it with each pull
+    /// and push.
+    ///
+    /// The same check `login` makes, under the same deadline, without its bookkeeping: it
+    /// begins no sign-in, so a `login` for the same host that is still checking keeps what it
+    /// checked.
+    public func checkLogin(server: String, credential: RegistryCredential, scheme: String) async throws -> RegistryLoginCheck {
+        let target = try Self.loginTarget(server: server, scheme: scheme)
+        let authentication = BasicAuthentication(username: credential.username, password: credential.password)
+        let registry = self.registry
+        do {
+            try await RegistryLoginLedger.checking(server, within: registry.deadline) {
+                try await registry.check(target, authentication)
+            }
+        } catch {
+            guard let status = Self.rejectionStatus(error) else { throw error }
+            return .rejected(status: status)
+        }
+        return .accepted
+    }
+
+    /// The HTTP status a registry refused a credential with: 401 or 403 outright, or a token
+    /// server that answered it with a challenge of its own, which a pull reads the same way.
+    /// Nil for any other failure.
+    static func rejectionStatus(_ error: any Error) -> Int? {
+        guard let error = error as? RegistryClient.Error else { return nil }
+        switch error {
+        case .invalidStatus(_, let status, _) where status == .unauthorized || status == .forbidden:
+            return Int(status.code)
+        case .insecureCredentialExchange:
+            return 401
+        default:
+            return nil
+        }
+    }
+
     /// Forget the login kept for `server`, as `container registry logout` does.
     public func logout(server: String) throws {
         let host = Reference.resolveDomain(domain: server)
@@ -274,7 +314,11 @@ public actor ImagesService {
         }
     }
 
-    public func push(reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?) async throws {
+    /// Pushes `reference`. With `credential`, the push signs in with it and with nothing else;
+    /// it is neither kept nor logged.
+    public func push(
+        reference: String, platform: Platform?, insecure: Bool, progressUpdate: ProgressUpdateHandler?, credential: RegistryCredential? = nil
+    ) async throws {
         self.log.debug(
             "ImagesService: enter",
             metadata: [
@@ -295,7 +339,7 @@ public actor ImagesService {
             )
         }
 
-        try await Self.withAuthentication(ref: reference) { auth in
+        try await self.withAuthentication(ref: reference, credential: credential) { auth in
             try await self.imageStore.push(
                 reference: reference, platform: platform, insecure: insecure, auth: auth, progress: ContainerizationProgressAdapter.handler(from: progressUpdate))
         }
@@ -596,38 +640,49 @@ extension ImagesService {
 // MARK: Static Methods
 
 extension ImagesService {
-    private static func withAuthentication<T>(
-        ref: String, _ body: @Sendable @escaping (_ auth: Authentication?) async throws -> T?
+    /// Where the login a pull or push uses comes from.
+    enum AuthenticationSource: Equatable {
+        /// The credential sent with the request.
+        case request
+        /// What the engine keeps: the environment's, then the keychain's.
+        case kept
+        case none
+    }
+
+    /// The login for `host`: the credential sent with the request when there is one, and only
+    /// then what the engine keeps, which is not looked up at all otherwise.
+    static func authentication(
+        host: String, credential: RegistryCredential?, lookup: (String) throws -> (any Authentication)?
+    ) throws -> ((any Authentication)?, AuthenticationSource) {
+        if let credential {
+            return (BasicAuthentication(username: credential.username, password: credential.password), .request)
+        }
+        if let kept = try lookup(host) {
+            return (kept, .kept)
+        }
+        return (nil, .none)
+    }
+
+    private nonisolated func withAuthentication<T>(
+        ref: String, credential: RegistryCredential?, _ body: @Sendable @escaping (_ auth: Authentication?) async throws -> T?
     ) async throws -> T? {
-        var authentication: Authentication?
         let ref = try Reference.parse(ref)
         guard let host = ref.resolvedDomain else {
             throw ContainerizationError(.invalidArgument, message: "no host specified in image reference: \(ref)")
         }
-        authentication = Self.authenticationFromEnv(host: host)
-        if let authentication {
-            return try await body(authentication)
-        }
-        let keychain = KeychainHelper(securityDomain: Constants.keychainID)
-        do {
-            authentication = try keychain.lookup(hostname: host)
-        } catch let err as KeychainHelper.Error {
-            guard case .keyNotFound = err else {
-                throw ContainerizationError(.internalError, message: "error querying keychain for \(host)", cause: err)
-            }
-        }
+        let (authentication, source) = try Self.authentication(host: host, credential: credential, lookup: registry.lookup)
+        // What the request brought is named as such, so its refusal is not read as the
+        // engine's saved login going bad.
+        let rejected = source == .request ? "registry \(host) rejected the credential sent with the request" : "registry \(host) rejected the saved login"
         do {
             return try await body(authentication)
         } catch let err as RegistryClient.Error {
-            // The token server answered the saved login with its own challenge and the client
+            // The token server answered the login with its own challenge and the client
             // will not go further — the credential is what is wrong, and only the caller can
             // fix that. Name the host so an embedder can ask for that registry's login again;
             // the raw text talks about an insecure exchange and reads like a network fault.
             if case .insecureCredentialExchange = err, authentication != nil {
-                throw ContainerizationError(
-                    .invalidState,
-                    message: "registry \(host) rejected the saved login",
-                    cause: err)
+                throw ContainerizationError(.invalidState, message: rejected, cause: err)
             }
             guard case .invalidStatus(_, let status, _) = err else {
                 throw err
@@ -638,25 +693,11 @@ extension ImagesService {
             guard authentication != nil else {
                 throw ContainerizationError(.internalError, message: "\(String(describing: err)), no credentials found for host \(host)")
             }
-            // A registry that answers the saved login with 401 or 403 outright — basic auth,
+            // A registry that answers the login with 401 or 403 outright — basic auth,
             // no token server — has rejected it just as surely as one whose token server
             // did. Same message, so the embedder's sign-in offer covers both.
-            throw ContainerizationError(
-                .invalidState,
-                message: "registry \(host) rejected the saved login",
-                cause: err)
+            throw ContainerizationError(.invalidState, message: rejected, cause: err)
         }
-    }
-
-    private static func authenticationFromEnv(host: String) -> Authentication? {
-        let env = ProcessInfo.processInfo.environment
-        guard env["CONTAINER_REGISTRY_HOST"] == host else {
-            return nil
-        }
-        guard let user = env["CONTAINER_REGISTRY_USER"], let password = env["CONTAINER_REGISTRY_TOKEN"] else {
-            return nil
-        }
-        return BasicAuthentication(username: user, password: password)
     }
 }
 

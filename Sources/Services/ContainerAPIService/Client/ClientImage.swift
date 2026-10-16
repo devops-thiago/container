@@ -146,6 +146,28 @@ extension ClientImage {
         _ = try await client.send(request, responseTimeout: .seconds(90))
     }
 
+    /// Check a credential against a registry and keep nothing, through the images service.
+    /// `scheme` is http or https, used exactly as given. A refusal is an answer; an error is
+    /// a registry that could not be asked.
+    ///
+    /// The wait is a little longer than the images service's own deadline for the check. A
+    /// helper that predates this route drops the request, which fails at once as an
+    /// interrupted connection.
+    public static func checkLogin(server: String, credential: RegistryCredential, scheme: String) async throws -> RegistryLoginCheck {
+        let client = newXPCClient()
+        let reply = try await client.send(try checkLoginRequest(server: server, credential: credential, scheme: scheme), responseTimeout: .seconds(75))
+        let status = Int(reply.int64(key: .registryCheckStatus))
+        return status == 200 ? .accepted : .rejected(status: status)
+    }
+
+    static func checkLoginRequest(server: String, credential: RegistryCredential, scheme: String) throws -> XPCMessage {
+        let request = newRequest(.registryCheck)
+        request.set(key: .registryServer, value: server)
+        request.set(key: .registryScheme, value: scheme)
+        try request.set(credential: credential)
+        return request
+    }
+
     /// Forget the login kept for a registry, through the images service.
     public static func logout(server: String) async throws {
         let client = newXPCClient()
@@ -310,19 +332,43 @@ extension ClientImage {
         })
     }
 
+    /// Pulls `reference`. With `credential`, the images service signs in to the registry with
+    /// it, for this pull only, instead of with a login it keeps; it keeps nothing.
     public static func pull(
         reference: String,
         platform: Platform? = nil,
         scheme: RequestScheme = .https,
         containerSystemConfig: ContainerSystemConfig,
         progressUpdate: ProgressUpdateHandler? = nil,
-        maxConcurrentDownloads: Int = 3
+        maxConcurrentDownloads: Int = 3,
+        credential: RegistryCredential? = nil
     ) async throws -> ClientImage {
+        let client = newXPCClient()
+        let request = try pullRequest(
+            reference: reference, platform: platform, scheme: scheme, containerSystemConfig: containerSystemConfig,
+            maxConcurrentDownloads: maxConcurrentDownloads, credential: credential)
+
+        var progressUpdateClient: ProgressUpdateClient?
+        if let progressUpdate {
+            progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
+        }
+
+        let response = try await client.send(request)
+        let description = try response.imageDescription()
+        let image = ClientImage(description: description)
+
+        await progressUpdateClient?.finish()
+        return image
+    }
+
+    static func pullRequest(
+        reference: String, platform: Platform?, scheme: RequestScheme, containerSystemConfig: ContainerSystemConfig, maxConcurrentDownloads: Int,
+        credential: RegistryCredential?
+    ) throws -> XPCMessage {
         guard maxConcurrentDownloads > 0 else {
             throw ContainerizationError(.invalidArgument, message: "maximum number of concurrent downloads must be greater than 0, got \(maxConcurrentDownloads)")
         }
 
-        let client = newXPCClient()
         let request = newRequest(.imagePull)
 
         let reference = try self.normalizeReference(reference, containerSystemConfig: containerSystemConfig)
@@ -336,18 +382,8 @@ extension ClientImage {
         let insecure = try scheme.schemeFor(host: host, internalDnsDomain: containerSystemConfig.dns.domain) == .http
         request.set(key: .insecureFlag, value: insecure)
         request.set(key: .maxConcurrentDownloads, value: Int64(maxConcurrentDownloads))
-
-        var progressUpdateClient: ProgressUpdateClient?
-        if let progressUpdate {
-            progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
-        }
-
-        let response = try await client.send(request)
-        let description = try response.imageDescription()
-        let image = ClientImage(description: description)
-
-        await progressUpdateClient?.finish()
-        return image
+        try request.set(credential: credential)
+        return request
     }
 
     /// Returns the runnable platforms of an image without pulling layers.
@@ -479,8 +515,26 @@ extension ClientImage {
 // MARK: Instance methods
 
 extension ClientImage {
-    public func push(platform: Platform? = nil, scheme: RequestScheme, containerSystemConfig: ContainerSystemConfig, progressUpdate: ProgressUpdateHandler?) async throws {
+    /// Pushes the image. With `credential`, the images service signs in to the registry with
+    /// it, for this push only, instead of with a login it keeps; it keeps nothing.
+    public func push(
+        platform: Platform? = nil, scheme: RequestScheme, containerSystemConfig: ContainerSystemConfig, progressUpdate: ProgressUpdateHandler?,
+        credential: RegistryCredential? = nil
+    ) async throws {
         let client = Self.newXPCClient()
+        let request = try pushRequest(platform: platform, scheme: scheme, containerSystemConfig: containerSystemConfig, credential: credential)
+
+        var progressUpdateClient: ProgressUpdateClient?
+        if let progressUpdate {
+            progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
+        }
+        _ = try await client.send(request)
+        await progressUpdateClient?.finish()
+    }
+
+    func pushRequest(platform: Platform?, scheme: RequestScheme, containerSystemConfig: ContainerSystemConfig, credential: RegistryCredential?) throws
+        -> XPCMessage
+    {
         let request = Self.newRequest(.imagePush)
 
         guard let host = try Reference.parse(reference).domain else {
@@ -492,13 +546,8 @@ extension ClientImage {
         request.set(key: .insecureFlag, value: insecure)
 
         try request.set(platform: platform)
-
-        var progressUpdateClient: ProgressUpdateClient?
-        if let progressUpdate {
-            progressUpdateClient = await ProgressUpdateClient(for: progressUpdate, request: request)
-        }
-        _ = try await client.send(request)
-        await progressUpdateClient?.finish()
+        try request.set(credential: credential)
+        return request
     }
 
     @discardableResult

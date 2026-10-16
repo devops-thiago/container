@@ -40,6 +40,8 @@ public struct DockerVolume: Encodable, Sendable, Equatable {
     public var Labels: [String: String]
     public var Scope: String
     public var Options: [String: String]
+    /// Only in `GET /system/df`.
+    public var UsageData: DockerVolumeUsage? = nil
 }
 
 public struct DockerVolumeList: Encodable, Sendable, Equatable {
@@ -193,10 +195,12 @@ public enum VolumeMapper {
 /// `GET /volumes`, `POST /volumes/create`, `GET /volumes/{name}`, `DELETE /volumes/{name}` and
 /// `POST /volumes/prune`.
 public enum VolumeRoutes {
+    /// - Parameter events: where creates and removals are reported; nil reports nothing.
     public static func register(
-        on router: inout DockerRouter, engine: some EngineVolumes, containers: some EngineContainers, identities: DockerIdentityStore
+        on router: inout DockerRouter, engine: some EngineVolumes, containers: some EngineContainers, identities: DockerIdentityStore,
+        events: DockerEventBus? = nil
     ) {
-        let routes = Routes(engine: engine, containers: containers, identities: identities)
+        let routes = Routes(engine: engine, containers: containers, identities: identities, events: events)
         router.add(.GET, "/volumes") { request, _ in try await routes.list(request) }
         router.add(.POST, "/volumes/create") { request, _ in try await routes.create(request) }
         router.add(.POST, "/volumes/prune") { request, _ in try await routes.prune(request) }
@@ -208,6 +212,12 @@ public enum VolumeRoutes {
         let engine: Engine
         let containers: Containers
         let identities: DockerIdentityStore
+        let events: DockerEventBus?
+
+        /// A volume event as dockerd reports one: by name, with its driver.
+        func report(_ action: String, _ name: String) async {
+            await events?.publish(type: "volume", action: action, actorID: name, attributes: ["driver": "local"])
+        }
 
         func users() async throws -> [String: [String]] {
             VolumeMapper.users(await identities.join(try await containers.list()))
@@ -243,6 +253,7 @@ public enum VolumeRoutes {
                 guard let existing = try await find(name) else { throw error }
                 volume = existing
             }
+            await report("create", volume.name)
             return try .json(VolumeMapper.volume(volume), status: .created)
         }
 
@@ -258,6 +269,7 @@ public enum VolumeRoutes {
                 throw DockerAPIError.conflict("remove \(name): volume is in use - [\(users.joined(separator: ", "))]")
             }
             try await engine.delete(name, requiredLabels: nil)
+            await report("destroy", name)
             return .empty()
         }
 
@@ -279,6 +291,7 @@ public enum VolumeRoutes {
                 }
                 deleted.append(volume.name)
                 reclaimed += size
+                await report("destroy", volume.name)
             }
             return try .json(DockerVolumePruneReport(VolumesDeleted: deleted, SpaceReclaimed: reclaimed))
         }
