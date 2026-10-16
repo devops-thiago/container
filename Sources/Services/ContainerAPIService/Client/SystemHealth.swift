@@ -92,6 +92,29 @@ public struct SystemHealth: Sendable, Codable {
         self.stateGeneration = stateGeneration
         self.capabilities = capabilities
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case appRoot, installRoot, logRoot, apiServerVersion, apiServerCommit, apiServerBuild, apiServerAppName
+        case lifecycleProtocolVersion, lifecycleGeneration, processNonce, stateGeneration, capabilities
+    }
+
+    /// A health snapshot written before capabilities were reported decodes with none, as the
+    /// other fields added since decode as absent.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.appRoot = try container.decode(URL.self, forKey: .appRoot)
+        self.installRoot = try container.decode(URL.self, forKey: .installRoot)
+        self.logRoot = try container.decodeIfPresent(FilePath.self, forKey: .logRoot)
+        self.apiServerVersion = try container.decode(String.self, forKey: .apiServerVersion)
+        self.apiServerCommit = try container.decode(String.self, forKey: .apiServerCommit)
+        self.apiServerBuild = try container.decode(String.self, forKey: .apiServerBuild)
+        self.apiServerAppName = try container.decode(String.self, forKey: .apiServerAppName)
+        self.lifecycleProtocolVersion = try container.decodeIfPresent(UInt64.self, forKey: .lifecycleProtocolVersion)
+        self.lifecycleGeneration = try container.decodeIfPresent(String.self, forKey: .lifecycleGeneration)
+        self.processNonce = try container.decodeIfPresent(String.self, forKey: .processNonce)
+        self.stateGeneration = try container.decodeIfPresent(UInt64.self, forKey: .stateGeneration)
+        self.capabilities = try container.decodeIfPresent(Set<String>.self, forKey: .capabilities) ?? []
+    }
 }
 
 /// What an API server can do that an older one cannot. A client checks before it uses a
