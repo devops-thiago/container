@@ -44,9 +44,14 @@ struct ContainerIdentityTests {
         #expect(joined[1].name == "my-app")
         // The labelled one gets a record back; the foreign one needs none.
         #expect(table.records.keys.sorted() == ["abc123def456"])
-        // Control: a label whose ID does not start with the engine ID is not believed.
+        // Control: a label whose ID does not start with the engine ID is not believed. Its name
+        // label is the engine's name for it, as for any container renamed in the engine.
         var forged = Fixtures.configuration(id: "other")
         forged.labels = [DockerLabels.id: Fixtures.id("abc123def456"), DockerLabels.name: "web"]
+        let joinedForged = table.join([Fixtures.snapshot(forged)])[0]
+        #expect(joinedForged.dockerID == DockerIdentityTable.foreignID(engineID: "other"))
+        #expect(joinedForged.name == "web")
+        forged.labels = [DockerLabels.id: Fixtures.id("abc123def456")]
         #expect(table.join([Fixtures.snapshot(forged)])[0].name == "other")
     }
 
@@ -178,5 +183,48 @@ struct ContainerIdentityTests {
         let saves = persistence.saves
         await store.forget(engineID: "unknown")
         #expect(persistence.saves == saves)
+    }
+
+    @Test("the name is the label's: a rename in the engine wins over the record, which only caches it")
+    func labelIsTheName() {
+        var table = DockerIdentityTable(records: [
+            DockerContainerRecord(engineID: "abc123def456", incarnation: "inc-1", dockerID: Fixtures.id("abc123def456"), name: "web", localRename: false)
+        ])
+        // Renamed in the engine, by this service or by another client of it.
+        let renamed = Fixtures.dockerContainer(name: "front", dockerID: Fixtures.id("abc123def456"))
+        #expect(table.join([renamed])[0].name == "front")
+        #expect(table.records["abc123def456"]?.name == "front")
+        // A container the engine renamed that this service never made.
+        var foreign = Fixtures.configuration(id: "my-app")
+        foreign.labels = [DockerLabels.name: "legacy"]
+        #expect(table.join([Fixtures.snapshot(foreign)])[0].name == "legacy")
+    }
+
+    @Test("a rename the engine could not keep wins over the label until it has it; one from before names lived in the engine is one too")
+    func localRenames() async {
+        let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
+        for record in [
+            DockerContainerRecord(engineID: "abc123def456", incarnation: "inc-1", dockerID: Fixtures.id("abc123def456"), name: "front", localRename: true),
+            // Written by #229, which had no flag: the name differs from the label's.
+            DockerContainerRecord(engineID: "abc123def456", incarnation: "inc-1", dockerID: Fixtures.id("abc123def456"), name: "front"),
+        ] {
+            var table = DockerIdentityTable(records: [record])
+            #expect(table.join([web])[0].name == "front")
+            #expect(table.records["abc123def456"]?.localRename == true)
+        }
+        // Control: a #229 record with the label's name is no rename.
+        var table = DockerIdentityTable(records: [
+            DockerContainerRecord(engineID: "abc123def456", incarnation: "inc-1", dockerID: Fixtures.id("abc123def456"), name: "web")
+        ])
+        #expect(table.join([web])[0].name == "web")
+        #expect(table.records["abc123def456"]?.localRename == false)
+
+        let store = DockerIdentityStore(persistence: nil)
+        _ = await store.join([web])
+        let all = await store.join([web])
+        try? await store.rename(all[0], to: "front", among: all)
+        #expect(await store.localRenames([web]).map(\.1) == ["front"])
+        await store.renamedInEngine(all[0], to: "front")
+        #expect(await store.localRenames([web]).isEmpty)
     }
 }

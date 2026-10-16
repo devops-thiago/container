@@ -56,6 +56,15 @@ public struct SystemHealth: Sendable, Codable {
     /// `processNonce`. Absent for API servers that do not count.
     public let stateGeneration: UInt64?
 
+    /// What this API server can do that an older one cannot (`APIServerCapability`); empty for
+    /// API servers that do not say.
+    public let capabilities: Set<String>
+
+    /// Whether this API server has `capability`.
+    public func supports(_ capability: APIServerCapability) -> Bool {
+        capabilities.contains(capability.rawValue)
+    }
+
     public init(
         appRoot: URL,
         installRoot: URL,
@@ -67,7 +76,8 @@ public struct SystemHealth: Sendable, Codable {
         lifecycleProtocolVersion: UInt64? = nil,
         lifecycleGeneration: String? = nil,
         processNonce: String? = nil,
-        stateGeneration: UInt64? = nil
+        stateGeneration: UInt64? = nil,
+        capabilities: Set<String> = []
     ) {
         self.appRoot = appRoot
         self.installRoot = installRoot
@@ -80,5 +90,24 @@ public struct SystemHealth: Sendable, Codable {
         self.lifecycleGeneration = lifecycleGeneration
         self.processNonce = processNonce
         self.stateGeneration = stateGeneration
+        self.capabilities = capabilities
+    }
+}
+
+/// What an API server can do that an older one cannot. A client checks before it uses a
+/// route, rather than sending a request an older server would not answer.
+public enum APIServerCapability: String, Sendable, CaseIterable {
+    /// `XPCRoute.containerEvent`: a subscription to container events.
+    case containerEvents
+    /// `XPCRoute.containerUpdateLabels`: setting the labels the server allows to change.
+    case containerLabels
+
+    /// As the health check carries them.
+    public static func encode(_ capabilities: [APIServerCapability]) -> String {
+        capabilities.map(\.rawValue).joined(separator: ",")
+    }
+
+    public static func decode(_ text: String?) -> Set<String> {
+        Set((text ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty })
     }
 }

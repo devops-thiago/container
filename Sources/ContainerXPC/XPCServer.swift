@@ -247,6 +247,15 @@ public struct XPCServer: Sendable {
                 }
                 xpc_connection_send_message(connection, reply.underlying)
             }
+        } else {
+            // A client newer than this server asks for a route it does not have. Without an
+            // answer it would wait out its whole timeout, or for ever without one.
+            log.warning("request for an unknown route", metadata: ["route": "\(route)"])
+            Self.replyWithError(
+                connection: connection,
+                object: object,
+                err: ContainerizationError(.unsupported, message: "unsupported route \(route)")
+            )
         }
     }
 

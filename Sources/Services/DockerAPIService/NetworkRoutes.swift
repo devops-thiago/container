@@ -515,13 +515,22 @@ public enum NetworkRoutes {
             func plan(_ configuration: ContainerConfiguration) -> DockerCreatePlan {
                 DockerCreatePlan(configuration: configuration, autoRemove: extras.autoRemove, volumes: [], extras: extras, warnings: [])
             }
-            try await containers.delete(container.snapshot, force: false)
+            // The same container to a client: the engine's destroy and create are not said.
+            await events?.recreating(container)
+            do {
+                try await containers.delete(container.snapshot, force: false)
+            } catch {
+                await events?.recreateEnded(container.engineID)
+                throw error
+            }
             let incarnation: String
             do {
                 incarnation = try await containers.create(plan(changed), requester: requester)
             } catch {
                 if let restored = try? await containers.create(plan(original), requester: requester) {
                     await identities.recreated(container, incarnation: restored)
+                } else {
+                    await events?.recreateEnded(container.engineID)
                 }
                 throw error
             }

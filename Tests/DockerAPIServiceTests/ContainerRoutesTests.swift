@@ -186,6 +186,30 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
     func deleteVolume(_ name: String) async throws {
         record("volume rm \(name)")
     }
+
+    /// Whether this engine keeps names, as one with the label route does.
+    var keepsNames = false
+    /// Names another client of the engine took after this service last listed.
+    var takenInEngine: Set<String> = []
+    /// Every label a rename set, as `"<id> <key>=<value>"`.
+    private(set) var labelsSet: [String] = []
+
+    func supportsRename() async -> Bool { lock.withLock { keepsNames } }
+
+    func rename(_ container: ContainerSnapshot, to name: String) async throws {
+        try lock.withLock {
+            guard keepsNames else { throw DockerAPIError.notImplemented("no label route") }
+            // As the engine does: a name another container holds is refused, and so is one
+            // taken since the caller looked.
+            if takenInEngine.contains(name) || snapshots.contains(where: { $0.id != container.id && DockerIdentityTable.engineName($0) == name }) {
+                throw DockerAPIError.conflict("the name \(name) is already in use")
+            }
+            labelsSet.append("\(container.id) \(DockerLabels.name)=\(name)")
+            if let index = snapshots.firstIndex(where: { $0.id == container.id }) {
+                snapshots[index].configuration.labels[DockerLabels.name] = name
+            }
+        }
+    }
 }
 
 @Suite(.timeLimit(.minutes(1)))

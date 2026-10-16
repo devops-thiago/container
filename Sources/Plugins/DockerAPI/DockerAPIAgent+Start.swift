@@ -105,9 +105,13 @@ extension DockerAPIAgent {
                 DockerAPIAgent.exit(withError: error)
             }
             let engine = EngineContainersClient()
-            // Stage A's events: what this service does, as it does it, and the engine's
-            // containers read once a second while anyone streams `/events`.
-            let events = DockerEventBus(log: log, source: { await identities.join(try await engine.list()) })
+            // The engine's container events while anyone streams `/events`; for an engine
+            // without them, what this service does as it does it, and the engine's containers
+            // read once a second.
+            let events = DockerEventBus(log: log, source: { await identities.join(try await engine.list()) }, feed: EngineEventFeedClient())
+            // Names renamed here while the engine could not keep them go to the engine, now that
+            // it can, so that every client of it reads them.
+            Task { await ContainerRoutes.moveLocalRenamesToEngine(engine: engine, identities: identities, log: log) }
             EventRoutes.register(on: &router, events: events)
             let streams = DockerContainerStreams(engine: engine, log: log, events: events)
             ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams, events: events)

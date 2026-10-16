@@ -70,6 +70,7 @@ public actor HealthCheckHarness {
             reply.set(key: .processNonce, value: processNonce)
         }
         reply.set(key: .stateGeneration, value: StateGeneration.shared.current)
+        reply.set(key: .apiServerCapabilities, value: APIServerCapability.encode(APIServerCapability.allCases))
         if let lifecycleGeneration {
             reply.set(key: .lifecycleProtocolVersion, value: SystemHealth.currentLifecycleProtocolVersion)
             reply.set(key: .lifecycleGeneration, value: lifecycleGeneration)
