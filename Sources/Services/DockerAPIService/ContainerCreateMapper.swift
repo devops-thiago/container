@@ -229,6 +229,8 @@ public enum ContainerCreateMapper {
         configuration.stopSignal = nonEmpty(config.StopSignal) ?? nonEmpty(image.stopSignal)
 
         warnings += ignored(host)
+        warnings += DockerEndpointIPAMConfig.ignoredAddressWarnings(
+            (body.networkingConfig.EndpointsConfig ?? [:]).sorted(by: { $0.key < $1.key }).map { $0.value?.IPAMConfig })
 
         let extras = DockerContainerExtras(
             image: imageReference,
@@ -499,7 +501,8 @@ public enum ContainerCreateMapper {
 
     /// The default network unless the mode names another, then every other network the client
     /// listed. On a network of its own, a container also answers to its name, as on Docker's
-    /// user-defined networks.
+    /// user-defined networks. An address asked for (`docker run --ip`) is not given: the
+    /// network assigns one, and `create` warns that it was ignored.
     static func attachments(
         networkMode: String?, endpoints: [String: DockerEndpointSettings?], engineID: String, name: String, defaults: DockerCreateDefaults
     ) throws(DockerAPIError) -> [AttachmentConfiguration] {
