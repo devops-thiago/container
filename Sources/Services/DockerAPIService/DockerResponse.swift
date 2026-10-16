@@ -24,8 +24,10 @@ public enum DockerResponse: Sendable {
     case data(status: HTTPResponseStatus, contentType: String, body: ByteBuffer, headers: HTTPHeaders = [:])
     /// A response whose body is written as it is produced: `wait`, followed logs, stats, events,
     /// pull progress. Its head is sent and flushed before `body` runs, because a client may be
-    /// waiting on the head alone: the CLI holds `start` until `wait`'s headers arrive.
-    case stream(status: HTTPResponseStatus, contentType: String, body: @Sendable (DockerResponseWriter) async throws -> Void)
+    /// waiting on the head alone: the CLI holds `start` until `wait`'s headers arrive. `headers`
+    /// go out with the head: an archive's path stat travels there.
+    case stream(
+        status: HTTPResponseStatus, contentType: String, headers: HTTPHeaders = [:], body: @Sendable (DockerResponseWriter) async throws -> Void)
     /// `101 UPGRADED`, after which the connection carries a process's stdio for `attach` and
     /// exec `start`. `multiplexed` is Docker's 8-byte-framed stream (no tty); otherwise raw.
     case hijack(multiplexed: Bool, body: @Sendable (DockerHijackedStream) async throws -> Void)
