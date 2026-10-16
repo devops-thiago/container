@@ -121,7 +121,7 @@ struct DockerAPIServerTests {
     struct FakeEngine: EngineSystem {
         func summary() async throws -> EngineSummary {
             EngineSummary(
-                engineVersion: "1.6.0", engineCommit: "abc123", kernelVersion: "6.12.28", operatingSystem: "SiliconShip",
+                engineVersion: "1.1.0-252-g2b1a137", engineCommit: "abc123", kernelVersion: "6.12.28", operatingSystem: "SiliconShip",
                 architecture: "aarch64", cpus: 8, memoryBytes: 8 << 30, containers: 3, containersRunning: 1,
                 containersStopped: 2, images: 5, name: "test-engine", rootDirectory: "/tmp/engine")
         }
@@ -153,7 +153,18 @@ struct DockerAPIServerTests {
             let version = try await client.readToEnd()
             #expect(version.contains(#""ApiVersion":"1.48""#))
             #expect(version.contains(#""MinAPIVersion":"1.44""#))
-            #expect(version.contains(#""Version":"1.6.0""#))
+            let body = try #require(version.range(of: "\r\n\r\n").map { String(version[$0.upperBound...]) })
+            let json = try #require(try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+            // The server's Version is the Docker release of the API served, which clients
+            // compare with Docker's: Testcontainers refuses one below 1.6.0. The engine's own
+            // version, 1.x, stays on its component.
+            #expect(json["Version"] as? String == "28.0.0")
+            let components = try #require(json["Components"] as? [[String: Any]])
+            // dockerd's Engine component at the server's version, and the engine's own after it.
+            #expect(components.map { $0["Name"] as? String } == ["Engine", "SiliconShip Engine"])
+            #expect(components.map { $0["Version"] as? String } == ["28.0.0", "1.1.0-252-g2b1a137"])
+            #expect((components[1]["Details"] as? [String: String])?["GitCommit"] == "abc123")
+            #expect((json["Platform"] as? [String: Any])?["Name"] as? String == "SiliconShip")
         }
         try await harness.withClient { second in
             try await second.send("GET /v1.44/info HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
@@ -161,6 +172,9 @@ struct DockerAPIServerTests {
             #expect(info.contains(#""NCPU":8"#))
             #expect(info.contains(#""ContainersRunning":1"#))
             #expect(info.contains(#""OSType":"linux""#))
+            // The same server version as /version's, as dockerd reports both.
+            #expect(info.contains(#""ServerVersion":"28.0.0""#))
+            #expect(!info.contains("1.1.0-252"))
         }
     }
 
@@ -264,6 +278,38 @@ struct DockerAPIServerTests {
             // Control: bytes sent after the upgrade arrive the same way.
             try await client.send("late")
             #expect(try await client.read(through: "]") == "[late]")
+        }
+    }
+
+    @Test("a stream route asked without Upgrade answers 200 and ends the body by closing, as dockerd does; with Upgrade, 101")
+    func hijackWithoutUpgrade() async throws {
+        let harness = try await Harness.start {
+            $0.add(.POST, "/exec/{id}/start") { _, _ in
+                .hijack(multiplexed: true) { stream in
+                    try await stream.write(ByteBuffer(string: "o"), stream: .stdout)
+                    stream.finishWriting()
+                }
+            }
+        }
+        defer { Task { try? await harness.stop() } }
+        let body = #"{"Detach":false,"Tty":false}"#
+        try await harness.withClient { client in
+            // docker-java's exec start without stdin: no Upgrade header.
+            try await client.send(
+                "POST /exec/e1/start HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+            let head = try await client.read(through: "\r\n\r\n")
+            #expect(head.hasPrefix("HTTP/1.1 200 OK\r\n"))
+            #expect(head.contains("Content-Type: application/vnd.docker.multiplexed-stream"))
+            #expect(!head.lowercased().contains("content-length") && !head.lowercased().contains("transfer-encoding"))
+            #expect(Array(try await client.readToEnd().utf8) == [1, 0, 0, 0, 0, 0, 0, 1, UInt8(ascii: "o")])
+        }
+        // Control: the same request asking to upgrade is upgraded.
+        try await harness.withClient { client in
+            try await client.send(
+                "POST /exec/e1/start HTTP/1.1\r\nHost: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+            )
+            #expect(try await client.read(through: "\r\n\r\n").hasPrefix("HTTP/1.1 101 UPGRADED\r\n"))
+            #expect(Array(try await client.readToEnd().utf8) == [1, 0, 0, 0, 0, 0, 0, 1, UInt8(ascii: "o")])
         }
     }
 

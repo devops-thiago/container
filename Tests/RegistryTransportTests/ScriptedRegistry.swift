@@ -63,7 +63,9 @@ final class ScriptedRegistry: Sendable {
     /// Runs `body` against a registry that answers with `reply`, and stops it after. The
     /// stop is awaited, not waited for: the shutdown's callback comes by way of the global
     /// queue, and a test thread of Swift's cooperative pool held at a semaphore for it is
-    /// one the pool cannot use for anything else, the callback included.
+    /// one the pool cannot use for anything else, the callback included. A test that only
+    /// checks what happened inside `body` has no use for its result.
+    @discardableResult
     static func serving<T>(_ reply: Reply, _ body: (ScriptedRegistry) async throws -> T) async throws -> T {
         let registry = try ScriptedRegistry(reply)
         let result: T

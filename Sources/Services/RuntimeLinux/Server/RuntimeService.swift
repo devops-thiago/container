@@ -867,6 +867,28 @@ public actor RuntimeService {
             defer { access?.stopAccessingSecurityScopedResource() }
 
             let ctr = try getContainer()
+            if self.state == .booted {
+                // Created, not started: containerization's copyIn takes only a started
+                // container, so the copy goes to the root filesystem through the agent itself.
+                let rootfs = PublishedSocketMounts.guestRootfs(containerID: ctr.container.id)
+                try await ctr.container.withVirtualMachineInstance { vm in
+                    let agent = try await vm.dialAgent()
+                    do {
+                        guard let vminitd = agent as? Vminitd else {
+                            throw ContainerizationError(.unsupported, message: "the VM's agent cannot copy into a container before it starts")
+                        }
+                        try await PrestartCopy.copyIn(
+                            from: URL(fileURLWithPath: source), to: destination, mode: mode, createParents: createParents, rootfs: rootfs,
+                            agent: VminitdCopyAgent(agent: vminitd, vm: vm))
+                    } catch {
+                        try? await agent.close()
+                        throw error
+                    }
+                    try await agent.close()
+                }
+                self.log.info("copied into the container before its start", metadata: ["destination": "\(destination)"])
+                return message.reply()
+            }
             try await ctr.container.copyIn(
                 from: URL(fileURLWithPath: source),
                 to: URL(fileURLWithPath: destination),

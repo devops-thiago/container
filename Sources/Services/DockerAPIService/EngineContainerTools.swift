@@ -51,6 +51,14 @@ public protocol EngineContainerTools: Sendable {
     /// `destination/<name of source>`. A file gets `mode`. `requester` is as
     /// `EngineContainers.create` takes it.
     func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws
+    /// Whether `copyIn` reaches a container between its bootstrap and its start, which is
+    /// when an archive uploaded into a created container is copied in. An engine from before
+    /// it did answers false, and such an upload is refused as a conflict.
+    func supportsCopyBeforeStart() async -> Bool
+}
+
+extension EngineContainerTools {
+    public func supportsCopyBeforeStart() async -> Bool { false }
 }
 
 /// What a command this service ran in a container left behind.

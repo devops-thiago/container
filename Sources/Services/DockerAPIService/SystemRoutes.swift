@@ -84,6 +84,9 @@ public enum SystemRoutes {
     }
 
     struct VersionBody: Encodable {
+        /// The component that carries the engine's own version.
+        static let engineComponent = "SiliconShip Engine"
+
         struct PlatformBody: Encodable { let Name: String }
         struct ComponentBody: Encodable {
             let Name: String
@@ -103,17 +106,22 @@ public enum SystemRoutes {
 
         init(_ engine: EngineSummary) {
             Platform = PlatformBody(Name: "SiliconShip")
+            // `Engine` is dockerd's component, at the server's Version as dockerd has it; the
+            // engine's own version is a component of its own, which Docker clients list as
+            // they list containerd's.
             Components = [
                 ComponentBody(
-                    Name: "Engine", Version: engine.engineVersion,
+                    Name: "Engine", Version: DockerAPIVersion.dockerRelease,
                     Details: [
                         "ApiVersion": DockerAPIVersion.current.description,
                         "MinAPIVersion": DockerAPIVersion.minimum.description,
                         "GitCommit": engine.engineCommit,
                         "Os": "linux", "Arch": engine.architecture, "KernelVersion": engine.kernelVersion,
-                    ])
+                    ]),
+                ComponentBody(Name: Self.engineComponent, Version: engine.engineVersion, Details: ["GitCommit": engine.engineCommit]),
             ]
-            Version = engine.engineVersion
+            // The engine's own version is the component's, and `Platform` names it.
+            Version = DockerAPIVersion.dockerRelease
             ApiVersion = DockerAPIVersion.current.description
             MinAPIVersion = DockerAPIVersion.minimum.description
             GitCommit = engine.engineCommit
@@ -160,7 +168,8 @@ public enum SystemRoutes {
             NCPU = engine.cpus
             MemTotal = engine.memoryBytes
             Name = engine.name
-            ServerVersion = engine.engineVersion
+            // As dockerd's: the same as `/version`'s Version.
+            ServerVersion = DockerAPIVersion.dockerRelease
             KernelVersion = engine.kernelVersion
             DockerRootDir = engine.rootDirectory
             Labels = []

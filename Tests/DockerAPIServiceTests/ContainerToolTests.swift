@@ -189,6 +189,59 @@ struct LogRouteTests {
         #expect(h.tools.getCount == gone)
     }
 
+    @Test("an attach to a running container without stdin follows its output from the log, as docker-java asks it, until it stops")
+    func attachToRunningOutput() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try h.tools.appendLog("before\n")
+        try await h.server.withClient { client in
+            // docker-java's attach with no stdin: no Upgrade header, every flag as true.
+            try await client.send(
+                "POST /v1.48/containers/box/attach?logs=false&stdout=true&stderr=true&stream=true HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n"
+            )
+            let head = try await client.read(through: "\r\n\r\n")
+            #expect(head.hasPrefix("HTTP/1.1 200 OK"))
+            #expect(head.contains("application/vnd.docker.multiplexed-stream"))
+            try h.tools.appendLog("after\n")
+            try await Task.sleep(for: .milliseconds(100))
+            h.tools.base.update(String(ToolHarness.boxID.prefix(12))) { $0.status = .stopped }
+            let framed = Array(try await ToolHarness.readAll(client))
+            // From the attach on, framed as stdout; then the end, once the container stopped.
+            #expect(framed == [1, 0, 0, 0, 0, 0, 0, 6] + Array("after\n".utf8))
+        }
+    }
+
+    @Test("an attach to a running container replays its log with logs=1, and with stream=0 ends after it")
+    func attachReplaysLog() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try h.tools.appendLog("one\ntwo\n")
+        let past = try await h.request("POST", "/containers/term/attach?logs=1&stdout=1&stream=0")
+        #expect(past.status == 200)
+        // A terminal's output is raw.
+        #expect(past.text == "one\ntwo\n")
+        // Control: without logs, nothing of the past.
+        #expect(try await h.request("POST", "/containers/term/attach?stdout=1&stream=0").text == "")
+        // A container that never ran has no past to replay, and no log to ask for.
+        h.tools.base.update(String(ToolHarness.stoppedID.prefix(12))) {
+            $0.startedDate = nil
+            $0.exitCode = nil
+            $0.exitedAt = nil
+        }
+        let created = try await h.request("POST", "/containers/off/attach?logs=1&stdout=1&stream=0")
+        #expect(created.status == 200)
+        #expect(created.text == "")
+    }
+
+    @Test("an attach to a running container that asks for stdin is still refused, and says how to attach to its output")
+    func attachToRunningWithStdin() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        let refused = try await h.request("POST", "/containers/box/attach?stream=1&stdin=1&stdout=1")
+        #expect(refused.status == 409)
+        #expect((try refused.json()["message"] as? String)?.contains("attach to its output alone") == true)
+    }
+
     @Test("without follow, the answer ends at what was there, however much is written after")
     func noFollowEnds() async throws {
         let h = try await ToolHarness.start()
