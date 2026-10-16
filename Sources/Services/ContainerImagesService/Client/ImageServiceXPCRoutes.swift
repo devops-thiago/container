@@ -29,6 +29,10 @@ public enum ImagesServiceXPCRoute: String {
     case registryLogin
     /// Forget the keychain's login for a registry.
     case registryLogout
+    /// Check a registry credential and keep nothing. A route of its own, not a flag on
+    /// `registryLogin`: a helper that predates it drops the request, which its client sees
+    /// at once as an interrupted connection, where one that ignored a flag would keep it.
+    case registryCheck
     case imageBuild
     case imageDelete
     case imageSave

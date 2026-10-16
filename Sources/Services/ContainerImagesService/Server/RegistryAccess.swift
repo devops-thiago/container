@@ -17,6 +17,7 @@
 import ContainerAPIClient
 import ContainerImagesServiceClient
 import Containerization
+import ContainerizationError
 import ContainerizationExtras
 import ContainerizationOCI
 import ContainerizationOS
@@ -34,6 +35,9 @@ struct RegistryAccess: Sendable {
     var keep: @Sendable (_ host: String, _ username: String, _ password: String) throws -> Void
     /// Forget the login kept for `host`.
     var forget: @Sendable (_ host: String) throws -> Void
+    /// The login the engine keeps for `host`, for a pull or push that brought none of its own:
+    /// the environment's, then the keychain's. Nil when there is none.
+    var lookup: @Sendable (_ host: String) throws -> (any Authentication)? = { _ in nil }
     /// How long a check may take before it is cancelled and reported as a timeout.
     var deadline: Duration = RegistryLoginLedger.deadline
 
@@ -65,5 +69,30 @@ struct RegistryAccess: Sendable {
         },
         forget: { host in
             try KeychainHelper(securityDomain: Constants.keychainID).delete(hostname: host)
+        },
+        lookup: { host in
+            if let authentication = authenticationFromEnvironment(host: host, ProcessInfo.processInfo.environment) {
+                return authentication
+            }
+            do {
+                return try KeychainHelper(securityDomain: Constants.keychainID).lookup(hostname: host)
+            } catch let error as KeychainHelper.Error {
+                guard case .keyNotFound = error else {
+                    throw ContainerizationError(.internalError, message: "error querying keychain for \(host)", cause: error)
+                }
+                return nil
+            }
         })
+
+    /// `CONTAINER_REGISTRY_USER` and `CONTAINER_REGISTRY_TOKEN`, for the host
+    /// `CONTAINER_REGISTRY_HOST` names.
+    static func authenticationFromEnvironment(host: String, _ environment: [String: String]) -> (any Authentication)? {
+        guard environment["CONTAINER_REGISTRY_HOST"] == host else {
+            return nil
+        }
+        guard let user = environment["CONTAINER_REGISTRY_USER"], let password = environment["CONTAINER_REGISTRY_TOKEN"] else {
+            return nil
+        }
+        return BasicAuthentication(username: user, password: password)
+    }
 }

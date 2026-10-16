@@ -23,7 +23,12 @@ import Synchronization
 public protocol EngineImages: Sendable {
     /// Pulls `reference` for `platform` (the host's when nil) and unpacks it, reporting progress
     /// as it goes. A failure a client should see in words throws a `DockerAPIError`.
-    func pull(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerPulledImage
+    ///
+    /// With `credential`, the registry is signed in to with it, for this pull only, instead of
+    /// with a login the engine keeps.
+    func pull(
+        reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void
+    ) async throws -> DockerPulledImage
     /// Every reference the engine keeps, the engine's own images marked as such.
     func list() async throws -> [EngineImageRecord]
     /// Makes `target` name what the engine reference `source` names. `target` is in Docker's
@@ -37,7 +42,11 @@ public protocol EngineImages: Sendable {
     /// Pushes the engine reference to its registry, for `platform` or every platform it has.
     /// Returns what the registry now has under the tag when that is the index as kept here;
     /// nil when only some platforms went, which the engine pushes as an index of its own.
-    func push(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor?
+    ///
+    /// With `credential`, the registry is signed in to with it, for this push only.
+    func push(
+        reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void
+    ) async throws -> DockerDescriptor?
     /// Writes the engine references, for `platform` (the host's when nil), as one archive at `file`.
     func save(references: [String], platform: String?, to file: URL) async throws
     /// Loads the archive at `file` and unpacks it for the host.
@@ -73,9 +82,13 @@ public struct DockerPulledImage: Sendable, Equatable {
 
 /// The image routes: pull, and with the engine's containers at hand, everything else.
 public enum ImageRoutes {
-    /// - Parameter progressInterval: the least time between two progress lines.
-    public static func register(on router: inout DockerRouter, engine: some EngineImages, progressInterval: Duration = .milliseconds(100)) {
-        router.add(.POST, "/images/create") { request, _ in try pull(request, engine: engine, progressInterval: progressInterval) }
+    /// - Parameters:
+    ///   - progressInterval: the least time between two progress lines.
+    ///   - events: where a pull is reported once it is done; nil reports nothing.
+    public static func register(
+        on router: inout DockerRouter, engine: some EngineImages, progressInterval: Duration = .milliseconds(100), events: DockerEventBus? = nil
+    ) {
+        router.add(.POST, "/images/create") { request, _ in try pull(request, engine: engine, progressInterval: progressInterval, events: events) }
     }
 
     static func validate(platform: String?) throws(DockerAPIError) {
@@ -89,7 +102,9 @@ public enum ImageRoutes {
     /// Everything that can be refused is refused before the head, as a status the CLI shows.
     /// After the head, a failure is the stream's last line, `{"errorDetail":…,"error":…}`,
     /// which is how the CLI expects a failed pull.
-    static func pull(_ request: DockerRequest, engine: some EngineImages, progressInterval: Duration) throws(DockerAPIError) -> DockerResponse {
+    static func pull(
+        _ request: DockerRequest, engine: some EngineImages, progressInterval: Duration, events: DockerEventBus? = nil
+    ) throws(DockerAPIError) -> DockerResponse {
         if let source = request.query("fromSrc"), !source.isEmpty {
             throw .notImplemented("importing an image is not supported by SiliconShip: load an image archive with docker load instead")
         }
@@ -99,11 +114,9 @@ public enum ImageRoutes {
         let reference = try DockerPullReference(fromImage: fromImage, tag: request.query("tag"))
         let platform = request.query("platform").flatMap { $0.isEmpty ? nil : $0 }
         try validate(platform: platform)
-        // TODO(#229): X-Registry-Auth is the client's one-shot registry credential. Stage A's
-        // decision (2026-10-15) passes it to the images service as a one-shot credential that is
-        // neither stored nor logged; until that route takes one, it is accepted here and not
-        // used, and pulls use the logins the engine keeps. It must never be logged.
-        _ = request.headers["X-Registry-Auth"]
+        // The client's credential for this pull, passed to the images service for it alone:
+        // neither kept nor logged. Without one, the engine's own logins are used.
+        let credential = DockerRegistryAuth.credential(header: request.headers.first(name: DockerRegistryAuth.header))
 
         return .stream(status: .ok, contentType: "application/json") { writer in
             let id =
@@ -117,7 +130,7 @@ public enum ImageRoutes {
             let state = Mutex(DockerPullProgress())
             let pulling = Task {
                 defer { continuation.finish() }
-                return try await engine.pull(reference: reference.reference, platform: platform) { events in
+                return try await engine.pull(reference: reference.reference, platform: platform, credential: credential) { events in
                     let progress = state.withLock { progress in
                         progress.apply(events)
                         return progress
@@ -144,6 +157,8 @@ public enum ImageRoutes {
                 try await writer.writeJSON(DockerProgressMessage.failure((error as? DockerAPIError)?.message ?? "\(error)"))
                 return
             }
+            // As dockerd reports a pull: by the reference as the client knows it.
+            await events?.publish(type: "image", action: "pull", actorID: reference.familiar, attributes: ["name": DockerEventFilter.stripTag(reference.familiar)])
             try await writer.writeJSON(DockerProgressMessage(status: "Pull complete", id: id))
             try await writer.writeJSON(DockerProgressMessage(status: "Digest: \(result.digest)"))
             let status = result.updated ? "Downloaded newer image for" : "Image is up to date for"

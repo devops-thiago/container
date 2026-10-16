@@ -36,7 +36,9 @@ final class FakeImages: EngineImages, Sendable {
         }
     }
 
-    func pull(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerPulledImage {
+    func pull(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+        -> DockerPulledImage
+    {
         let (events, failure, updated) = state.withLock { state in
             state.pulls.append("\(reference) \(platform ?? "-")")
             return (state.events, state.failure, state.updated)

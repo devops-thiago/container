@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Logging
 import NIOCore
 import NIOHTTP1
 import NIOPosix
@@ -32,11 +33,12 @@ struct DockerAPIServerTests {
         let path: String
 
         static func start(
-            limits: DockerHTTPLimits = .init(), allowedUID: uid_t? = nil, routes: (inout DockerRouter) -> Void
+            limits: DockerHTTPLimits = .init(), allowedUID: uid_t? = nil, log: Logger = Logger(label: "DockerAPIService"),
+            routes: (inout DockerRouter) -> Void
         ) async throws -> Harness {
-            var router = DockerRouter()
+            var router = DockerRouter(log: log)
             routes(&router)
-            let service = DockerAPIServer(router: router, limits: limits)
+            let service = DockerAPIServer(router: router, limits: limits, log: log)
             // Short: a unix socket path has to fit in 104 bytes.
             let path = "/tmp/dapi-\(UUID().uuidString.prefix(8)).sock"
             let server = try await DockerAPIServer.configure(ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton))
