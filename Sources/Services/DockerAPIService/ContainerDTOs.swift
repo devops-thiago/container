@@ -354,6 +354,8 @@ public struct DockerContainerSummary: Codable, Sendable, Equatable {
     public var HostConfig: HostConfigSummary
     public var NetworkSettings: NetworkSettingsSummary
     public var Mounts: [DockerMountPoint]
+    /// Only in `GET /system/df`: what the container's directory in the engine takes.
+    public var SizeRw: Int64? = nil
 }
 
 /// `State.Health`.

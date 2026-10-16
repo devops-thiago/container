@@ -42,3 +42,15 @@ struct EngineSystemClient: EngineSystem {
             rootDirectory: health.appRoot.path(percentEncoded: false))
     }
 }
+
+/// What `GET /system/df` reads beyond the image, container and volume lists: the images
+/// service's size on disk and each container's directory, as `container system df` reads them.
+struct EngineDiskUsageClient: EngineDiskUsage {
+    func layersSize() async throws -> Int64 {
+        Int64(clamping: try await ClientImage.calculateDiskUsage(activeReferences: []).totalSize)
+    }
+
+    func containerSize(_ engineID: String) async throws -> Int64? {
+        Int64(clamping: try await ContainerClient().diskUsage(id: engineID))
+    }
+}

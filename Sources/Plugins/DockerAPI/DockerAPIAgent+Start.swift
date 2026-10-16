@@ -124,6 +124,10 @@ extension DockerAPIAgent {
             ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch, events: events)
             AuthRoutes.register(on: &router, engine: EngineRegistryLoginClient())
             VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities, events: events)
+            DiskUsageRoutes.register(
+                on: &router, disk: EngineDiskUsageClient(), images: EngineImagesClient(), containers: engine, volumes: EngineVolumesClient(),
+                identities: identities)
+            UnsupportedRoutes.register(on: &router)
             NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities, events: events)
             let service = DockerAPIServer(router: router, limits: DockerHTTPLimits(spoolDirectory: scratch), log: log)
             let uid = getuid()

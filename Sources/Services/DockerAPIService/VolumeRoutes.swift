@@ -40,6 +40,8 @@ public struct DockerVolume: Encodable, Sendable, Equatable {
     public var Labels: [String: String]
     public var Scope: String
     public var Options: [String: String]
+    /// Only in `GET /system/df`.
+    public var UsageData: DockerVolumeUsage? = nil
 }
 
 public struct DockerVolumeList: Encodable, Sendable, Equatable {
