@@ -376,6 +376,25 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    /// A subscription to container events: the read end of a pipe the service writes each
+    /// event to as one JSON line, with where the stream starts and whether a reconnecting
+    /// subscriber missed events it cannot have replayed.
+    @Sendable
+    public func events(_ message: XPCMessage) async throws -> XPCMessage {
+        var since: ContainerEventCursor?
+        if let nonce = message.string(key: .processNonce), let sequence = message.uint64IfPresent(key: .eventsSince) {
+            since = ContainerEventCursor(processNonce: nonce, sequence: sequence)
+        }
+        let subscription = try service.events.subscribe(since: since)
+        let reply = message.reply()
+        // Passes the descriptor on and closes this process's copy of it.
+        reply.set(key: .fd, value: subscription.handle)
+        reply.set(key: .processNonce, value: subscription.processNonce)
+        reply.set(key: .eventsCursor, value: subscription.cursor)
+        reply.set(key: .eventsGap, value: subscription.gap)
+        return reply
+    }
+
     @Sendable
     public func copyIn(_ message: XPCMessage, peerPID: pid_t = 0) async throws -> XPCMessage {
         guard let id = message.string(key: .id) else {

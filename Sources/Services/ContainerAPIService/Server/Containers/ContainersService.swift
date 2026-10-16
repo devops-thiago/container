@@ -109,6 +109,13 @@ public actor ContainersService {
     private static let incarnationFilename = "incarnation"
 
     private let lock: AsyncLock
+    /// The typed history of what happened to the containers, written where each change is made
+    /// (#230): what a client follows, rather than working changes out from two listings. The
+    /// state generation below only says that something changed, so that a listing is taken
+    /// again; an event says what, and one is written even for a change no listing shows.
+    public nonisolated let events: ContainerEventHub
+    /// How the service reaches what lies outside it; tests replace parts.
+    private let hooks: Hooks
     /// Every write is counted: a container made, removed, started, stopped, exited, restarted
     /// or whose health changed is what a client's listing would show differently.
     private var containers: [String: ContainerState] {
@@ -127,13 +134,52 @@ public actor ContainersService {
     /// rewrite waits for it, so a wedged guest must not hold that up for long.
     private static let peerHostsResponseTimeout: Duration = .seconds(5)
 
+    /// What the service does outside itself that a test cannot let it: register runtime
+    /// helpers with launchd and connect to them, and read the init image. nil is the real one.
+    struct Hooks: Sendable {
+        /// Registers the runtime helper for a container and connects to it.
+        var launchRuntime: (@Sendable (_ plugin: Plugin, _ configuration: ContainerConfiguration, _ path: URL) async throws -> RuntimeClient)?
+        /// Removes a runtime helper's launchd registration, by its label.
+        var deregister: (@Sendable (_ label: String) throws -> Void)?
+        /// The init filesystem a new container boots from.
+        var initFilesystem: (@Sendable (_ platform: Platform, _ image: String?) async throws -> Filesystem)?
+
+        init(
+            launchRuntime: (@Sendable (Plugin, ContainerConfiguration, URL) async throws -> RuntimeClient)? = nil,
+            deregister: (@Sendable (String) throws -> Void)? = nil,
+            initFilesystem: (@Sendable (Platform, String?) async throws -> Filesystem)? = nil
+        ) {
+            self.launchRuntime = launchRuntime
+            self.deregister = deregister
+            self.initFilesystem = initFilesystem
+        }
+    }
+
+    /// - Parameter events: where the service writes its container events; one of its own, for
+    ///   a random process nonce, when nil.
     public init(
         appRoot: URL,
         pluginLoader: PluginLoader,
         containerSystemConfig: ContainerSystemConfig,
         log: Logger,
         debugHelpers: Bool = false,
-        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        events: ContainerEventHub? = nil
+    ) throws {
+        try self.init(
+            appRoot: appRoot, pluginLoader: pluginLoader, containerSystemConfig: containerSystemConfig, log: log, debugHelpers: debugHelpers,
+            restartDelay: restartDelay, events: events, hooks: Hooks())
+    }
+
+    init(
+        appRoot: URL,
+        pluginLoader: PluginLoader,
+        containerSystemConfig: ContainerSystemConfig,
+        log: Logger,
+        debugHelpers: Bool = false,
+        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        events: ContainerEventHub? = nil,
+        hooks: Hooks
     ) throws {
         let containerRoot = appRoot.appendingPathComponent("containers")
         try FileManager.default.createDirectory(at: containerRoot, withIntermediateDirectories: true)
@@ -145,6 +191,8 @@ public actor ContainersService {
         self.log = log
         self.debugHelpers = debugHelpers
         self.restartDelay = restartDelay
+        self.events = events ?? ContainerEventHub(processNonce: UUID().uuidString, log: log)
+        self.hooks = hooks
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.hostDirectoryAccess = HostDirectoryAccess(log: log)
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
@@ -456,7 +504,12 @@ public actor ContainersService {
                     "id": "\(configuration.id)"
                 ]
             )
-            let initFilesystem = try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
+            let initFilesystem =
+                if let initFilesystem = self.hooks.initFilesystem {
+                    try await initFilesystem(systemPlatform.ociPlatform(), initImage)
+                } else {
+                    try await self.getInitBlock(for: systemPlatform.ociPlatform(), imageRef: initImage)
+                }
 
             // The address is the container's from here to its delete (and its name its peers'
             // to resolve), so a subnet with none left fails the create, not a later start.
@@ -517,6 +570,7 @@ public actor ContainersService {
                     // A new container, whatever had this name before: its exit is not this one's.
                     await self.forgetExit(of: configuration.id)
                     await self.setContainerState(configuration.id, ContainerState(snapshot: snapshot), context: context)
+                    await self.emit(.create, snapshot)
                     return incarnation
                 }
             } catch {
@@ -673,19 +727,25 @@ public actor ContainersService {
         }
 
         do {
-            try Self.registerService(
-                plugin: self.runtimePlugins.first { $0.name == config.runtimeHandler }!,
-                loader: self.pluginLoader,
-                configuration: config,
-                path: path,
-                debug: self.debugHelpers
-            )
+            let plugin = self.runtimePlugins.first { $0.name == config.runtimeHandler }!
+            let runtimeClient: RuntimeClient
+            if let launchRuntime = self.hooks.launchRuntime {
+                runtimeClient = try await launchRuntime(plugin, config, path)
+            } else {
+                try Self.registerService(
+                    plugin: plugin,
+                    loader: self.pluginLoader,
+                    configuration: config,
+                    path: path,
+                    debug: self.debugHelpers
+                )
 
-            let runtime = state.snapshot.configuration.runtimeHandler
-            // RuntimeClient.create resolves a brokered endpoint when the
-            // instance was spawned (sandboxed embedding), else dials the
-            // instance's mach service as upstream does.
-            let runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
+                let runtime = state.snapshot.configuration.runtimeHandler
+                // RuntimeClient.create resolves a brokered endpoint when the
+                // instance was spawned (sandboxed embedding), else dials the
+                // instance's mach service as upstream does.
+                runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
+            }
             try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
 
             let incarnation = state.snapshot.incarnation
@@ -720,7 +780,7 @@ public actor ContainersService {
 
             await self.exitMonitor.stopTracking(id: id)
             if let label {
-                try? ServiceManager.deregister(fullServiceLabel: label)
+                try? self.deregister(label)
             }
             throw error
         }
@@ -840,6 +900,7 @@ public actor ContainersService {
             let firstStart = !state.restartRecord.hasBeenStarted
             state.restartRecord.hasBeenStarted = true
             await self.setContainerState(id, state, context: context)
+            self.emit(.start, state.snapshot)
             if firstStart {
                 await self.persistRestartRecord(state.restartRecord, for: id)
             }
@@ -885,6 +946,9 @@ public actor ContainersService {
         }
         let client = try state.getClient()
         try await client.kill(processID, signal: signal)
+        if processID == id {
+            self.emit(.kill, state.snapshot, attributes: ["signal": signal])
+        }
 
         // SIGKILL is guaranteed to terminate the target. When directed at the
         // container's init process, follow up with the same API-server cleanup
@@ -892,8 +956,11 @@ public actor ContainersService {
         // stopping a replacement that reused the ID, and the captured run one from ending
         // a restart of this one.
         if processID == id, (try? Signal(signal)) == .kill, let run = state.run {
+            // How it ended, for its `die` and for a wait that comes after: the process is gone
+            // or about to be, and the helper keeps its exit once it has it.
+            let code = await Self.exitAfterEnd(of: id, client: client)
             try await handleContainerExit(
-                id: id, expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
+                id: id, code: code, expectedIncarnation: state.snapshot.incarnation, expectedRun: run)
             await self.settlePeerHosts()
         }
     }
@@ -1005,6 +1072,7 @@ public actor ContainersService {
             resolvedOptions.signal = stopSignal
         }
 
+        self.emit(.kill, state.snapshot, attributes: ["signal": resolvedOptions.signal ?? "SIGTERM"])
         do {
             try await client.stop(options: resolvedOptions, responseTimeout: responseTimeout)
         } catch let err as ContainerizationError {
@@ -1012,16 +1080,21 @@ public actor ContainersService {
                 throw err
             }
         }
+        // The helper keeps the exit of the process the stop ended, which is the exit a client
+        // sees on the container's `die` and from a wait after it, as Docker gives 143 or 137.
+        let code = await Self.exitAfterEnd(of: id, client: client)
         let remainingResponseTimeout = responseDeadline.map {
             max(Duration.zero, clock.now.duration(to: $0))
         }
         try await handleContainerExit(
             id: id,
-            code: nil,
+            code: code,
             responseTimeout: remainingResponseTimeout,
             expectedIncarnation: state.snapshot.incarnation,
             expectedRun: run
         )
+        let after = self.containers[id]?.snapshot
+        self.emit(.stop, after?.incarnation == state.snapshot.incarnation ? after ?? state.snapshot : state.snapshot)
         // And by the time a stop returns, its peers no longer list it.
         await self.settlePeerHosts()
     }
@@ -1342,7 +1415,9 @@ public actor ContainersService {
                 signal: "SIGKILL"
             )
             let client = try state.getClient()
+            self.emit(.kill, state.snapshot, attributes: ["signal": "SIGKILL"])
             try await client.stop(options: opts)
+            let code = await Self.exitAfterEnd(of: id, client: client)
             try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
                 self.log.info(
                     "ContainersService: attempt cleanup",
@@ -1355,6 +1430,10 @@ public actor ContainersService {
                     id: id,
                     labels: requiredLabels,
                     incarnation: state.snapshot.incarnation)
+                // Its exit, unless the exit handler got to it first and said so.
+                if let current = await self.containers[id], current.run == state.run, current.snapshot.status == .running {
+                    await self.emit(.die, current.snapshot, exitCode: code?.exitCode)
+                }
                 try await self.cleanUp(id: id, context: context)
                 self.log.info(
                     "ContainersService: successful cleanup",
@@ -1568,6 +1647,7 @@ public actor ContainersService {
             state.snapshot.status = .restarting
             self.scheduleRestart(of: id, after: delay, in: &state)
             await self.setContainerState(id, state, context: context)
+            self.emit(.die, state.snapshot, exitCode: code?.exitCode)
             await self.persistRestartRecord(state.restartRecord, for: id)
             self.log.info(
                 "restarting container",
@@ -1581,6 +1661,7 @@ public actor ContainersService {
 
         state.snapshot.status = .stopped
         await self.setContainerState(id, state, context: context)
+        self.emit(.die, state.snapshot, exitCode: code?.exitCode)
 
         let options = try getContainerCreationOptions(id: id)
         if options.autoRemove {
@@ -1623,7 +1704,7 @@ public actor ContainersService {
         // This may also fail if the service was already deregistered or
         // the process was killed externally.
         do {
-            try ServiceManager.deregister(fullServiceLabel: label)
+            try self.deregister(label)
             self.log.info("deregistered runtime service", metadata: ["id": "\(id)"])
         } catch {
             self.log.error(
@@ -1673,10 +1754,11 @@ public actor ContainersService {
             HealthWatch.apply(
                 update, to: &state.snapshot, currentRun: state.run, run: run, incarnation: incarnation, earlierLog: earlierLog)
         else { return false }
+        self.containers[id]?.snapshot.health = state.snapshot.health
         if let after = state.snapshot.health?.status, after != before {
             self.log.info("health status changed", metadata: ["id": "\(id)", "status": "\(after.rawValue)"])
+            self.emit(.healthStatus, state.snapshot, health: after)
         }
-        self.containers[id]?.snapshot.health = state.snapshot.health
         return true
     }
 
@@ -1920,7 +2002,7 @@ public actor ContainersService {
                 instanceId: id
             )
         {
-            try? ServiceManager.deregister(fullServiceLabel: label)
+            try? self.deregister(label)
         }
 
         // Remove the persisted capability separately so a later bundle-delete failure cannot
@@ -1940,6 +2022,9 @@ public actor ContainersService {
         }
 
         let removed = self.containers.removeValue(forKey: id)
+        if let removed {
+            self.emit(.destroy, removed.snapshot)
+        }
         await self.peerMembershipChanged(old: removed?.snapshot, new: nil)
     }
 
@@ -2152,6 +2237,37 @@ public actor ContainersService {
             args: args,
             instanceId: configuration.id
         )
+    }
+
+    // MARK: Events
+
+    /// Write the event for a change just made. Called where each change is made, after the
+    /// state that shows it, so that a client that lists on an event sees what it says.
+    private func emit(
+        _ action: ContainerEvent.Action, _ snapshot: ContainerSnapshot, exitCode: Int32? = nil, health: HealthStatus? = nil,
+        attributes: [String: String] = [:]
+    ) {
+        self.events.emit(action, snapshot: snapshot, name: snapshot.id, exitCode: exitCode, health: health, attributes: attributes)
+    }
+
+    /// How long a stop or a kill waits for the helper to say how the process ended. It has
+    /// ended, or is ending on SIGKILL, so the answer is at hand; this only bounds a helper
+    /// that does not give one.
+    static let exitAfterEndTimeout: Duration = .seconds(2)
+
+    /// The exit of a run's process once a stop or a SIGKILL ended it, from the helper that
+    /// keeps it; nil when the helper does not answer in time.
+    private static func exitAfterEnd(of id: String, client: RuntimeClient) async -> ExitStatus? {
+        try? await client.wait(id, responseTimeout: exitAfterEndTimeout)
+    }
+
+    /// Remove a runtime helper's launchd registration.
+    private func deregister(_ label: String) throws {
+        if let deregister = self.hooks.deregister {
+            try deregister(label)
+        } else {
+            try ServiceManager.deregister(fullServiceLabel: label)
+        }
     }
 
     func setContainerState(_ id: String, _ state: ContainerState, context: AsyncLock.Context) async {

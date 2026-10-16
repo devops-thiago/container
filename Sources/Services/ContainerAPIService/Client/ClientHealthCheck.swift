@@ -77,7 +77,8 @@ extension ClientHealthCheck {
             lifecycleProtocolVersion: reply.uint64IfPresent(key: .lifecycleProtocolVersion),
             lifecycleGeneration: reply.string(key: .lifecycleGeneration),
             processNonce: reply.string(key: .processNonce),
-            stateGeneration: reply.uint64IfPresent(key: XPCKeys.stateGeneration.rawValue)
+            stateGeneration: reply.uint64IfPresent(key: XPCKeys.stateGeneration.rawValue),
+            capabilities: APIServerCapability.decode(reply.string(key: .apiServerCapabilities))
         )
     }
 }

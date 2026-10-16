@@ -243,13 +243,15 @@ extension RuntimeClient {
         }
     }
 
-    public func wait(_ id: String) async throws -> ExitStatus {
+    /// - Parameter responseTimeout: how long to wait for the process to end; nil waits for as
+    ///   long as it takes.
+    public func wait(_ id: String, responseTimeout: Duration? = nil) async throws -> ExitStatus {
         let request = XPCMessage(route: RuntimeRoutes.wait.rawValue)
         request.set(key: RuntimeKeys.id.rawValue, value: id)
 
         let response: XPCMessage
         do {
-            response = try await self.client.send(request)
+            response = try await self.client.send(request, responseTimeout: responseTimeout)
         } catch {
             throw ContainerizationError(
                 .internalError,
