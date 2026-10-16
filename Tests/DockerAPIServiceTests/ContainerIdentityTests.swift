@@ -136,7 +136,7 @@ struct ContainerIdentityTests {
         await #expect(throws: DockerAPIError.self) { try await store.rename(all[1], to: "front", among: all) }
         do {
             try await store.rename(all[1], to: "front", among: all)
-        } catch let error as DockerAPIError {
+        } catch {
             #expect(error.status == .conflict)
             #expect(error.message.hasPrefix("Error when allocating new name: Conflict. The container name \"/front\""))
         }

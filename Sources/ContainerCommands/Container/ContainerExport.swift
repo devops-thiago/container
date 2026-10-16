@@ -372,7 +372,7 @@ public enum ExportDestination {
             while result.count > 1, result.hasSuffix("/") { result.removeLast() }
             return result
         }
-        let real = trimmed(String(cString: resolved))
+        let real = trimmed(String(decoding: resolved.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
         let standardised = trimmed(path)
         guard real == standardised || real == "/private" + standardised else {
             throw ContainerizationError(
