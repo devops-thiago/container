@@ -19,6 +19,7 @@ import ContainerPersistence
 import ContainerResource
 import ContainerizationError
 import ContainerizationOCI
+import ContainerizationOS
 import Darwin
 import DockerAPIService
 import Foundation
@@ -30,7 +31,7 @@ import SystemPackage
 /// pulls the image itself; a missing one is the client's to pull.
 struct EngineContainersClient: EngineContainers {
     /// The engine's configuration, from the roots the running engine reports.
-    private func systemConfig() async throws -> ContainerSystemConfig {
+    static func systemConfig() async throws -> ContainerSystemConfig {
         let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
         let appRoot = FilePath(health.appRoot.path(percentEncoded: false))
         let installRoot = FilePath(health.installRoot.path(percentEncoded: false))
@@ -50,7 +51,7 @@ struct EngineContainersClient: EngineContainers {
     }
 
     func image(_ reference: String, platform requested: String?) async throws -> DockerImageDefaults? {
-        let system = try await systemConfig()
+        let system = try await Self.systemConfig()
         let platform: ContainerizationOCI.Platform
         do {
             platform = try requested.map(Parser.platform(from:)) ?? Parser.platform(os: "linux", arch: Arch.hostArchitecture().rawValue)
@@ -81,7 +82,7 @@ struct EngineContainersClient: EngineContainers {
     }
 
     func createDefaults() async throws -> DockerCreateDefaults {
-        let system = try await systemConfig()
+        let system = try await Self.systemConfig()
         let resources = try Parser.resources(cpus: nil, memory: nil, defaultCPUs: system.container.cpus, defaultMemory: system.container.memory)
         return DockerCreateDefaults(
             cpus: resources.cpus, memoryInBytes: resources.memoryInBytes, dnsDomain: system.dns.domain, builtinNetwork: try await builtinNetwork(),
@@ -123,7 +124,7 @@ struct EngineContainersClient: EngineContainers {
                         name: volume.name, format: found.format, source: found.source, destination: volume.destination,
                         options: volume.readOnly ? ["ro"] : []))
             }
-            let system = try await systemConfig()
+            let system = try await Self.systemConfig()
             _ = try await ClientImage(description: configuration.image).getCreateSnapshot(platform: configuration.platform)
             let kernel = try await ClientKernel.getDefaultKernel(for: .current)
             let initImage = try await ClientImage.fetch(reference: system.vminit.image, platform: .current, containerSystemConfig: system)
@@ -146,20 +147,24 @@ struct EngineContainersClient: EngineContainers {
         }
     }
 
-    func start(_ container: ContainerSnapshot) async throws {
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess {
         try await Self.translated {
             let client = ContainerClient()
             do {
-                let io = try ProcessIO.create(tty: container.configuration.initProcess.terminal, interactive: false, detach: true)
-                defer { try? io.close() }
-                let process = try await client.bootstrap(id: container.id, stdio: io.stdio)
-                try await process.start()
-                try io.closeAfterStart()
+                return EngineProcessClient(process: try await client.bootstrap(id: container.id, stdio: stdio.handles))
             } catch {
-                // What a failed start leaves half-made would get in the way of the next one.
+                // What a failed bootstrap leaves half-made would get in the way of the next one.
                 try? await client.stop(id: container.id, expectedIncarnation: Self.incarnation(container))
                 throw error
             }
+        }
+    }
+
+    func get(_ engineID: String) async throws -> ContainerSnapshot? {
+        do {
+            return try await ContainerClient().get(id: engineID)
+        } catch let error as ContainerizationError where error.isCode(.notFound) {
+            return nil
         }
     }
 
@@ -200,5 +205,22 @@ struct EngineContainersClient: EngineContainers {
             default: throw error
             }
         }
+    }
+}
+
+/// A process the API server bootstrapped, through the client the `container` commands use.
+struct EngineProcessClient: EngineProcess {
+    let process: any ClientProcess
+
+    func start() async throws {
+        try await process.start()
+    }
+
+    func wait() async throws -> Int32 {
+        try await process.wait()
+    }
+
+    func resize(width: UInt16, height: UInt16) async throws {
+        try await process.resize(Terminal.Size(width: width, height: height))
     }
 }

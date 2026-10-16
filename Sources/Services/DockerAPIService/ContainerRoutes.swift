@@ -38,25 +38,29 @@ public protocol EngineContainers: Sendable {
     /// Makes the plan's volumes, its init filesystem and the container. Returns the engine's
     /// incarnation of it.
     func create(_ plan: DockerCreatePlan) async throws -> String
-    /// Starts a created or stopped container with no stdio attached.
-    func start(_ container: ContainerSnapshot) async throws
+    /// Bootstraps a created or stopped container's init process with `stdio`, ready to start.
+    /// A failed bootstrap cleans up after itself.
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess
+    /// One container by its engine ID, or nil when there is none: what `wait` polls.
+    func get(_ engineID: String) async throws -> ContainerSnapshot?
     func stop(_ container: ContainerSnapshot, timeout: Int32, signal: String?) async throws
     func kill(_ container: ContainerSnapshot, signal: String) async throws
     func delete(_ container: ContainerSnapshot, force: Bool) async throws
     func deleteVolume(_ name: String) async throws
 }
 
-/// The container routes that answer at once: list, create, inspect, the lifecycle, rename and
-/// prune. Attach, wait, logs and the other streams are not here.
+/// The container routes: list, create, inspect, the lifecycle, rename and prune, and the streams
+/// `docker run` needs: attach, wait and resize. Logs and the other streams are not here.
 public enum ContainerRoutes {
     /// What dockerd waits for a container to stop before it kills it, when the client does not
     /// say.
     public static let defaultStopTimeout: Int32 = 10
 
     public static func register(
-        on router: inout DockerRouter, engine: some EngineContainers, identities: DockerIdentityStore, now: @escaping @Sendable () -> Date = { Date() }
+        on router: inout DockerRouter, engine: some EngineContainers, identities: DockerIdentityStore, streams: DockerContainerStreams,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
-        let routes = Routes(engine: engine, identities: identities, now: now)
+        let routes = Routes(engine: engine, identities: identities, streams: streams, now: now)
         router.add(.GET, "/containers/json") { request, _ in try await routes.list(request) }
         router.add(.POST, "/containers/create") { request, _ in try await routes.create(request) }
         router.add(.POST, "/containers/prune") { request, _ in try await routes.prune(request) }
@@ -67,6 +71,9 @@ public enum ContainerRoutes {
         router.add(.POST, "/containers/{id}/kill") { request, parameters in try await routes.kill(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/restart") { request, parameters in try await routes.restart(try parameters["id"], request) }
         router.add(.POST, "/containers/{id}/rename") { request, parameters in try await routes.rename(try parameters["id"], request) }
+        router.add(.POST, "/containers/{id}/attach") { request, parameters in try await routes.attach(try parameters["id"], request) }
+        router.add(.POST, "/containers/{id}/wait") { request, parameters in try await routes.wait(try parameters["id"], request) }
+        router.add(.POST, "/containers/{id}/resize") { request, parameters in try await routes.resize(try parameters["id"], request) }
         for (action, reason) in [
             ("pause", "a container's VM cannot be paused"),
             ("unpause", "a container's VM cannot be paused"),
@@ -84,6 +91,7 @@ public enum ContainerRoutes {
     struct Routes<Engine: EngineContainers>: Sendable {
         let engine: Engine
         let identities: DockerIdentityStore
+        let streams: DockerContainerStreams
         let now: @Sendable () -> Date
 
         func containers() async throws -> [DockerContainer] {
@@ -160,8 +168,29 @@ public enum ContainerRoutes {
             if ContainerViewMapper.isRunning(container.snapshot) {
                 return .empty(.notModified)
             }
-            try await engine.start(container.snapshot)
-            return .empty()
+            return try await start(container) == .started ? .empty() : .empty(.notModified)
+        }
+
+        /// Starts `container` with the attaches waiting for it. A container made with
+        /// `--rm` that fails to start is removed, as dockerd removes it: `docker run --rm`
+        /// waits for that removal before it reports the failure.
+        func start(_ container: DockerContainer) async throws -> DockerContainerProcesses.StartOutcome {
+            do {
+                return try await streams.processes.start(container)
+            } catch {
+                if container.extras?.autoRemove == true {
+                    try? await engine.delete(container.snapshot, force: true)
+                    await removed(container.engineID, failure: DockerContainerProcesses.message(error))
+                }
+                throw error
+            }
+        }
+
+        /// What follows a deletion: waits on it answer, attaches waiting for it go.
+        func removed(_ engineID: String, failure: String? = nil) async {
+            await identities.forget(engineID: engineID)
+            await streams.waits.removed(engineID, failure: failure)
+            await streams.attaches.release(engineID: engineID)
         }
 
         func stopTimeout(_ request: DockerRequest) throws(DockerAPIError) -> Int32 {
@@ -202,7 +231,7 @@ public enum ContainerRoutes {
                 guard let stopped else {
                     throw DockerAPIError.notFound("No such container: \(reference)")
                 }
-                try await engine.start(stopped.snapshot)
+                _ = try await start(stopped)
             } catch let error as DockerAPIError {
                 throw DockerAPIError(error.status, "Cannot restart container \(reference): \(error.message)")
             } catch {
@@ -227,7 +256,7 @@ public enum ContainerRoutes {
                 )
             }
             try await engine.delete(container.snapshot, force: force)
-            await identities.forget(engineID: container.engineID)
+            await removed(container.engineID)
             if removeVolumes {
                 for volume in container.extras?.anonymousVolumes ?? [] {
                     // dockerd removes what it can and does not fail the delete over the rest.
@@ -254,7 +283,7 @@ public enum ContainerRoutes {
                     // dockerd skips a container it cannot remove and goes on with the rest.
                     continue
                 }
-                await identities.forget(engineID: container.engineID)
+                await removed(container.engineID)
                 deleted.append(container.dockerID)
             }
             return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: 0))
