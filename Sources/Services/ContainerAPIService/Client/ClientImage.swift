@@ -73,6 +73,15 @@ public struct ClientImage: Sendable {
         return try content.decode()
     }
 
+    /// The bytes of one of this image's blobs (an index, a manifest or a config), or nil when
+    /// the content store does not have it: a pull for one platform leaves the others' out.
+    public func blob(_ digest: String) async throws -> Data? {
+        guard let content: Content = try await contentStore.get(digest: digest) else {
+            return nil
+        }
+        return try content.data()
+    }
+
     /// Returns the image's `HEALTHCHECK` for the specified platform, or nil when it has none.
     ///
     /// The check is a Docker extension to the OCI image config that `ImageConfig` does not

@@ -414,6 +414,15 @@ public actor DockerIdentityStore {
         }
     }
 
+    /// Keeps `container`'s identity when it was deleted and made again under the same engine ID,
+    /// as connecting it to a network does: the new incarnation would otherwise lose its record.
+    public func recreated(_ container: DockerContainer, incarnation: String) {
+        table.insert(
+            DockerContainerRecord(
+                engineID: container.engineID, incarnation: incarnation, dockerID: container.dockerID, name: container.name, extras: container.extras))
+        try? save()
+    }
+
     /// Forgets a container that was deleted.
     public func forget(engineID: String) {
         guard table.records[engineID] != nil else { return }
