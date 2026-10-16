@@ -35,6 +35,9 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
     private(set) var plans: [DockerCreatePlan] = []
     /// What each bootstrap bound, as `"<id> stdin stdout stderr"` with `-` for a missing stream.
     private(set) var bootstraps: [String] = []
+    /// Who each create and bootstrap was for, as `"create <requester>"` and
+    /// `"bootstrap <id> <requester>"`, with `-` for none.
+    private(set) var requesters: [String] = []
     private var processes: [String: FakeProcess] = [:]
     /// The program a container's process runs; without one it waits to be stopped.
     var programs: [String: FakeProgram] = [:]
@@ -93,8 +96,9 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
         }
     }
 
-    func create(_ plan: DockerCreatePlan) async throws -> String {
+    func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String {
         lock.withLock {
+            requesters.append("create \(requester ?? "-")")
             creates += 1
             plans.append(plan)
             var configuration = plan.configuration
@@ -106,9 +110,10 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
         }
     }
 
-    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio) async throws -> any EngineProcess {
+    func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess {
         let id = container.id
         let failure: (any Error)? = lock.withLock {
+            requesters.append("bootstrap \(id) \(requester ?? "-")")
             let names = [stdio.stdin, stdio.stdout, stdio.stderr].enumerated().map { $1 == nil ? "-" : ["stdin", "stdout", "stderr"][$0] }
             bootstraps.append(([id] + names).joined(separator: " "))
             defer { bootstrapError = nil }
@@ -214,8 +219,8 @@ struct ContainerRoutesTests {
         self.init(snapshots: [])
     }
 
-    func call(_ method: HTTPMethod, _ uri: String, body: String = "") async throws -> Answer {
-        let request = try DockerRequest(method: method, uri: "/v1.48" + uri, headers: [:], body: ByteBuffer(string: body))
+    func call(_ method: HTTPMethod, _ uri: String, body: String = "", peer: DockerPeer? = nil) async throws -> Answer {
+        let request = try DockerRequest(method: method, uri: "/v1.48" + uri, headers: [:], body: ByteBuffer(string: body), peer: peer)
         guard case .data(let status, _, let buffer, _) = await router.respond(to: request) else {
             Issue.record("expected a whole response")
             return Answer(status: .internalServerError, body: "")

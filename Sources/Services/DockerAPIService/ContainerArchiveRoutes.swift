@@ -183,9 +183,9 @@ extension ContainerToolRoutes.Routes {
 
     /// Copies `path` out of the container into `destination`, saying "not found" in dockerd's
     /// words when the engine's copy could not find it.
-    func copyOut(_ container: DockerContainer, _ path: String, to destination: URL, reference: String) async throws {
+    func copyOut(_ container: DockerContainer, _ path: String, to destination: URL, reference: String, requester: String?) async throws {
         do {
-            try await engine.copyOut(container.snapshot, source: path, destination: destination)
+            try await engine.copyOut(container.snapshot, source: path, destination: destination, requester: requester)
         } catch {
             let text = "\(error)"
             if text.contains("No such file") || text.contains("not found") || text.contains("notFound") {
@@ -217,7 +217,7 @@ extension ContainerToolRoutes.Routes {
                 let scratch = try makeScratch()
                 defer { try? FileManager.default.removeItem(at: scratch) }
                 let copy = scratch.appending(path: "copy")
-                try await copyOut(container, path, to: copy, reference: reference)
+                try await copyOut(container, path, to: copy, reference: reference, requester: request.peer?.requester)
                 stat = try DockerPathStat.host(copy.path(percentEncoded: false), name: name)
             }
             var headers = HTTPHeaders()
@@ -237,7 +237,7 @@ extension ContainerToolRoutes.Routes {
                     throw DockerAPIError.internalError("could not stage the link \(path)")
                 }
             } else {
-                try await copyOut(container, path, to: copy, reference: reference)
+                try await copyOut(container, path, to: copy, reference: reference, requester: request.peer?.requester)
             }
             stat = try known ?? DockerPathStat.host(copy.path(percentEncoded: false), name: name)
         } catch {
@@ -305,7 +305,9 @@ extension ContainerToolRoutes.Routes {
         }
         for entry in entries {
             do {
-                try await engine.copyIn(container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode)
+                try await engine.copyIn(
+                    container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode,
+                    requester: request.peer?.requester)
             } catch {
                 throw DockerAPIError.internalError("could not copy \(entry.name) into \(path) in container \(reference): \(DockerContainerProcesses.message(error))")
             }
