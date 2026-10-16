@@ -69,7 +69,9 @@ extension EngineImagesClient {
     ///
     /// The index pushed is the one kept here only when every platform goes; for some, the
     /// engine pushes an index of its own, whose digest it does not report.
-    func push(reference: String, platform requested: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor? {
+    func push(
+        reference: String, platform requested: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void
+    ) async throws -> DockerDescriptor? {
         var platform = try requested.map(Self.platform)
         return try await EngineErrors.translated {
             let system = try await EngineContainersClient.systemConfig()
@@ -79,7 +81,7 @@ extension EngineImagesClient {
             }
             try await image.push(
                 platform: platform, scheme: .https, containerSystemConfig: system,
-                progressUpdate: { events in progress(events.compactMap(Self.event)) })
+                progressUpdate: { events in progress(events.compactMap(Self.event)) }, credential: credential.map(Self.engineCredential))
             guard platform == nil else { return nil }
             return DockerDescriptor(mediaType: image.descriptor.mediaType, digest: image.descriptor.digest, size: image.descriptor.size)
         }

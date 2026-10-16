@@ -49,6 +49,10 @@ public enum ImagesServiceXPCKeys: String {
     case registryUsername
     case registryPassword
     case registryScheme
+    /// A `RegistryCredential` for this one request, as JSON. Never kept.
+    case registryCredential
+    /// What a login check found: 200 when the registry took the credential, else its status.
+    case registryCheckStatus
 
     /// ContentStore
     case digest

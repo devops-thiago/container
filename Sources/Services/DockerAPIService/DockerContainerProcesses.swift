@@ -44,13 +44,15 @@ public actor DockerContainerProcesses {
     private let waits: DockerWaitStore
     private let drain: Duration
     private let log: Logger
+    private let events: DockerEventBus?
 
-    init(engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger) {
+    init(engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger, events: DockerEventBus? = nil) {
         self.engine = engine
         self.attaches = attaches
         self.waits = waits
         self.drain = drain
         self.log = log
+        self.events = events
     }
 
     /// Whether a process this service started is running in `engineID`.
@@ -121,10 +123,14 @@ public actor DockerContainerProcesses {
         running[engineID] = current
         let waits = self.waits
         let log = self.log
+        let events = self.events
+        // Before the process's exit can be reported.
+        await events?.container("start", container, change: .started)
         Task {
             do {
                 let code = try await process.wait()
                 await waits.exited(engineID, code: code)
+                await events?.container("die", container, change: .died(exitCode: code))
             } catch {
                 log.warning("lost the process to wait on; following the container instead", metadata: ["container": "\(engineID)", "error": "\(error)"])
                 await waits.lost(engineID)
@@ -173,9 +179,12 @@ public struct DockerContainerStreams: Sendable {
 
     /// - Parameter drain: how long an output pipe may stay quiet without reaching EOF after its
     ///   process exited before it is no longer read.
+    /// - Parameter events: where the starts and exits of the processes this service starts are
+    ///   reported; nil reports nothing.
     public init(
         engine: some EngineContainers, attachLimits: DockerAttachLimits = .init(), waitLimits: DockerWaitLimits = .init(),
-        execLimits: DockerExecLimits = .init(), drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService")
+        execLimits: DockerExecLimits = .init(), drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService"),
+        events: DockerEventBus? = nil
     ) {
         let attaches = DockerAttachStore(limits: attachLimits)
         let waits = DockerWaitStore(limits: waitLimits) { engineID in
@@ -183,7 +192,7 @@ public struct DockerContainerStreams: Sendable {
         }
         self.attaches = attaches
         self.waits = waits
-        self.processes = DockerContainerProcesses(engine: engine, attaches: attaches, waits: waits, drain: drain, log: log)
+        self.processes = DockerContainerProcesses(engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events)
         self.execs = DockerExecStore(limits: execLimits)
         self.drain = drain
     }

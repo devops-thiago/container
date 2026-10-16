@@ -299,14 +299,18 @@ struct ImageRoutesTests {
     }
 
     struct FailingLoad: EngineImages {
-        func pull(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerPulledImage {
+        func pull(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+            -> DockerPulledImage
+        {
             throw DockerAPIError.internalError("no")
         }
         func list() async throws -> [EngineImageRecord] { [] }
         func tag(_ source: String, as target: String) async throws {}
         func delete(_ reference: String) async throws {}
         func collectGarbage() async throws -> UInt64 { 0 }
-        func push(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor? { nil }
+        func push(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+            -> DockerDescriptor?
+        { nil }
         func save(references: [String], platform: String?, to file: URL) async throws {}
         func load(from file: URL) async throws -> DockerLoadedImages { throw DockerAPIError.badRequest("unrecognised archive") }
     }

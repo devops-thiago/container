@@ -93,6 +93,8 @@ final class FakeImageStore: EngineImages, Sendable {
         var loaded: [Data] = []
         var loadResult = DockerLoadedImages(references: [])
         var pushFailure: DockerAPIError?
+        /// The credential each pull and push was given, in order.
+        var credentials: [DockerRegistryCredential?] = []
     }
 
     let state: Mutex<State>
@@ -104,9 +106,14 @@ final class FakeImageStore: EngineImages, Sendable {
     var calls: [String] { state.withLock { $0.calls } }
     var references: [String] { state.withLock { $0.records.map(\.reference).sorted() } }
 
-    func pull(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerPulledImage {
-        DockerPulledImage(digest: StoreFixtures.digest("a"), updated: true)
+    func pull(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+        -> DockerPulledImage
+    {
+        state.withLock { $0.credentials.append(credential) }
+        return DockerPulledImage(digest: StoreFixtures.digest("a"), updated: true)
     }
+
+    var credentials: [DockerRegistryCredential?] { state.withLock { $0.credentials } }
 
     func list() async throws -> [EngineImageRecord] {
         state.withLock { $0.records }
@@ -137,9 +144,12 @@ final class FakeImageStore: EngineImages, Sendable {
     }
 
     /// The record's target, as for a push of every platform; nil for a push of one.
-    func push(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor? {
+    func push(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+        -> DockerDescriptor?
+    {
         let (failure, target) = state.withLock { state in
             state.calls.append("push \(reference)")
+            state.credentials.append(credential)
             return (state.pushFailure, state.records.first { $0.reference == reference }?.target)
         }
         progress([.addTotalSize(100)])
@@ -270,7 +280,9 @@ extension FakeImages {
     func tag(_ source: String, as target: String) async throws {}
     func delete(_ reference: String) async throws {}
     func collectGarbage() async throws -> UInt64 { 0 }
-    func push(reference: String, platform: String?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws -> DockerDescriptor? { nil }
+    func push(reference: String, platform: String?, credential: DockerRegistryCredential?, progress: @escaping @Sendable ([DockerPullEvent]) -> Void) async throws
+        -> DockerDescriptor?
+    { nil }
     func save(references: [String], platform: String?, to file: URL) async throws {}
     func load(from file: URL) async throws -> DockerLoadedImages { DockerLoadedImages(references: []) }
 }
