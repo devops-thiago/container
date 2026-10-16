@@ -238,10 +238,22 @@ public struct EngineImageRecord: Sendable, Equatable {
     }
 
     /// Whether it names the image at all, by a tag or by a digest (`alpine@sha256:…`, what a
-    /// pull by digest leaves).
+    /// pull by digest leaves). A reference in the reserved `moby-dangling` repository does not.
     public var isNamed: Bool {
-        guard let parsed else { return false }
+        guard let parsed, !isDanglingMarker else { return false }
         return parsed.tag != nil || parsed.digest != nil
+    }
+
+    /// The repository Docker 29's containerd image store keeps an image under once it has no
+    /// name (`moby-dangling@sha256:…`), so its content is not collected. This service does the
+    /// same for a build without a name. Such a reference names nothing a client sees: the image
+    /// is `<none>:<none>`, dangling, and has neither repo tags nor repo digests.
+    public static let danglingRepository = "\(DockerImageReference.hubDomain)/library/moby-dangling"
+
+    /// Whether this is a reference in `danglingRepository`, by its exact name: `moby-dangling-foo`
+    /// is an image like any other.
+    public var isDanglingMarker: Bool {
+        parsed?.name == Self.danglingRepository
     }
 }
 
@@ -276,7 +288,7 @@ public struct DockerImage: Sendable, Equatable {
     /// reports a pulled image.
     public var repoDigests: [String] {
         Self.unique(
-            records.map { record in
+            records.filter { !$0.isDanglingMarker }.map { record in
                 let name = record.parsed?.familiarName ?? record.familiarReference
                 return "\(name)@\(record.target.digest)"
             })
@@ -284,7 +296,8 @@ public struct DockerImage: Sendable, Equatable {
 
     /// Neither a tag nor a digest names it: what `dangling=true` lists and a plain prune
     /// removes. An image pulled by digest is not dangling, as in Docker 29's containerd image
-    /// store, where only images it has stripped of their names (`moby-dangling@…`) are.
+    /// store, where only images it has stripped of their names (`moby-dangling@…`) are, and
+    /// here an image built without a name, which is kept the same way.
     public var isDangling: Bool {
         !records.contains(where: \.isNamed)
     }

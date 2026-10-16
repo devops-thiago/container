@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerImagesServiceClient
 import ContainerPersistence
 import Containerization
 import ContainerizationOCI
@@ -36,15 +37,26 @@ struct BuildImageResolver: BuildPipelineHandler {
     let output: FileHandle
     let pull: Bool
     let containerSystemConfig: ContainerSystemConfig
+    /// Credentials for pulls, by registry host; see `Builder.BuildConfig.registryCredentials`.
+    let registryCredentials: [String: RegistryCredential]
 
-    public init(_ contentStore: ContentStore, quiet: Bool = false, output: FileHandle = FileHandle.standardError, pull: Bool = false, containerSystemConfig: ContainerSystemConfig)
-        throws
-    {
+    public init(
+        _ contentStore: ContentStore, quiet: Bool = false, output: FileHandle = FileHandle.standardError, pull: Bool = false,
+        containerSystemConfig: ContainerSystemConfig, registryCredentials: [String: RegistryCredential] = [:]
+    ) throws {
         self.contentStore = contentStore
         self.quiet = quiet
         self.output = output
         self.pull = pull
         self.containerSystemConfig = containerSystemConfig
+        self.registryCredentials = registryCredentials
+    }
+
+    /// The credential for a pull of `reference`: the one given for its registry, or nil, which
+    /// pulls with the engine's own logins.
+    static func credential(for reference: String, in credentials: [String: RegistryCredential]) -> RegistryCredential? {
+        guard !credentials.isEmpty, let domain = try? Reference.parse(reference).domain else { return nil }
+        return credentials[domain]
     }
 
     func accept(_ packet: ServerStream) throws -> Bool {
@@ -86,11 +98,14 @@ struct BuildImageResolver: BuildPipelineHandler {
             defer { progress.finish() }
             progress.start()
 
+            let credential = Self.credential(for: ref, in: registryCredentials)
             if self.pull {
-                return try await ClientImage.pull(reference: ref, platform: platform, containerSystemConfig: containerSystemConfig, progressUpdate: progress.handler)
+                return try await ClientImage.pull(
+                    reference: ref, platform: platform, containerSystemConfig: containerSystemConfig, progressUpdate: progress.handler, credential: credential)
             }
             // Use fetch() which checks cache first, then pulls if needed
-            return try await ClientImage.fetch(reference: ref, platform: platform, containerSystemConfig: containerSystemConfig, progressUpdate: progress.handler)
+            return try await ClientImage.fetch(
+                reference: ref, platform: platform, containerSystemConfig: containerSystemConfig, progressUpdate: progress.handler, credential: credential)
         }()
 
         let index: Index = try await img.index()

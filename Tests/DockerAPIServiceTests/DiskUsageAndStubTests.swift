@@ -163,7 +163,7 @@ struct DiskUsageAndStubTests {
         #expect(decoded?["message"] == message)
     }
 
-    @Test("changes, export and build are 501s that say why")
+    @Test("changes and export are 501s that say why; build is no stub")
     func notImplemented() async throws {
         let changes = try await call(.GET, "/v1.48/containers/web/changes")
         #expect(changes.0 == .notImplemented)
@@ -171,10 +171,8 @@ struct DiskUsageAndStubTests {
         let export = try await call(.GET, "/v1.48/containers/web/export")
         #expect(export.0 == .notImplemented)
         #expect(export.1.contains("docker cp"))
-        let build = try await call(.POST, "/v1.48/build?t=web")
-        #expect(build.0 == .notImplemented)
-        #expect(build.1.contains("DOCKER_BUILDKIT=0"))
-        #expect(build.1.contains("#231"))
+        // `POST /build` is served by `BuildRoutes`, which these routes leave alone.
+        #expect(try await call(.POST, "/v1.48/build?t=web") == (.notFound, #"{"message":"page not found"}"#))
         // Control: a path nobody serves is still dockerd's 404, and HEAD reaches a GET stub.
         #expect(try await call(.GET, "/v1.48/nothing/here") == (.notFound, #"{"message":"page not found"}"#))
         #expect(try await call(.HEAD, "/v1.48/swarm").0 == .serviceUnavailable)

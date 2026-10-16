@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerImagesServiceClient
 import ContainerPersistence
 import Containerization
 import ContainerizationOCI
@@ -341,6 +342,13 @@ public struct Builder: Sendable {
         public let cacheOut: [String]
         public let pull: Bool
         public let containerSystemConfig: ContainerSystemConfig
+        /// Where BuildKit's output and the base image pulls' progress go when there is no
+        /// `terminal`: standard error when nil. Output to it is `plain`, not `tty`.
+        public let output: FileHandle?
+        /// Credentials for the base image pulls the build makes, by registry host as the
+        /// engine names it (`docker.io`, `localhost:5000`), each used for a pull from that
+        /// registry alone in place of a login the engine keeps. Never kept or logged.
+        public let registryCredentials: [String: RegistryCredential]
 
         public init(
             buildID: String,
@@ -362,7 +370,9 @@ public struct Builder: Sendable {
             cacheIn: [String],
             cacheOut: [String],
             pull: Bool,
-            containerSystemConfig: ContainerSystemConfig
+            containerSystemConfig: ContainerSystemConfig,
+            output: FileHandle? = nil,
+            registryCredentials: [String: RegistryCredential] = [:]
         ) {
             self.buildID = buildID
             self.contentStore = contentStore
@@ -384,6 +394,8 @@ public struct Builder: Sendable {
             self.cacheOut = cacheOut
             self.pull = pull
             self.containerSystemConfig = containerSystemConfig
+            self.output = output
+            self.registryCredentials = registryCredentials
         }
     }
 
