@@ -285,7 +285,11 @@ public actor ContainersService {
                         startedDate: nil,
                         exitCode: exit?.exitCode,
                         exitedAt: exit?.exitedAt,
-                        restartCount: restartRecord.restartCount
+                        restartCount: restartRecord.restartCount,
+                        // The record's mark, without the check a run's end makes that the
+                        // stop also ended that run: a person's signal the process outlived,
+                        // followed by an exit of its own, reads here as their stop.
+                        stoppedByUser: restartRecord.stoppedByUser
                     ),
                     restartRecord: restartRecord
                 )
@@ -564,7 +568,8 @@ public actor ContainersService {
                         incarnation: incarnation,
                         status: .stopped,
                         networks: [],
-                        startedDate: nil
+                        startedDate: nil,
+                        stoppedByUser: false
                     )
                     guard
                         await self.hostDirectoryAccess.resolve(
@@ -613,6 +618,7 @@ public actor ContainersService {
         try bundle.clearExitStatus()
         state.snapshot.exitCode = nil
         state.snapshot.exitedAt = nil
+        state.snapshot.stoppedByUser = false
         recentExits.forget(id)
         containers[id] = state
         return state
@@ -680,6 +686,7 @@ public actor ContainersService {
             state.backoff.reset()
             state.snapshot.restartCount = 0
             state.snapshot.restartError = nil
+            state.snapshot.stoppedByUser = false
             state.dynamicEnv = dynamicEnv
             await self.setContainerState(id, state, context: context)
             await self.persistRestartRecord(state.restartRecord, for: id)
@@ -1012,6 +1019,8 @@ public actor ContainersService {
         }
         state.cancelPendingRestart()
         state.snapshot.status = .stopped
+        // The run had ended by itself; what keeps the container down now is this stop.
+        state.snapshot.stoppedByUser = byUser && !self.engineShuttingDown
         await self.setContainerState(id, state, context: context)
         self.log.info("restart cancelled by a stop", metadata: ["id": "\(id)"])
         if (try? self.getContainerCreationOptions(id: id))?.autoRemove == true {
@@ -1737,6 +1746,10 @@ public actor ContainersService {
             stoppedByUser: state.restartRecord.stoppedByUser,
             engineShuttingDown: self.engineShuttingDown,
             restartCount: state.restartRecord.restartCount)
+        // A person's stop or kill ended this run only when one was asked for it, ending it:
+        // the record's mark alone outlives restarts under the policy, and a signal the
+        // process outlived marks it too.
+        state.snapshot.stoppedByUser = !restarts && state.exitRequested && state.restartRecord.stoppedByUser
         state.exitRequested = false
         if restarts {
             let ranFor = state.snapshot.startedDate.map { Duration.seconds(max(0, (code?.exitedAt ?? Date()).timeIntervalSince($0))) } ?? .zero
@@ -2010,6 +2023,7 @@ public actor ContainersService {
             state.backoff.reset()
             state.snapshot.restartCount = 0
             state.snapshot.restartError = nil
+            state.snapshot.stoppedByUser = false
             await self.setContainerState(id, state, context: context)
             await self.persistRestartRecord(state.restartRecord, for: id)
             do {
