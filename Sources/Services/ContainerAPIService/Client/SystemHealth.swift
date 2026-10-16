@@ -124,9 +124,6 @@ public enum APIServerCapability: String, Sendable, CaseIterable {
     case containerEvents
     /// `XPCRoute.containerUpdateLabels`: setting the labels the server allows to change.
     case containerLabels
-    /// `XPCRoute.containerCopyIn` and `containerCopyOut` reach a container that is bootstrapped
-    /// but whose init process has not started, not only a running one.
-    case copyBeforeStart
 
     /// As the health check carries them.
     public static func encode(_ capabilities: [APIServerCapability]) -> String {
