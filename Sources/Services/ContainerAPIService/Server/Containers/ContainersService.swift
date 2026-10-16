@@ -1247,7 +1247,7 @@ public actor ContainersService {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
-        guard state.snapshot.status == .running else {
+        guard Self.canCopy(status: state.snapshot.status, bootstrapped: state.client != nil) else {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
@@ -1266,7 +1266,7 @@ public actor ContainersService {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
-        guard state.snapshot.status == .running else {
+        guard Self.canCopy(status: state.snapshot.status, bootstrapped: state.client != nil) else {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
@@ -1274,6 +1274,14 @@ public actor ContainersService {
             await HostDirectoryGrants.shared.lend($0, requester: requester)
         }
         try await client.copyOut(source: source, destination: destination, createParents: createParents, hostDirectoryBookmark: bookmark)
+    }
+
+    /// Whether a copy can reach the container's filesystem: while it runs, and between its
+    /// bootstrap and the start of its init process, when its VM is up and its root filesystem
+    /// mounted but nothing has run in it yet. A Docker client copies files into a created
+    /// container then, before it starts it (`APIServerCapability.copyBeforeStart`).
+    static func canCopy(status: RuntimeStatus, bootstrapped: Bool) -> Bool {
+        status == .running || (status == .stopped && bootstrapped)
     }
 
     /// Copy runs in an existing helper, which cannot inherit access acquired after it was
