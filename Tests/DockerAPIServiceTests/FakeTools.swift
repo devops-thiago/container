@@ -118,6 +118,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     func kill(_ container: ContainerSnapshot, signal: String) async throws { try await base.kill(container, signal: signal) }
     func delete(_ container: ContainerSnapshot, force: Bool) async throws { try await base.delete(container, force: force) }
     func deleteVolume(_ name: String) async throws { try await base.deleteVolume(name) }
+    func supportsRename() async -> Bool { await base.supportsRename() }
+    func rename(_ container: ContainerSnapshot, to name: String) async throws { try await base.rename(container, to: name) }
 
     // MARK: EngineContainerTools
 

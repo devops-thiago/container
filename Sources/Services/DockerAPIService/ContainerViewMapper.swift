@@ -125,7 +125,12 @@ public enum ContainerViewMapper {
         if let image = container.extras?.image ?? container.snapshot.configuration.labels[DockerLabels.image] {
             return image
         }
-        var reference = container.snapshot.configuration.image.reference
+        return shortReference(container.snapshot.configuration.image.reference)
+    }
+
+    /// An image reference as a Docker client writes it: without Docker Hub's `docker.io/library/`.
+    static func shortReference(_ normalized: String) -> String {
+        var reference = normalized
         for prefix in ["docker.io/library/", "docker.io/"] where reference.hasPrefix(prefix) {
             reference.removeFirst(prefix.count)
             break
