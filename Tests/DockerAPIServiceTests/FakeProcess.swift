@@ -157,9 +157,23 @@ struct FakeIO: Sendable {
     let stdin: NIOAsyncChannelInboundStream<ByteBuffer>?
     let stdout: NIOAsyncChannelOutboundWriter<ByteBuffer>?
     let stderr: NIOAsyncChannelOutboundWriter<ByteBuffer>?
+    /// The pipe under `stdout`, for `writeThrough(_:)`.
+    let stdoutChannel: (any Channel)?
 
     func write(_ text: String, to stream: StdStream = .stdout) async {
         try? await (stream == .stderr ? stderr : stdout)?.write(ByteBuffer(string: text))
+    }
+
+    /// Writes to stdout as a process's `write(2)` to a pipe does: it returns once the pipe has
+    /// taken the bytes, so a reader that stops reading holds the writer inside it.
+    ///
+    /// `stdout.write` returns as soon as the async writer accepts the bytes, and that writer
+    /// learns the pipe is full only once the pipe's event loop gets to run: on a busy machine a
+    /// loop of writes hands it tens of megabytes first, which then wait in this process, not in
+    /// the agent. A test that counts what the process has written uses this.
+    func writeThrough(_ data: ByteBuffer) async throws {
+        guard let stdoutChannel else { return }
+        try await stdoutChannel.writeAndFlush(data).get()
     }
 
     typealias Pipe = NIOAsyncChannel<ByteBuffer, ByteBuffer>
@@ -176,7 +190,7 @@ struct FakeIO: Sendable {
             return try await within(input) { stdin, _ in
                 try await within(output) { _, stdout in
                     try await within(errors) { _, stderr in
-                        await program(FakeIO(process: process, stdin: stdin, stdout: stdout, stderr: stderr))
+                        await program(FakeIO(process: process, stdin: stdin, stdout: stdout, stderr: stderr, stdoutChannel: output?.channel))
                     }
                 }
             }
