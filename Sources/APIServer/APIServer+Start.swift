@@ -138,7 +138,7 @@ extension APIServer {
                         log: log, appIsRunning: { OwnerWatchdog.embeddingAppIsRunning })
                     let grantHarness = HostDirectoryGrantHarness(log: log)
                     routes[XPCRoute.hostDirectoryGrantsPublish] = XPCServer.route(grantHarness.publish)
-                    routes[XPCRoute.hostDirectoryGrantLend] = XPCServer.route(grantHarness.lend)
+                    routes[XPCRoute.hostDirectoryGrantLend] = grantHarness.lend(_:session:)
                     routes[XPCRoute.hostDirectoryGrantRevoke] = XPCServer.route(grantHarness.revoke)
                 }
 
@@ -502,10 +502,10 @@ extension APIServer {
             let harness = ContainersHarness(service: service, log: log)
 
             routes[XPCRoute.containerList] = XPCServer.route(harness.list)
-            routes[XPCRoute.containerCreate] = XPCServer.route(harness.create)
+            routes[XPCRoute.containerCreate] = harness.create(_:session:)
             routes[XPCRoute.containerDelete] = XPCServer.route(harness.delete)
             routes[XPCRoute.containerLogs] = XPCServer.route(harness.logs)
-            routes[XPCRoute.containerBootstrap] = XPCServer.route(harness.bootstrap)
+            routes[XPCRoute.containerBootstrap] = harness.bootstrap(_:session:)
             routes[XPCRoute.containerDial] = XPCServer.route(harness.dial)
             routes[XPCRoute.containerStop] = XPCServer.route(harness.stop)
             routes[XPCRoute.containerStartProcess] = XPCServer.route(harness.startProcess)
@@ -515,8 +515,8 @@ extension APIServer {
             routes[XPCRoute.containerKill] = XPCServer.route(harness.kill)
             routes[XPCRoute.containerStats] = XPCServer.route(harness.stats)
             routes[XPCRoute.containerDiskUsage] = XPCServer.route(harness.diskUsage)
-            routes[XPCRoute.containerCopyIn] = XPCServer.route(harness.copyIn)
-            routes[XPCRoute.containerCopyOut] = XPCServer.route(harness.copyOut)
+            routes[XPCRoute.containerCopyIn] = harness.copyIn(_:session:)
+            routes[XPCRoute.containerCopyOut] = harness.copyOut(_:session:)
             routes[XPCRoute.containerExport] = XPCServer.route(harness.export)
             routes[XPCRoute.containerClean] = XPCServer.route(harness.clean)
 

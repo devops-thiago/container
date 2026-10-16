@@ -343,10 +343,12 @@ public actor ContainersService {
     /// - Parameter hostDirectoryBookmarks: grants for host directories this container
     ///   bind-mounts, made by a sandboxed embedder. Persisted with the container and resolved
     ///   only after every throwing create operation, so failed creates cannot retain access.
+    /// - Parameter requester: who asked for this container, which a folder-permission panel
+    ///   names. Display only.
     @discardableResult
     public func create(
         configuration: ContainerConfiguration, kernel: Kernel, options: ContainerCreateOptions, initImage: String? = nil, runtimeData: Data? = nil,
-        hostDirectoryBookmarks: [Data] = [], incarnation requestedIncarnation: String? = nil
+        hostDirectoryBookmarks: [Data] = [], incarnation requestedIncarnation: String? = nil, requester: String? = nil
     ) async throws -> String {
         log.debug(
             "ContainersService: enter",
@@ -428,7 +430,7 @@ public actor ContainersService {
                 ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
                 ? hostDirectoryBookmarks : []
             if ServiceIdentity.appGroup != nil {
-                try await self.ensurePoolCoversBindMounts(of: configuration)
+                try await self.ensurePoolCoversBindMounts(of: configuration, requester: requester)
             }
             let systemPlatform = kernel.platform
 
@@ -556,11 +558,14 @@ public actor ContainersService {
     ///
     /// - Parameter hostDirectoryBookmarks: fresh bind-mount grants from the embedder, if it has
     ///   any. A start after the machine restarted has no other source of them.
+    /// - Parameter requester: who asked for this start, which a folder-permission panel names.
+    ///   Display only.
     public func bootstrap(
         id: String,
         stdio: [FileHandle?],
         dynamicEnv: [String: String],
-        hostDirectoryBookmarks: [Data] = []
+        hostDirectoryBookmarks: [Data] = [],
+        requester: String? = nil
     ) async throws {
         log.debug(
             "ContainersService: enter",
@@ -607,6 +612,7 @@ public actor ContainersService {
                 dynamicEnv: dynamicEnv,
                 hostDirectoryBookmarks: hostDirectoryBookmarks,
                 askEmbedder: true,
+                requester: requester,
                 context: context)
         }
     }
@@ -619,6 +625,7 @@ public actor ContainersService {
         dynamicEnv: [String: String],
         hostDirectoryBookmarks: [Data],
         askEmbedder: Bool,
+        requester: String? = nil,
         context: AsyncLock.Context
     ) async throws {
         var state = try self.getContainerState(id: id, context: context)
@@ -641,7 +648,7 @@ public actor ContainersService {
             )
         }
         try await self.restoreHostDirectoryAccess(
-            for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks, askEmbedder: askEmbedder)
+            for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks, askEmbedder: askEmbedder, requester: requester)
 
         var networkBootstrapInfos = [NetworkBootstrapInfo]()
         for n in config.networks {
@@ -1180,7 +1187,11 @@ public actor ContainersService {
     }
 
     /// Copy a file or directory from the host into the container.
-    public func copyIn(id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true) async throws {
+    ///
+    /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
+    public func copyIn(
+        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, requester: String? = nil
+    ) async throws {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
@@ -1188,12 +1199,18 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        let bookmark = try await Self.copyHostDirectoryBookmark(for: source, verb: "read")
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: source, verb: "read") {
+            await HostDirectoryGrants.shared.lend($0, requester: requester)
+        }
         try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents, hostDirectoryBookmark: bookmark)
     }
 
     /// Copy a file or directory from the container to the host.
-    public func copyOut(id: String, source: String, destination: String, createParents: Bool = true) async throws {
+    ///
+    /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
+    public func copyOut(
+        id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil
+    ) async throws {
         self.log.debug("\(#function)")
 
         let state = try self._getContainerState(id: id)
@@ -1201,7 +1218,9 @@ public actor ContainersService {
             throw ContainerizationError(.invalidState, message: "container \(id) is not running")
         }
         let client = try state.getClient()
-        let bookmark = try await Self.copyHostDirectoryBookmark(for: destination, verb: "write")
+        let bookmark = try await Self.copyHostDirectoryBookmark(for: destination, verb: "write") {
+            await HostDirectoryGrants.shared.lend($0, requester: requester)
+        }
         try await client.copyOut(source: source, destination: destination, createParents: createParents, hostDirectoryBookmark: bookmark)
     }
 
@@ -2035,7 +2054,8 @@ public actor ContainersService {
         configuration: ContainerConfiguration,
         at path: URL,
         supplied: [Data],
-        askEmbedder: Bool = true
+        askEmbedder: Bool = true,
+        requester: String? = nil
     ) async throws {
         let requiresAuthorization =
             ServiceIdentity.appGroup != nil && configuration.mounts.contains { $0.isVirtiofs }
@@ -2049,7 +2069,7 @@ public actor ContainersService {
                 // Replaces what create wrote, so a later start with no embedder to ask still has
                 // the most recent grants to try rather than the oldest.
                 try? Self.persistHostDirectoryBookmarks(supplied, at: path)
-                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
+                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder, requester: requester)
                 return
             }
             // Not fatal, because the commonest way to get here is a grant that is newer than the
@@ -2067,7 +2087,7 @@ public actor ContainersService {
         }
 
         if await self.hostDirectoryAccess.hasGrants(for: id) {
-            try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
+            try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder, requester: requester)
             return
         }
 
@@ -2078,14 +2098,14 @@ public actor ContainersService {
             if !bookmarks.isEmpty,
                 await self.hostDirectoryAccess.resolve(bookmarks: bookmarks, for: id)
             {
-                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
+                try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder, requester: requester)
                 return
             }
         }
 
         // CLI path, and the fallback when every bookmark source is empty or lapsed: the pool
         // is what the app published, or what it is about to grant from a panel.
-        try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder)
+        try await self.ensurePoolCoversBindMounts(of: configuration, askEmbedder: askEmbedder, requester: requester)
         await self.hostDirectoryAccess.resolve(bookmarks: [], for: id)
     }
 
@@ -2093,7 +2113,9 @@ public actor ContainersService {
     /// source, or for a single file the folder that holds it, which is what the VM shares. Asks
     /// the embedder for any that is not, which may put a panel in front of the user, unless
     /// `askEmbedder` is false, as it is for the engine's own starts, which fail instead.
-    private func ensurePoolCoversBindMounts(of configuration: ContainerConfiguration, askEmbedder: Bool = true) async throws {
+    private func ensurePoolCoversBindMounts(
+        of configuration: ContainerConfiguration, askEmbedder: Bool = true, requester: String? = nil
+    ) async throws {
         let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder))
         for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
             guard askEmbedder else {
@@ -2101,7 +2123,7 @@ public actor ContainersService {
             }
             // Each outcome is a different thing for the user to do, so each says so. The old
             // single message covered them all and named the fix for only one of them.
-            switch await HostDirectoryGrants.shared.request(source) {
+            switch await HostDirectoryGrants.shared.request(source, requester: requester) {
             case .granted:
                 continue
             case .declined:
