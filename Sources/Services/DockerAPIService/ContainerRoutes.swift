@@ -63,11 +63,13 @@ public enum ContainerRoutes {
     /// say.
     public static let defaultStopTimeout: Int32 = 10
 
+    /// - Parameter events: where the changes these routes make are reported, as they make
+    ///   them; nil reports nothing.
     public static func register(
         on router: inout DockerRouter, engine: some EngineContainers, identities: DockerIdentityStore, streams: DockerContainerStreams,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() }, events: DockerEventBus? = nil
     ) {
-        let routes = Routes(engine: engine, identities: identities, streams: streams, now: now)
+        let routes = Routes(engine: engine, identities: identities, streams: streams, now: now, events: events)
         router.add(.GET, "/containers/json") { request, _ in try await routes.list(request) }
         router.add(.POST, "/containers/create") { request, _ in try await routes.create(request) }
         router.add(.POST, "/containers/prune") { request, _ in try await routes.prune(request) }
@@ -100,6 +102,7 @@ public enum ContainerRoutes {
         let identities: DockerIdentityStore
         let streams: DockerContainerStreams
         let now: @Sendable () -> Date
+        let events: DockerEventBus?
 
         func containers() async throws -> [DockerContainer] {
             await identities.join(try await engine.list())
@@ -157,11 +160,31 @@ public enum ContainerRoutes {
                     allocatePort: allocatePort, newVolumeName: { DockerIdentityTable.randomID(using: &generator) })
                 let incarnation = try await engine.create(plan)
                 await identities.commit(reservation, incarnation: incarnation, extras: plan.extras)
+                await report("create", engineID: reservation.engineID, change: .created)
                 return try .json(DockerContainerCreateResponse(Id: reservation.dockerID, Warnings: plan.warnings), status: .created)
             } catch {
                 await identities.release(reservation)
                 throw error
             }
+        }
+
+        /// Reports what this service just did to a container, as the engine has it now.
+        func report(_ action: String, engineID: String, change: DockerEventBus.ContainerChange, extra: [String: String] = [:]) async {
+            guard let events, let snapshot = try? await engine.get(engineID), let container = await identities.join([snapshot]).first else { return }
+            await events.container(action, container, change: change, extra: extra)
+        }
+
+        /// Reports what this service just did to `container`, as it was.
+        func report(_ action: String, _ container: DockerContainer, change: DockerEventBus.ContainerChange = .none, extra: [String: String] = [:]) async {
+            await events?.container(action, container, change: change, extra: extra)
+        }
+
+        /// The exit a stop left, from the engine, then the stop itself.
+        func reportStopped(_ container: DockerContainer) async {
+            guard events != nil else { return }
+            let exitCode = (try? await engine.get(container.engineID))?.flatMap(\.exitCode)
+            await report("die", container, change: .died(exitCode: exitCode))
+            await report("stop", container)
         }
 
         /// The reference with `:latest` when it names no tag or digest, as dockerd reports a
@@ -188,7 +211,7 @@ public enum ContainerRoutes {
             } catch {
                 if container.extras?.autoRemove == true {
                     try? await engine.delete(container.snapshot, force: true)
-                    await removed(container.engineID, failure: DockerContainerProcesses.message(error))
+                    await removed(container, failure: DockerContainerProcesses.message(error))
                 }
                 throw error
             }
@@ -196,7 +219,9 @@ public enum ContainerRoutes {
 
         /// What follows a deletion: waits on it answer, attaches waiting for it go, and so do
         /// its execs that are not running.
-        func removed(_ engineID: String, failure: String? = nil) async {
+        func removed(_ container: DockerContainer, failure: String? = nil) async {
+            let engineID = container.engineID
+            await report("destroy", container, change: .removed)
             await identities.forget(engineID: engineID)
             await streams.waits.removed(engineID, failure: failure)
             await streams.attaches.release(engineID: engineID)
@@ -214,7 +239,10 @@ public enum ContainerRoutes {
             guard ContainerViewMapper.isRunning(container.snapshot) else {
                 return .empty(.notModified)
             }
-            try await engine.stop(container.snapshot, timeout: try stopTimeout(request), signal: request.query("signal").flatMap { $0.isEmpty ? nil : $0 })
+            let signal = request.query("signal").flatMap { $0.isEmpty ? nil : $0 }
+            await report("kill", container, extra: ["signal": DockerSignals.number(signal ?? container.snapshot.configuration.stopSignal ?? "TERM")])
+            try await engine.stop(container.snapshot, timeout: try stopTimeout(request), signal: signal)
+            await reportStopped(container)
             return .empty()
         }
 
@@ -225,6 +253,8 @@ public enum ContainerRoutes {
             }
             let signal = request.query("signal").flatMap { $0.isEmpty ? nil : $0 } ?? "KILL"
             try await engine.kill(container.snapshot, signal: signal)
+            // The exit, if the signal ends it, is the engine's to report.
+            await report("kill", container, extra: ["signal": DockerSignals.number(signal)])
             return .empty()
         }
 
@@ -233,7 +263,10 @@ public enum ContainerRoutes {
             let timeout = try stopTimeout(request)
             do {
                 if ContainerViewMapper.isRunning(container.snapshot) {
-                    try await engine.stop(container.snapshot, timeout: timeout, signal: request.query("signal").flatMap { $0.isEmpty ? nil : $0 })
+                    let signal = request.query("signal").flatMap { $0.isEmpty ? nil : $0 }
+                    await report("kill", container, extra: ["signal": DockerSignals.number(signal ?? container.snapshot.configuration.stopSignal ?? "TERM")])
+                    try await engine.stop(container.snapshot, timeout: timeout, signal: signal)
+                    await reportStopped(container)
                 }
                 // The engine's snapshot after the stop, so that the start acts on the stopped
                 // container rather than the running one seen before it.
@@ -242,6 +275,7 @@ public enum ContainerRoutes {
                     throw DockerAPIError.notFound("No such container: \(reference)")
                 }
                 _ = try await start(stopped)
+                await report("restart", stopped)
             } catch let error as DockerAPIError {
                 throw DockerAPIError(error.status, "Cannot restart container \(reference): \(error.message)")
             } catch {
@@ -253,6 +287,9 @@ public enum ContainerRoutes {
         func rename(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
             let (container, all) = try await find(reference)
             try await identities.rename(container, to: request.query("name") ?? "", among: all)
+            if let events, let renamed = await identities.join([container.snapshot]).first {
+                await events.container("rename", renamed, change: .none, extra: ["oldName": "/" + container.name])
+            }
             return .empty()
         }
 
@@ -265,8 +302,13 @@ public enum ContainerRoutes {
                     "cannot remove container \"\(reference)\": container is \(ContainerViewMapper.status(container.snapshot).rawValue): stop the container before removing or force remove"
                 )
             }
+            if ContainerViewMapper.isRunning(container.snapshot) {
+                // A forced removal kills it, as dockerd does: SIGKILL's exit status.
+                await report("kill", container, extra: ["signal": DockerSignals.number("KILL")])
+                await report("die", container, change: .died(exitCode: 137))
+            }
             try await engine.delete(container.snapshot, force: force)
-            await removed(container.engineID)
+            await removed(container)
             if removeVolumes {
                 for volume in container.extras?.anonymousVolumes ?? [] {
                     // dockerd removes what it can and does not fail the delete over the rest.
@@ -293,7 +335,7 @@ public enum ContainerRoutes {
                     // dockerd skips a container it cannot remove and goes on with the rest.
                     continue
                 }
-                await removed(container.engineID)
+                await removed(container)
                 deleted.append(container.dockerID)
             }
             return try .json(DockerContainerPruneResponse(ContainersDeleted: deleted.isEmpty ? nil : deleted, SpaceReclaimed: 0))

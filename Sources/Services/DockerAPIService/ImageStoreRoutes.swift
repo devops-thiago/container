@@ -28,12 +28,14 @@ extension ImageRoutes {
     ///     load body goes to `DockerHTTPLimits.spoolDirectory`, which must be such a place too.
     ///   - maxLoadBytes: the largest archive `POST /images/load` takes. Its body is spooled to a
     ///     file under this bound instead of being held in memory.
+    ///   - events: where pulls, pushes, tags and deletes are reported; nil reports nothing.
     public static func register(
         on router: inout DockerRouter, engine: some EngineImages, containers: some EngineContainers, identities: DockerIdentityStore,
-        scratch: URL, maxLoadBytes: Int = defaultMaxLoadBytes, progressInterval: Duration = .milliseconds(100)
+        scratch: URL, maxLoadBytes: Int = defaultMaxLoadBytes, progressInterval: Duration = .milliseconds(100), events: DockerEventBus? = nil
     ) {
-        register(on: &router, engine: engine, progressInterval: progressInterval)
-        let routes = StoreRoutes(engine: engine, containers: containers, identities: identities, scratch: scratch, progressInterval: progressInterval)
+        register(on: &router, engine: engine, progressInterval: progressInterval, events: events)
+        let routes = StoreRoutes(
+            engine: engine, containers: containers, identities: identities, scratch: scratch, progressInterval: progressInterval, events: events)
         // Literal paths first: they tie on literal segments with the `{name+}` patterns.
         router.add(.GET, "/images/json") { request, _ in try await routes.list(request) }
         router.add(.GET, "/images/get") { request, _ in try await routes.save(request.query["names"] ?? [], request) }
@@ -56,6 +58,22 @@ extension ImageRoutes {
         let identities: DockerIdentityStore
         let scratch: URL
         let progressInterval: Duration
+        let events: DockerEventBus?
+
+        /// An image event as dockerd reports one: by the image's ID, or by the reference for a
+        /// pull or push, with the name it concerns.
+        func report(_ action: String, _ actorID: String, name: String) async {
+            await events?.publish(type: "image", action: action, actorID: actorID, attributes: ["name": name])
+        }
+
+        /// What a delete or prune did, item by item: `untag` for a reference, `delete` for the
+        /// image.
+        func report(_ items: [DockerImageDeleteItem], imageID: String) async {
+            for item in items {
+                if item.Untagged != nil { await report("untag", imageID, name: imageID) }
+                if let deleted = item.Deleted { await report("delete", deleted, name: deleted) }
+            }
+        }
 
         func catalog() async throws -> DockerImageCatalog {
             DockerImageCatalog(try await engine.list())
@@ -86,6 +104,7 @@ extension ImageRoutes {
             let target = try Self.target(repo: request.query("repo") ?? "", tag: request.query("tag") ?? "")
             let match = try await catalog().resolve(name)
             try await engine.tag((match.record ?? match.image.primary).reference, as: target.normalized)
+            await report("tag", match.image.id, name: target.familiar)
             return .empty(.created)
         }
 
@@ -113,10 +132,12 @@ extension ImageRoutes {
         func delete(_ name: String, _ request: DockerRequest) async throws -> DockerResponse {
             let force = try request.bool("force")
             let noprune = try request.bool("noprune")
-            let plan = try ImageDeletion.plan(try await catalog().resolve(name), force: force, containers: try await dockerContainers())
+            let match = try await catalog().resolve(name)
+            let plan = try ImageDeletion.plan(match, force: force, containers: try await dockerContainers())
             for record in plan.remove {
                 try await engine.delete(record.reference)
             }
+            await report(plan.items, imageID: match.image.id)
             if !noprune && plan.items.contains(where: { $0.Deleted != nil }) {
                 _ = try? await engine.collectGarbage()
             }
@@ -136,8 +157,10 @@ extension ImageRoutes {
                         untagged.append(.untagged(record.familiarReference))
                     }
                     items += untagged + [.deleted(image.id)]
+                    await report(untagged + [.deleted(image.id)], imageID: image.id)
                 } catch {
                     items += untagged
+                    await report(untagged, imageID: image.id)
                 }
             }
             let reclaimed = items.contains { $0.Deleted != nil } ? ((try? await engine.collectGarbage()) ?? 0) : 0
@@ -263,6 +286,9 @@ extension ImageRoutes {
                     }
                     // A digest is only reported when it is the one the registry has: pinning
                     // an image by a digest it does not serve would fail later, and far away.
+                    if let parsed = record.parsed {
+                        await self.report("push", parsed.familiar, name: parsed.familiarName)
+                    }
                     guard let pushed else { continue }
                     try await writer.writeJSON(DockerProgressMessage(status: "\(id): digest: \(pushed.digest) size: \(pushed.size)"))
                     try await writer.writeJSON(DockerAuxMessage(aux: .init(Tag: record.parsed?.tag ?? "", Digest: pushed.digest, Size: pushed.size)))

@@ -362,10 +362,13 @@ public enum NetworkMapper {
 /// `GET /networks`, `GET /networks/{id}`, `POST /networks/create`, `DELETE /networks/{id}`,
 /// `POST /networks/prune`, and `connect` and `disconnect` for a container that has not run.
 public enum NetworkRoutes {
+    /// - Parameter events: where creates, removals, connects and disconnects are reported; nil
+    ///   reports nothing.
     public static func register(
-        on router: inout DockerRouter, engine: some EngineNetworks, containers: some EngineContainers, identities: DockerIdentityStore
+        on router: inout DockerRouter, engine: some EngineNetworks, containers: some EngineContainers, identities: DockerIdentityStore,
+        events: DockerEventBus? = nil
     ) {
-        let routes = Routes(engine: engine, containers: containers, identities: identities)
+        let routes = Routes(engine: engine, containers: containers, identities: identities, events: events)
         router.add(.GET, "/networks") { request, _ in try await routes.list(request) }
         router.add(.POST, "/networks/create") { request, _ in try await routes.create(request) }
         router.add(.POST, "/networks/prune") { request, _ in try await routes.prune(request) }
@@ -381,6 +384,16 @@ public enum NetworkRoutes {
         let engine: Engine
         let containers: Containers
         let identities: DockerIdentityStore
+        let events: DockerEventBus?
+
+        /// A network event as dockerd reports one: by ID, with its name and driver.
+        func report(_ action: String, _ network: NetworkResource, extra: [String: String] = [:]) async {
+            guard let events else { return }
+            let shown = NetworkMapper.network(network, containers: nil)
+            var attributes = ["name": shown.Name, "type": shown.Driver]
+            attributes.merge(extra) { _, new in new }
+            await events.publish(type: "network", action: action, actorID: shown.Id, attributes: attributes)
+        }
 
         func dockerContainers() async throws -> [DockerContainer] {
             await identities.join(try await containers.list())
@@ -403,6 +416,7 @@ public enum NetworkRoutes {
                 throw DockerAPIError.conflict("network with name \(plan.name) already exists")
             }
             let network = try await engine.create(plan)
+            await report("create", network)
             return try .json(DockerNetworkCreateResponse(Id: network.id, Warning: warnings.joined(separator: "\n")), status: .created)
         }
 
@@ -422,6 +436,7 @@ public enum NetworkRoutes {
                 )
             }
             try await engine.delete(network.id, requiredLabels: nil)
+            await report("destroy", network)
             return .empty()
         }
 
@@ -438,6 +453,7 @@ public enum NetworkRoutes {
                 do {
                     try await engine.delete(network.id, requiredLabels: required)
                     deleted.append(network.name)
+                    await report("destroy", network)
                 } catch {
                     continue
                 }
@@ -485,6 +501,7 @@ public enum NetworkRoutes {
                 }
             }
             try await recreate(container, networks: networks)
+            await report(connect ? "connect" : "disconnect", network, extra: ["container": container.dockerID])
             return .empty(.ok)
         }
 

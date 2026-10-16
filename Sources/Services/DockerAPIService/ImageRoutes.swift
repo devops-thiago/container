@@ -82,9 +82,13 @@ public struct DockerPulledImage: Sendable, Equatable {
 
 /// The image routes: pull, and with the engine's containers at hand, everything else.
 public enum ImageRoutes {
-    /// - Parameter progressInterval: the least time between two progress lines.
-    public static func register(on router: inout DockerRouter, engine: some EngineImages, progressInterval: Duration = .milliseconds(100)) {
-        router.add(.POST, "/images/create") { request, _ in try pull(request, engine: engine, progressInterval: progressInterval) }
+    /// - Parameters:
+    ///   - progressInterval: the least time between two progress lines.
+    ///   - events: where a pull is reported once it is done; nil reports nothing.
+    public static func register(
+        on router: inout DockerRouter, engine: some EngineImages, progressInterval: Duration = .milliseconds(100), events: DockerEventBus? = nil
+    ) {
+        router.add(.POST, "/images/create") { request, _ in try pull(request, engine: engine, progressInterval: progressInterval, events: events) }
     }
 
     static func validate(platform: String?) throws(DockerAPIError) {
@@ -98,7 +102,9 @@ public enum ImageRoutes {
     /// Everything that can be refused is refused before the head, as a status the CLI shows.
     /// After the head, a failure is the stream's last line, `{"errorDetail":…,"error":…}`,
     /// which is how the CLI expects a failed pull.
-    static func pull(_ request: DockerRequest, engine: some EngineImages, progressInterval: Duration) throws(DockerAPIError) -> DockerResponse {
+    static func pull(
+        _ request: DockerRequest, engine: some EngineImages, progressInterval: Duration, events: DockerEventBus? = nil
+    ) throws(DockerAPIError) -> DockerResponse {
         if let source = request.query("fromSrc"), !source.isEmpty {
             throw .notImplemented("importing an image is not supported by SiliconShip: load an image archive with docker load instead")
         }
@@ -151,6 +157,8 @@ public enum ImageRoutes {
                 try await writer.writeJSON(DockerProgressMessage.failure((error as? DockerAPIError)?.message ?? "\(error)"))
                 return
             }
+            // As dockerd reports a pull: by the reference as the client knows it.
+            await events?.publish(type: "image", action: "pull", actorID: reference.familiar, attributes: ["name": DockerEventFilter.stripTag(reference.familiar)])
             try await writer.writeJSON(DockerProgressMessage(status: "Pull complete", id: id))
             try await writer.writeJSON(DockerProgressMessage(status: "Digest: \(result.digest)"))
             let status = result.updated ? "Downloaded newer image for" : "Image is up to date for"

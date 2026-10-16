@@ -105,8 +105,12 @@ extension DockerAPIAgent {
                 DockerAPIAgent.exit(withError: error)
             }
             let engine = EngineContainersClient()
-            let streams = DockerContainerStreams(engine: engine, log: log)
-            ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
+            // Stage A's events: what this service does, as it does it, and the engine's
+            // containers read once a second while anyone streams `/events`.
+            let events = DockerEventBus(log: log, source: { await identities.join(try await engine.list()) })
+            EventRoutes.register(on: &router, events: events)
+            let streams = DockerContainerStreams(engine: engine, log: log, events: events)
+            ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams, events: events)
             ContainerToolRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
             // The images service reads a loaded archive and writes a saved one itself, so both,
             // and every spooled request body, live where it can reach them.
@@ -117,10 +121,10 @@ extension DockerAPIAgent {
                 log.error("no shared temporary directory", metadata: ["error": "\(error)"])
                 DockerAPIAgent.exit(withError: error)
             }
-            ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch)
+            ImageRoutes.register(on: &router, engine: EngineImagesClient(), containers: engine, identities: identities, scratch: scratch, events: events)
             AuthRoutes.register(on: &router, engine: EngineRegistryLoginClient())
-            VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities)
-            NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities)
+            VolumeRoutes.register(on: &router, engine: EngineVolumesClient(), containers: engine, identities: identities, events: events)
+            NetworkRoutes.register(on: &router, engine: EngineNetworksClient(), containers: engine, identities: identities, events: events)
             let service = DockerAPIServer(router: router, limits: DockerHTTPLimits(spoolDirectory: scratch), log: log)
             let uid = getuid()
 
@@ -167,6 +171,7 @@ extension DockerAPIAgent {
                 log.info("docker api helper has no owning app; stopping")
                 // Attaches and waits end now rather than with a connection reset.
                 await streams.shutdown()
+                await events.shutdown()
                 cleanup()
                 Foundation.exit(0)
             }
