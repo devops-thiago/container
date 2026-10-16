@@ -424,6 +424,56 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Set labels on a container. The server lets only some keys change (its
+    /// `ContainerLabelPolicy`); any other is refused, and nothing is changed.
+    ///
+    /// - Parameter expectedIncarnation: the exact container observed; another one made since
+    ///   under the same ID is not changed.
+    public func updateLabels(id: String, labels: [String: String], expectedIncarnation: String? = nil) async throws {
+        let request = XPCMessage(route: .containerUpdateLabels)
+        request.set(key: .id, value: id)
+        request.set(key: .containerLabels, value: try JSONEncoder().encode(labels))
+        if let expectedIncarnation {
+            request.set(key: .expectedIncarnation, value: expectedIncarnation)
+        }
+        do {
+            try await xpcClient.send(request, responseTimeout: .seconds(10))
+        } catch let error as ContainerizationError {
+            throw error
+        } catch {
+            throw ContainerizationError(.internalError, message: "failed to set labels on container \(id)", cause: error)
+        }
+    }
+
+    /// Subscribe to the API server's container events.
+    ///
+    /// - Parameter since: the last event read from an earlier subscription. The events after it
+    ///   come first when the server still has them all; otherwise the subscription says `gap`.
+    ///   nil asks for the events from now on.
+    public func events(since: ContainerEventCursor? = nil) async throws -> ContainerEventSubscription {
+        let request = XPCMessage(route: .containerEvent)
+        if let since {
+            request.set(key: .processNonce, value: since.processNonce)
+            request.set(key: .eventsSince, value: since.sequence)
+        }
+        let response: XPCMessage
+        do {
+            response = try await xpcClient.send(request, responseTimeout: .seconds(10))
+        } catch {
+            throw ContainerizationError(.internalError, message: "failed to subscribe to container events", cause: error)
+        }
+        guard let handle = response.fileHandle(key: .fd) else {
+            throw ContainerizationError(.internalError, message: "the container events subscription carried no stream")
+        }
+        guard let nonce = response.string(key: .processNonce) else {
+            close(handle.fileDescriptor)
+            throw ContainerizationError(.internalError, message: "the container events subscription named no server process")
+        }
+        return ContainerEventSubscription(
+            processNonce: nonce, cursor: response.uint64(key: .eventsCursor), gap: response.bool(key: .eventsGap),
+            events: ContainerEventLines.events(from: handle.fileDescriptor))
+    }
+
     /// Dial a port on the container via vsock.
     public func dial(id: String, port: UInt32) async throws -> FileHandle {
         let request = XPCMessage(route: .containerDial)

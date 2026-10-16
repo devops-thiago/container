@@ -145,6 +145,7 @@ extension APIServer {
                 let containersService = try initializeContainersService(
                     pluginLoader: pluginLoader,
                     containerSystemConfig: containerSystemConfig,
+                    processNonce: processNonce,
                     log: log,
                     routes: &routes
                 )
@@ -482,9 +483,10 @@ extension APIServer {
             routes[XPCRoute.getDefaultKernel] = XPCServer.route(harness.getDefaultKernel)
         }
 
-        private func initializeContainersService(
+        func initializeContainersService(
             pluginLoader: PluginLoader,
             containerSystemConfig: ContainerSystemConfig,
+            processNonce: String,
             log: Logger,
             routes: inout [XPCRoute: XPCServer.RouteHandler]
         ) throws -> ContainersService {
@@ -497,7 +499,11 @@ extension APIServer {
                 pluginLoader: pluginLoader,
                 containerSystemConfig: containerSystemConfig,
                 log: log,
-                debugHelpers: debug
+                debugHelpers: debug,
+                // Numbered for this process: a subscriber that reconnects to another one is told
+                // it missed events, rather than given another process's numbers.
+                events: ContainerEventHub(processNonce: processNonce, log: log),
+                labelPolicy: Self.containerLabelPolicy
             )
             let harness = ContainersHarness(service: service, log: log)
 
@@ -519,9 +525,17 @@ extension APIServer {
             routes[XPCRoute.containerCopyOut] = harness.copyOut(_:session:)
             routes[XPCRoute.containerExport] = XPCServer.route(harness.export)
             routes[XPCRoute.containerClean] = XPCServer.route(harness.clean)
+            routes[XPCRoute.containerEvent] = XPCServer.route(harness.events)
+            routes[XPCRoute.containerUpdateLabels] = XPCServer.route(harness.updateLabels)
 
             return service
         }
+
+        /// The one label a client may change after create: the name the Docker API agent keeps
+        /// a container under (its `DockerLabels.name`), so a rename lives in engine data and every
+        /// client reads the same name. Not the whole `dev.siliconship.` namespace: the agent's
+        /// ID and image labels tie a container to its Docker identity, and must stay as made.
+        static let containerLabelPolicy = ContainerLabelPolicy(nameKey: "dev.siliconship.docker.name")
 
         private func initializeNetworksService(
             pluginLoader: PluginLoader,

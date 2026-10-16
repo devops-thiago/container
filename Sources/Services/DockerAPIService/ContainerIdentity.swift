@@ -18,12 +18,12 @@ import ContainerResource
 import CryptoKit
 import Foundation
 
-/// The labels this service puts on the containers it creates. They are written once, at create:
-/// the engine has no way to change a container's labels afterwards.
+/// The labels this service puts on the containers it creates. They are written at create, and
+/// only the name changes after: the engine lets that one label change, and no other.
 public enum DockerLabels {
     public static let prefix = "dev.siliconship.docker."
-    /// The Docker name at create, without its leading `/`. A rename is kept by the identity
-    /// store, so this is where a name starts, not necessarily where it is now.
+    /// The Docker name, without its leading `/`: set at create, and by a rename on an engine that
+    /// keeps names. On such an engine it is where a name is; the identity store only caches it.
     public static let name = prefix + "name"
     /// The 64-hex Docker ID, whose first 12 characters are the engine's ID.
     public static let id = prefix + "id"
@@ -96,13 +96,25 @@ public struct DockerContainerRecord: Codable, Sendable, Equatable {
     public var dockerID: String
     public var name: String
     public var extras: DockerContainerExtras?
+    /// The name was changed here, on an engine that could not keep it, so it is not in the
+    /// container's name label: until it is, it wins over the label. nil in a record written
+    /// before names lived in the engine, where a name unlike the label's is such a rename.
+    public var localRename: Bool?
 
-    public init(engineID: String, incarnation: String, dockerID: String, name: String, extras: DockerContainerExtras? = nil) {
+    public init(
+        engineID: String, incarnation: String, dockerID: String, name: String, extras: DockerContainerExtras? = nil, localRename: Bool? = nil
+    ) {
         self.engineID = engineID
         self.incarnation = incarnation
         self.dockerID = dockerID
         self.name = name
         self.extras = extras
+        self.localRename = localRename
+    }
+
+    /// Whether the name is a rename the engine does not have, given the name the engine has.
+    func isLocalRename(engineName: String) -> Bool {
+        localRename ?? (name != engineName)
     }
 }
 
@@ -127,10 +139,12 @@ public struct DockerContainer: Sendable {
 /// The mapping between Docker identities and engine containers, as a value.
 ///
 /// A container this service created carries its Docker ID and name in labels and has a record.
-/// The record wins, since a rename can only change the record. A labelled container without a
+/// The name is the label's: a rename sets it in the engine, so every client of the engine reads
+/// the same one, and the record only caches it. A rename made here on an engine that could not
+/// keep it is the exception, and wins until the engine has it. A labelled container without a
 /// record (the store was lost) gets one back from its labels. Any other container was made by
 /// `container run` or the app: its Docker ID is the SHA-256 of its engine ID, and its name is its
-/// engine ID, until it is renamed and so gets a record of its own.
+/// name label if it was renamed, otherwise its engine ID.
 public struct DockerIdentityTable: Sendable, Equatable {
     public private(set) var records: [String: DockerContainerRecord]
 
@@ -152,21 +166,34 @@ public struct DockerIdentityTable: Sendable, Equatable {
     public mutating func join(_ snapshots: [ContainerSnapshot]) -> [DockerContainer] {
         var kept: [String: DockerContainerRecord] = [:]
         let containers = snapshots.map { snapshot -> DockerContainer in
-            if let record = records[snapshot.id], Self.sameIncarnation(record.incarnation, snapshot.incarnation) {
+            let labels = snapshot.configuration.labels
+            let engineName = Self.engineName(snapshot)
+            if var record = records[snapshot.id], Self.sameIncarnation(record.incarnation, snapshot.incarnation) {
+                let local = record.isLocalRename(engineName: engineName)
+                record.localRename = local
+                if !local { record.name = engineName }
                 kept[snapshot.id] = record
                 return DockerContainer(snapshot: snapshot, dockerID: record.dockerID, name: record.name, extras: record.extras)
             }
-            let labels = snapshot.configuration.labels
             if let id = labels[DockerLabels.id], Self.isDockerID(id), id.hasPrefix(snapshot.id) {
                 let record = DockerContainerRecord(
-                    engineID: snapshot.id, incarnation: snapshot.incarnation, dockerID: id, name: labels[DockerLabels.name] ?? snapshot.id)
+                    engineID: snapshot.id, incarnation: snapshot.incarnation, dockerID: id, name: engineName, localRename: false)
                 kept[snapshot.id] = record
                 return DockerContainer(snapshot: snapshot, dockerID: record.dockerID, name: record.name)
             }
-            return DockerContainer(snapshot: snapshot, dockerID: Self.foreignID(engineID: snapshot.id), name: snapshot.id)
+            return DockerContainer(snapshot: snapshot, dockerID: Self.foreignID(engineID: snapshot.id), name: engineName)
         }
         records = kept
         return containers
+    }
+
+    /// The name the engine keeps for a container: its name label, or its engine ID without one.
+    public static func engineName(_ snapshot: ContainerSnapshot) -> String {
+        engineName(id: snapshot.id, labels: snapshot.configuration.labels)
+    }
+
+    public static func engineName(id: String, labels: [String: String]) -> String {
+        labels[DockerLabels.name].flatMap { $0.isEmpty ? nil : $0 } ?? id
     }
 
     /// An empty incarnation comes from an engine that did not report one; it matches anything.
@@ -182,14 +209,16 @@ public struct DockerIdentityTable: Sendable, Equatable {
         records[engineID] = nil
     }
 
-    /// Gives `container` a new name, making it a record if it had none.
-    public mutating func rename(_ container: DockerContainer, to name: String) {
+    /// Gives `container` a new name, making it a record if it had none. `local` when the engine
+    /// does not have the name.
+    public mutating func rename(_ container: DockerContainer, to name: String, local: Bool = true) {
         var record =
             records[container.engineID]
             ?? DockerContainerRecord(
                 engineID: container.engineID, incarnation: container.snapshot.incarnation, dockerID: container.dockerID, name: container.name,
                 extras: container.extras)
         record.name = name
+        record.localRename = local
         records[container.engineID] = record
     }
 
@@ -388,9 +417,9 @@ public actor DockerIdentityStore {
         reserved[reservation.name] = nil
     }
 
-    /// Renames `container`. The engine's label keeps the first name; this store keeps the
-    /// current one.
-    public func rename(_ container: DockerContainer, to requested: String, among containers: [DockerContainer]) throws(DockerAPIError) {
+    /// The name a rename of `container` to `requested` gives it, without its `/`, once it is
+    /// known to be a valid one, not its current one, and free.
+    public func checkRename(_ container: DockerContainer, to requested: String, among containers: [DockerContainer]) throws(DockerAPIError) -> String {
         let name = requested.hasPrefix("/") ? String(requested.dropFirst()) : requested
         guard !name.isEmpty else {
             throw .badRequest("Neither old nor new names may be empty")
@@ -406,11 +435,33 @@ public actor DockerIdentityStore {
         } catch {
             throw .conflict("Error when allocating new name: \(error.message)")
         }
+        return name
+    }
+
+    /// Renames `container` here alone, for an engine that cannot keep names: this store keeps
+    /// the name, over the label, until the engine has it.
+    public func rename(_ container: DockerContainer, to requested: String, among containers: [DockerContainer]) throws(DockerAPIError) {
+        let name = try checkRename(container, to: requested, among: containers)
         table.rename(container, to: name)
         do {
             try save()
         } catch {
             throw .internalError("could not keep the new name: \(error)")
+        }
+    }
+
+    /// The engine has `container` under `name` now: the label is where the name is.
+    public func renamedInEngine(_ container: DockerContainer, to name: String) {
+        table.rename(container, to: name, local: false)
+        try? save()
+    }
+
+    /// The renames made here that the engine does not have, as `(container, name)`, for an
+    /// engine that can now keep them.
+    public func localRenames(_ snapshots: [ContainerSnapshot]) -> [(DockerContainer, String)] {
+        join(snapshots).compactMap { container in
+            guard let record = table.records[container.engineID], record.localRename == true else { return nil }
+            return (container, record.name)
         }
     }
 

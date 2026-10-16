@@ -186,6 +186,17 @@ struct EngineContainersClient: EngineContainers {
         }
     }
 
+    func supportsRename() async -> Bool {
+        (try? await ClientHealthCheck.ping(timeout: .seconds(5)))?.supports(.containerLabels) ?? false
+    }
+
+    func rename(_ container: ContainerSnapshot, to name: String) async throws {
+        try await Self.translated {
+            try await ContainerClient().updateLabels(
+                id: container.id, labels: [DockerLabels.name: name], expectedIncarnation: Self.incarnation(container))
+        }
+    }
+
     func deleteVolume(_ name: String) async throws {
         try await Self.translated { try await ClientVolume.delete(name: name) }
     }
@@ -223,5 +234,20 @@ struct EngineProcessClient: EngineProcess {
 
     func resize(width: UInt16, height: UInt16) async throws {
         try await process.resize(Terminal.Size(width: width, height: height))
+    }
+}
+
+/// The engine's container events, through the client the `container` commands use. An engine
+/// that does not say it has them is not asked: it would not answer the route.
+struct EngineEventFeedClient: DockerEngineEventFeed {
+    func available() async -> Bool? {
+        guard let health = try? await ClientHealthCheck.ping(timeout: .seconds(5)) else { return nil }
+        return health.supports(.containerEvents)
+    }
+
+    func subscribe(since: ContainerEventCursor?) async throws -> DockerEngineEvents {
+        let subscription = try await ContainerClient().events(since: since)
+        return DockerEngineEvents(
+            processNonce: subscription.processNonce, cursor: subscription.cursor, gap: subscription.gap, events: subscription.events)
     }
 }

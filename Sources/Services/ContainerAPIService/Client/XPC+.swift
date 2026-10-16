@@ -70,6 +70,16 @@ public enum XPCKeys: String {
     case exitedAt
     /// An event that occurred in a container
     case containerEvent
+    /// The last container event a subscriber read, by its sequence number; sent with the
+    /// `processNonce` of the server that numbered it.
+    case eventsSince
+    /// The last container event the server had numbered when a subscription began.
+    case eventsCursor
+    /// The events a subscriber asked to have replayed are not all kept, or were another
+    /// process's: it has to list again.
+    case eventsGap
+    /// JSON `[String: String]`: labels to set on a container.
+    case containerLabels
     /// Error key.
     case error
     /// FD to a container resource key.
@@ -109,6 +119,9 @@ public enum XPCKeys: String {
     case processNonce
     /// How many observable changes the API server has made since it started (`StateGeneration`).
     case stateGeneration
+    /// Comma-separated: what this API server can do that an older one cannot
+    /// (`APIServerCapability`), so a client need not try a route to find out.
+    case apiServerCapabilities
 
     /// Generation-aware system shutdown.
     case expectedLifecycleGeneration
@@ -206,7 +219,10 @@ public enum XPCRoute: String {
     case containerKill
     case containerState
     case containerLogs
+    /// A subscription to container events: the reply carries the read end of a pipe of them.
     case containerEvent
+    /// Set labels on a container, of the keys the server allows to change.
+    case containerUpdateLabels
     case containerStats
     case containerDiskUsage
     case containerCopyIn

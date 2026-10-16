@@ -71,25 +71,67 @@ public struct DockerEventLimits: Sendable {
     /// Events held for a subscriber that has not taken them. One that falls this far behind is
     /// dropped, rather than held for without bound.
     public var bufferedEvents: Int
-    /// How often the engine's containers are read while anyone is subscribed.
+    /// How often the engine's containers are read while anyone is subscribed, when the engine
+    /// has no events route to follow.
     public var pollInterval: Duration
+    /// How long the containers are read that way before the engine is asked again whether it
+    /// has the route: it may have been replaced by one that does.
+    public var engineRecheck: Duration
+    /// How long to wait before following the engine again after its stream ended.
+    public var reconnectDelay: Duration
 
-    public init(maxSubscribers: Int = 64, bufferedEvents: Int = 1024, pollInterval: Duration = .seconds(1)) {
+    public init(
+        maxSubscribers: Int = 64, bufferedEvents: Int = 1024, pollInterval: Duration = .seconds(1), engineRecheck: Duration = .seconds(5),
+        reconnectDelay: Duration = .milliseconds(100)
+    ) {
         self.maxSubscribers = maxSubscribers
         self.bufferedEvents = bufferedEvents
         self.pollInterval = pollInterval
+        self.engineRecheck = engineRecheck
+        self.reconnectDelay = reconnectDelay
     }
+}
+
+/// A subscription to the engine's container events (`ContainerClient.events`).
+public struct DockerEngineEvents: Sendable {
+    public var processNonce: String
+    /// Where to resume from when no event has been read.
+    public var cursor: UInt64
+    /// What came after the cursor asked with is not all there: list again.
+    public var gap: Bool
+    public var events: AsyncThrowingStream<ContainerEvent, any Error>
+
+    public init(processNonce: String, cursor: UInt64, gap: Bool, events: AsyncThrowingStream<ContainerEvent, any Error>) {
+        self.processNonce = processNonce
+        self.cursor = cursor
+        self.gap = gap
+        self.events = events
+    }
+}
+
+/// The engine's container events, for an engine that has them.
+public protocol DockerEngineEventFeed: Sendable {
+    /// Whether the engine running now has the events route; nil when it does not answer.
+    func available() async -> Bool?
+    /// Subscribe, resuming after `since` when it is given.
+    func subscribe(since: ContainerEventCursor?) async throws -> DockerEngineEvents
 }
 
 /// The events this service reports, to the clients streaming `/events`.
 ///
-/// Two sources, as stage A's review decided: what this service does itself is reported as it
-/// does it (a create, a start, a kill, a pull, a volume or network made), and everything else
-/// is found by reading the engine's containers once a second while anyone is subscribed and
-/// comparing them with the last reading: a container that appeared, started, died, changed
+/// A container's events are the engine's, from its events route, while anyone is subscribed
+/// (#230): the engine writes each where it makes the change, whoever asked for it. The engine's
+/// stream is followed from the last event read when it ends, and when the engine is replaced
+/// or more was missed than it keeps, the containers are read again and what changed meanwhile
+/// is reported from the difference. What this service does to images, volumes and networks is
+/// reported as it does it, and so is a container's `restart`, which the engine has no verb for.
+///
+/// An engine without the route (an older one) is read once a second instead, as stage A did:
+/// what this service does itself is reported as it does it, and everything else is found by
+/// comparing each reading with the last: a container that appeared, started, died, changed
 /// health or went. A change this service reported itself is not reported again by the
-/// reading that follows. Nothing is kept for a client that was not subscribed: there is no
-/// history.
+/// reading that follows. The engine is asked again every few seconds whether it has the route.
+/// Nothing is kept for a client that was not subscribed: there is no history.
 ///
 /// Each subscriber has its own bounded buffer. One that falls behind by more than it holds is
 /// dropped with a warning, and its stream ends.
@@ -120,6 +162,7 @@ public actor DockerEventBus {
 
     private let limits: DockerEventLimits
     private let source: ContainerSource?
+    private let feed: (any DockerEngineEventFeed)?
     private let log: Logger
     private let now: @Sendable () -> Date
     private var subscribers: [UInt64: Subscriber] = [:]
@@ -138,15 +181,31 @@ public actor DockerEventBus {
     /// it (a forced removal's process waiter, late) is not reported. Bounded.
     private var destroyed: [String] = []
     private static let destroyedKept = 1024
+    /// The engine's events are being followed: a container's changes are the engine's to report.
+    public private(set) var followingEngine = false
+    /// Where the engine's stream was left, to resume from.
+    private var cursor: ContainerEventCursor?
+    /// Containers this service is removing and making again under the same ID (a network
+    /// connect), whose engine `destroy` and `create` are not changes a client sees. By engine ID,
+    /// the incarnation removed. Bounded.
+    private var recreating: [String: String] = [:]
+    private static let recreatingKept = 64
+
+    /// The actions the engine reports for a container, which this service does not report again
+    /// while it follows the engine.
+    static let engineActions: Set<String> = ["create", "start", "die", "destroy", "rename", "kill", "stop"]
 
     /// - Parameter source: the containers to read while anyone is subscribed, as the container
     ///   routes see them; nil reports only what this service does.
+    /// - Parameter feed: the engine's container events, followed while anyone is subscribed and
+    ///   the engine has them; `source` is read instead when it does not.
     public init(
         limits: DockerEventLimits = .init(), log: Logger = Logger(label: "DockerAPIService"), now: @escaping @Sendable () -> Date = { Date() },
-        source: ContainerSource? = nil
+        source: ContainerSource? = nil, feed: (any DockerEngineEventFeed)? = nil
     ) {
         self.limits = limits
         self.source = source
+        self.feed = feed
         self.log = log
         self.now = now
     }
@@ -217,6 +276,8 @@ public actor DockerEventBus {
     /// reported for this run is not reported twice.
     public func container(_ action: String, _ container: DockerContainer, change: ContainerChange, extra: [String: String] = [:]) {
         guard !subscribers.isEmpty else { return }
+        // The engine reports it, whoever made it.
+        if followingEngine && (Self.engineActions.contains(action) || action.hasPrefix("health_status")) { return }
         let engineID = container.engineID
         var attributes = Self.attributes(container)
         attributes.merge(extra) { _, new in new }
@@ -267,7 +328,12 @@ public actor DockerEventBus {
     // MARK: Reading the engine
 
     private func startPolling() {
-        guard let source, poller == nil else { return }
+        guard poller == nil else { return }
+        if feed != nil {
+            poller = Task { [weak self] in await self?.follow() }
+            return
+        }
+        guard let source else { return }
         let interval = limits.pollInterval
         poller = Task { [weak self] in
             while !Task.isCancelled {
@@ -285,6 +351,175 @@ public actor DockerEventBus {
         touched = [:]
         exitReported = []
         destroyed = []
+        followingEngine = false
+        cursor = nil
+        recreating = [:]
+    }
+
+    // MARK: Following the engine
+
+    /// Follows the engine's events while it has them, and reads its containers while it does
+    /// not, until no one is subscribed.
+    private func follow() async {
+        guard let feed else { return }
+        while !Task.isCancelled {
+            guard await feed.available() == true, !Task.isCancelled else {
+                followingEngine = false
+                await pollFor(limits.engineRecheck)
+                continue
+            }
+            let subscription: DockerEngineEvents
+            do {
+                subscription = try await feed.subscribe(since: cursor)
+            } catch {
+                log.debug("could not follow the engine's events", metadata: ["error": "\(error)"])
+                followingEngine = false
+                await pollFor(limits.engineRecheck)
+                continue
+            }
+            guard !Task.isCancelled else { return }
+            followingEngine = true
+            let resumed = cursor != nil && !subscription.gap
+            if !resumed {
+                cursor = ContainerEventCursor(processNonce: subscription.processNonce, sequence: subscription.cursor)
+                // What changed while nothing was followed, from the difference; or, on the first
+                // subscription, the reading the next one compares with. Read after subscribing,
+                // so that nothing between the two is missed.
+                if let source { await poll(source) }
+            }
+            do {
+                for try await event in subscription.events {
+                    guard !Task.isCancelled else { return }
+                    cursor = ContainerEventCursor(processNonce: subscription.processNonce, sequence: event.sequence)
+                    apply(event)
+                }
+            } catch {
+                log.debug("the engine's events ended", metadata: ["error": "\(error)"])
+            }
+            // The engine went, or this fell behind it: follow it again from where this was.
+            try? await Task.sleep(for: limits.reconnectDelay)
+        }
+    }
+
+    /// Reads the containers once a poll interval for `duration`.
+    private func pollFor(_ duration: Duration) async {
+        let deadline = ContinuousClock.now.advanced(by: duration)
+        repeat {
+            if let source { await poll(source) }
+            try? await Task.sleep(for: limits.pollInterval)
+        } while !Task.isCancelled && ContinuousClock.now < deadline
+    }
+
+    /// Reports an engine event, and keeps the last reading current with it so that a later
+    /// difference starts from here.
+    func apply(_ event: ContainerEvent) {
+        // The engine's own containers (a builder, a cluster node) are not a Docker client's to
+        // see, as no listing shows them (`withoutInfrastructure`).
+        if let owner = event.labels[ResourceLabelKeys.plugin], !owner.isEmpty { return }
+        let engineID = event.id
+        if let removed = recreating[engineID] {
+            switch event.action {
+            case .destroy where event.incarnation == removed:
+                return
+            case .create where event.incarnation != removed:
+                recreating[engineID] = nil
+                if var observed = baseline?[engineID] {
+                    observed.attributes = Self.attributes(event)
+                    baseline?[engineID] = observed
+                }
+                return
+            default:
+                break
+            }
+        }
+        guard let message = Self.dockerEvent(event) else { return }
+        switch event.action {
+        case .create, .start:
+            exitReported.remove(engineID)
+            destroyed.removeAll { $0 == engineID }
+        case .die:
+            exitReported.insert(engineID)
+        case .destroy:
+            exitReported.remove(engineID)
+            markDestroyed(engineID)
+        default:
+            break
+        }
+        if baseline != nil {
+            var observed =
+                baseline?[engineID] ?? Observed(state: .created, dockerID: message.actorID, attributes: Self.attributes(event))
+            observed.attributes = Self.attributes(event)
+            switch event.action {
+            case .create: observed.state = .created
+            case .start: observed.state = .running
+            case .die: observed.state = .stopped
+            case .healthStatus: observed.health = event.health?.rawValue
+            default: break
+            }
+            if event.action == .destroy {
+                baseline?[engineID] = nil
+            } else {
+                baseline?[engineID] = observed
+            }
+        }
+        publish(message)
+    }
+
+    /// This service is about to remove `container` and make it again under the same ID, which
+    /// is not a change a client sees.
+    public func recreating(_ container: DockerContainer) {
+        // Read from the engine's containers instead, a recreate is not seen as one.
+        guard followingEngine else { return }
+        recreating[container.engineID] = container.snapshot.incarnation
+        if recreating.count > Self.recreatingKept, let any = recreating.keys.sorted().first {
+            recreating[any] = nil
+        }
+    }
+
+    /// The recreate of `engineID` did not happen after all.
+    public func recreateEnded(_ engineID: String) {
+        recreating[engineID] = nil
+    }
+
+    /// An engine event as dockerd reports a container's: its labels, image and name as
+    /// attributes, read from the event itself, since the container may be gone by now.
+    static func dockerEvent(_ event: ContainerEvent) -> DockerEvent? {
+        var attributes = attributes(event)
+        let action: String
+        switch event.action {
+        case .healthStatus:
+            guard let health = event.health else { return nil }
+            action = "health_status: \(health.rawValue)"
+        case .die:
+            action = event.action.rawValue
+            if let code = event.exitCode { attributes["exitCode"] = "\(code)" }
+        case .kill:
+            action = event.action.rawValue
+            if let signal = event.attributes["signal"] { attributes["signal"] = DockerSignals.number(signal) }
+        case .rename:
+            action = event.action.rawValue
+            if let old = event.attributes["oldName"] { attributes["oldName"] = "/" + old }
+        default:
+            action = event.action.rawValue
+        }
+        return DockerEvent(type: "container", action: action, actorID: dockerID(event), attributes: attributes, time: event.time)
+    }
+
+    /// The Docker ID of an event's container: the one this service gave it, or the hash of its
+    /// engine ID for one it did not make.
+    static func dockerID(_ event: ContainerEvent) -> String {
+        if let id = event.labels[DockerLabels.id], DockerIdentityTable.isDockerID(id), id.hasPrefix(event.id) {
+            return id
+        }
+        return DockerIdentityTable.foreignID(engineID: event.id)
+    }
+
+    /// The attributes of an event's container, as `attributes(_: DockerContainer)` makes them.
+    static func attributes(_ event: ContainerEvent) -> [String: String] {
+        var attributes = event.labels.filter { !$0.key.hasPrefix(DockerLabels.prefix) }
+        attributes["image"] = event.labels[DockerLabels.image] ?? ContainerViewMapper.shortReference(event.image)
+        attributes["name"] = DockerIdentityTable.engineName(id: event.id, labels: event.labels)
+        return attributes
     }
 
     /// Reads the containers once and reports what changed since the last reading. The first

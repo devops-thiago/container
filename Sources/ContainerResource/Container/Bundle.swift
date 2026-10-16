@@ -200,9 +200,11 @@ extension Bundle {
         try Self.write(self.path.appendingPathComponent(filename), value: value)
     }
 
+    /// Replaces the file whole: a reader never finds half of it, and a crash leaves the old
+    /// one, not one that no longer decodes.
     private static func write(_ path: URL, value: Encodable) throws {
         let data = try JSONEncoder().encode(value)
-        try data.write(to: path)
+        try data.write(to: path, options: .atomic)
     }
 
     public func load<T>(filename: String) throws -> T where T: Decodable {
