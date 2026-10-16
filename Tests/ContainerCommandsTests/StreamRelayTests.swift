@@ -110,9 +110,10 @@ struct StreamRelayTests {
     func aLargeStreamArrivesWhole() throws {
         let wiring = try wire()
         let block = String(repeating: "0123456789abcdef", count: 4096)
+        let toInput = wiring.toInput
         let sender = Thread {
-            for _ in 0..<32 { self.send(block, to: wiring.toInput) }
-            close(wiring.toInput)
+            for _ in 0..<32 { self.send(block, to: toInput) }
+            close(toInput)
         }
         sender.start()
         var total = 0

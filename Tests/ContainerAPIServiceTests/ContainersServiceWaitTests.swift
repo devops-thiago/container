@@ -216,7 +216,7 @@ struct ContainersServiceWaitTests {
         // Publish a successful start through the real state setter. There is no VM or
         // helper in this fixture; the real exit handler still performs record/stop cleanup.
         let state = running
-        try await AsyncLock().withLock { context in
+        await AsyncLock().withLock { context in
             await service.setContainerState(fixture.id, state, context: context)
         }
         let currentExit = ExitStatus(exitCode: 137, exitedAt: Date())

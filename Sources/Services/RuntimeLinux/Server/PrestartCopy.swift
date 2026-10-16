@@ -1,0 +1,145 @@
+//===----------------------------------------------------------------------===//
+// Copyright © 2026 Apple Inc. and the container project authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//===----------------------------------------------------------------------===//
+
+import Containerization
+import ContainerizationArchive
+import ContainerizationError
+import Foundation
+import Synchronization
+import SystemPackage
+
+/// What a copy into a container that has not started needs of the VM's agent.
+protocol GuestCopyAgent: Sendable {
+    /// The file at `path` resolved as if `root` were `/` and confined to it, or `nil` when there
+    /// is nothing there.
+    func identity(root: String, path: String) async throws -> GuestFileIdentity?
+    /// Copy `source` on the host to `path` under `root`. The agent resolves `path` confined to
+    /// `root` (openat2 with `RESOLVE_IN_ROOT`): a symlink or `..` in the image is followed as
+    /// if `root` were `/`, so the write can never land outside it. A directory goes as an
+    /// archive the agent unpacks at `path`; a file is written at `path`, replacing what is there.
+    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws
+}
+
+/// Copies into a container whose VM is up and whose root filesystem is mounted, but whose init
+/// process has not started: between `LinuxContainer.create()` and `start()`. A Docker client
+/// copies files into a created container then (Testcontainers' `withCopyToContainer`), and
+/// containerization's own `copyIn` takes only a started container.
+///
+/// The copy goes through the agent's own copy, anchored at the container's root filesystem in
+/// the VM, which confines every path to it. The destination is resolved as containerization's
+/// `copyIn` resolves it: into an existing directory under the source's name, else at the path
+/// itself.
+enum PrestartCopy {
+    static func copyIn(
+        from source: URL, to destination: String, mode: UInt32, createParents: Bool, rootfs: String, agent: some GuestCopyAgent
+    ) async throws {
+        let path = FilePath(destination)
+        guard path.isAbsolute else {
+            throw ContainerizationError(.invalidArgument, message: "copyIn: destination must be absolute: \(destination)")
+        }
+        guard !path.components.contains(where: { $0.kind == .parentDirectory }) else {
+            throw ContainerizationError(.invalidArgument, message: "copyIn: destination must not climb with '..': \(destination)")
+        }
+        let normalized = path.lexicallyNormalized()
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory) else {
+            throw ContainerizationError(.notFound, message: "copyIn: source not found '\(source.path)'")
+        }
+        let target: FilePath
+        switch try await agent.identity(root: rootfs, path: normalized.string) {
+        case .some(let existing) where existing.isDirectory:
+            target = normalized.appending(source.lastPathComponent)
+        case .some:
+            guard !isDirectory.boolValue else {
+                throw ContainerizationError(.invalidArgument, message: "copyIn: cannot copy directory over existing file: \(normalized)")
+            }
+            target = normalized
+        case .none:
+            target = normalized
+        }
+        try await agent.copy(
+            from: source, isDirectory: isDirectory.boolValue, root: rootfs, path: target.string, mode: mode, createParents: createParents)
+    }
+}
+
+/// `GuestCopyAgent` over vminitd, with the vsock connection the copy streams on.
+struct VminitdCopyAgent: GuestCopyAgent {
+    let agent: Vminitd
+    let vm: any VirtualMachineInstance
+
+    /// Host vsock ports for these copies: a range of their own, apart from containerization's
+    /// per-container allocator (which starts at 0x1000_0000), taken in turn.
+    private static let nextPort = Mutex<UInt32>(0)
+    static let portBase: UInt32 = 0x5353_0000
+
+    static func port() -> UInt32 {
+        nextPort.withLock { next in
+            defer { next = (next + 1) % 0x1_0000 }
+            return portBase + next
+        }
+    }
+
+    func identity(root: String, path: String) async throws -> GuestFileIdentity? {
+        try await VminitdMountAgent(agent: agent).identity(root: root, path: path)
+    }
+
+    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws {
+        let port = Self.port()
+        let listener = try vm.listen(port)
+        defer { try? listener.finish() }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await agent.copy(
+                    direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: isDirectory)
+            }
+            group.addTask {
+                guard let connection = await listener.first(where: { _ in true }) else {
+                    throw ContainerizationError(.internalError, message: "copyIn: the VM did not connect for the copy")
+                }
+                try listener.finish()
+                try await Self.send(source, isDirectory: isDirectory, to: connection)
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    /// Writes `source` to `connection` off the cooperative pool, and closes it: a directory as
+    /// a gzipped pax archive of its contents, a file as its bytes.
+    private static func send(_ source: URL, isDirectory: Bool, to connection: FileHandle) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    defer { connection.closeFile() }
+                    if isDirectory {
+                        let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
+                        try writer.open(fileDescriptor: connection.fileDescriptor)
+                        try writer.archiveDirectory(source)
+                        try writer.finishEncoding()
+                    } else {
+                        let file = try FileHandle(forReadingFrom: source)
+                        defer { try? file.close() }
+                        while let chunk = try file.read(upToCount: 1 << 20), !chunk.isEmpty {
+                            try connection.write(contentsOf: chunk)
+                        }
+                    }
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+}

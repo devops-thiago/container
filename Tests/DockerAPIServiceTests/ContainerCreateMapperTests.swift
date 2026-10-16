@@ -237,6 +237,58 @@ struct ContainerCreateMapperTests {
         #expect(modes.warnings.count == 2)
     }
 
+    /// Testcontainers' Ryuk container as docker-java 3.7.1 encodes it: nulls for what was not set,
+    /// an empty binding for the exposed port, privileged, removed when it exits, and the Docker
+    /// socket bind-mounted in.
+    static func ryukCreate(socket: String) -> String {
+        """
+        {"Hostname":null,"Domainname":null,"User":null,"AttachStdin":null,"AttachStdout":null,"AttachStderr":null,"PortSpecs":null,
+        "Tty":null,"OpenStdin":null,"StdinOnce":null,"Env":null,"Cmd":null,"Healthcheck":null,"ArgsEscaped":null,"Entrypoint":null,
+        "Image":"testcontainers/ryuk:0.14.0","Volumes":{},"WorkingDir":null,"MacAddress":null,"OnBuild":null,"NetworkDisabled":null,
+        "ExposedPorts":{"8080/tcp":{}},"StopSignal":null,"StopTimeout":null,
+        "HostConfig":{"Binds":["\(socket):/var/run/docker.sock:rw"],"BlkioWeight":null,"CapAdd":null,"CapDrop":null,"Dns":null,
+        "DnsOptions":null,"DnsSearch":null,"ExtraHosts":null,"GroupAdd":null,"Links":null,"LogConfig":null,"Memory":null,"NanoCpus":null,
+        "NetworkMode":null,"PortBindings":{"8080/tcp":[{"HostIp":"","HostPort":""}]},"Privileged":true,"PublishAllPorts":null,
+        "ReadonlyRootfs":null,"RestartPolicy":null,"Ulimits":null,"AutoRemove":true,"Mounts":null,"Init":null,"ShmSize":null,"Tmpfs":null,
+        "Sysctls":null,"SecurityOpt":null,"VolumesFrom":null,"Devices":null,"DeviceRequests":null},
+        "Labels":{"org.testcontainers":"true","org.testcontainers.lang":"java","org.testcontainers.version":"2.0.5"},
+        "Shell":null,"NetworkingConfig":null}
+        """
+    }
+
+    @Test("Ryuk's create, nulls and all, maps: its socket bind is a shared mount of the socket itself, its port takes a free one")
+    func ryukCreate() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "dapi-sock-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let socketPath = directory.appending(path: "d.sock").path
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        defer { close(fd) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { raw in
+            socketPath.utf8CString.withUnsafeBytes { raw.copyMemory(from: UnsafeRawBufferPointer(rebasing: $0.prefix(raw.count))) }
+        }
+        let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        try #require(bound == 0)
+
+        let plan = try Fixtures.plan(Self.ryukCreate(socket: socketPath), reference: "testcontainers/ryuk:0.14.0")
+        let mount = try #require(plan.configuration.mounts.first)
+        #expect(plan.configuration.mounts.count == 1)
+        #expect(mount.isVirtiofs && mount.source == socketPath && mount.destination == "/var/run/docker.sock" && mount.options == [])
+        // What the engine checks a grant for and the runtime relays: the socket, not its folder.
+        #expect(mount.sharedFolder == socketPath)
+        #expect(plan.autoRemove)
+        #expect(plan.configuration.publishedPorts.map { "\($0.hostAddress):\($0.hostPort)->\($0.containerPort)" } == ["0.0.0.0:40001->8080"])
+        #expect(plan.warnings == ["Privileged mode is not supported; the container runs unprivileged."])
+        #expect(plan.configuration.labels["org.testcontainers"] == "true")
+        // Control: a regular file bound the same way shares its folder, which is what a grant would be asked for.
+        let file = directory.appending(path: "plain")
+        try Data("x".utf8).write(to: file)
+        let filePlan = try Fixtures.plan(Self.ryukCreate(socket: file.path), reference: "testcontainers/ryuk:0.14.0")
+        #expect(filePlan.configuration.mounts.first?.sharedFolder == directory.resolvingSymlinksInPath().path)
+    }
+
     @Test("binds map a host path to a shared folder and a name to a volume")
     func binds() throws {
         let plan = try Fixtures.plan(#"{"Image":"alpine","HostConfig":{"Binds":["/Users/me/src:/src:ro","data:/data","/tmp/x:/x:rw,z"]}}"#)

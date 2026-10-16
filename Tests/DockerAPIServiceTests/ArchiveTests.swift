@@ -368,12 +368,117 @@ struct ArchiveRouteTests {
         #expect(try notDirectory.json()["message"] as? String == "extraction point is not a directory")
         #expect(try await h.request("PUT", "/containers/box/archive?path=/nope", body: tar.archive).status == 404)
         #expect(try await h.request("GET", "/containers/off/archive?path=/").status == 409)
+        // An upload before the start, as Testcontainers sends it, says why it is refused.
+        let beforeStart = try await h.request("PUT", "/containers/off/archive?path=%2F&noOverwriteDirNonDir=false&copyUIDGID=false", body: tar.archive)
+        #expect(beforeStart.status == 409)
+        #expect((try beforeStart.json()["message"] as? String)?.hasSuffix("copies files into a running container only, so start it first") == true)
+        #expect(h.tools.copyCalls.isEmpty)
         let noPath = try await h.request("GET", "/containers/box/archive")
         #expect(try noPath.json()["message"] as? String == "bad parameter: path cannot be empty")
         let gzip: [UInt8] = [0x1F, 0x8B, 8, 0] + [UInt8](repeating: 0, count: 600)
         #expect(try await h.request("PUT", "/containers/box/archive?path=/", body: gzip).status == 400)
         // Control: the same archive uncompressed goes in.
         #expect(try await h.request("PUT", "/containers/box/archive?path=/", body: tar.archive).status == 200)
+    }
+
+    static func scratchEntries(_ h: ToolHarness) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: h.tools.scratch.path)) ?? ["?"]
+    }
+
+    @Test("an upload into a container that is not running is held, and copied in at its start before its process runs")
+    func uploadBeforeStart() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        // What Testcontainers' withCopyToContainer sends: one file named by its whole path under
+        // the root, with no entry for its directory, uploaded to path=/.
+        var tar = TarBuilder()
+        tar.file("smoke/hello.txt", "hello from the host\n", mode: 0o640)
+        let put = try await h.request(
+            "PUT", "/containers/off/archive?path=%2F&noOverwriteDirNonDir=false&copyUIDGID=false", body: tar.archive, contentType: "application/x-tar")
+        #expect(put.status == 200)
+        // Nothing reaches the container yet: there is none to reach.
+        #expect(h.tools.copyCalls.isEmpty)
+        #expect(Self.scratchEntries(h).count == 1)
+        #expect(await h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+
+        #expect(try await h.request("POST", "/containers/off/start").status == 204)
+        #expect(h.tools.copyCalls == ["in smoke / 755"])
+        // Bootstrapped, not yet started: the process sees the files from its first instruction.
+        #expect(h.tools.copyInStatusCalls == [.stopped])
+        #expect(try String(contentsOf: h.tools.root.appending(path: "smoke/hello.txt"), encoding: .utf8) == "hello from the host\n")
+        #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
+        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+    }
+
+    @Test("an engine that cannot copy before a start still refuses an upload into a container that is not running")
+    func uploadBeforeStartUnsupported() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        var tar = TarBuilder()
+        tar.file("hello.txt", "x")
+        let put = try await h.request("PUT", "/containers/off/archive?path=/", body: tar.archive)
+        #expect(put.status == 409)
+        #expect((try put.json()["message"] as? String)?.hasSuffix("copies files into a running container only, so start it first") == true)
+        #expect(Self.scratchEntries(h).isEmpty)
+        #expect(try await h.request("POST", "/containers/off/start").status == 204)
+        #expect(h.tools.copyCalls.isEmpty)
+    }
+
+    @Test("a held upload that cannot be copied in fails the start and is dropped; a removed container's held upload is dropped")
+    func heldUploadFailureAndRemoval() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with {
+            $0.copyBeforeStart = true
+            $0.copyInError = DockerAPIError.internalError("disk full")
+        }
+        var tar = TarBuilder()
+        tar.file("hello.txt", "x")
+        #expect(try await h.request("PUT", "/containers/off/archive?path=/data", body: tar.archive).status == 200)
+        let failed = try await h.request("POST", "/containers/off/start")
+        #expect(failed.status == 500)
+        #expect((try failed.json()["message"] as? String)?.contains("could not copy hello.txt into /data before the start: disk full") == true)
+        #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
+        // Control: started again, nothing is left to copy.
+        #expect(try await h.request("POST", "/containers/off/start").status == 204)
+        #expect(h.tools.copyCalls == ["in hello.txt /data 644"])
+        _ = try await h.request("POST", "/containers/off/stop?t=0")
+
+        #expect(try await h.request("PUT", "/containers/off/archive?path=/", body: tar.archive).status == 200)
+        #expect(Self.scratchEntries(h).count == 1)
+        #expect(try await h.request("DELETE", "/containers/off?force=1").status == 204)
+        #expect(Self.scratchEntries(h).isEmpty)
+    }
+
+    @Test("an upload held for a start gets the same guards: names that climb, links that point out, devices and the bounds")
+    func heldUploadGuards() async throws {
+        let h = try await ToolHarness.start(options: DockerToolOptions(maxUploadBytes: 8 << 10, maxUploadEntries: 4))
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        var climbing = TarBuilder()
+        climbing.file("fine.txt", "ok")
+        climbing.file("../escape", "pwned")
+        var linkOut = TarBuilder()
+        linkOut.symlink("etc", to: "/etc")
+        var device = TarBuilder()
+        device.entry("dev", type: .characterDevice)
+        var big = TarBuilder()
+        big.file("big", String(repeating: "z", count: 16 << 10))
+        var many = TarBuilder()
+        for index in 0..<6 { many.file("f\(index)", "x") }
+        for (name, tar) in [("climbing", climbing), ("link out", linkOut), ("device", device), ("too big", big), ("too many", many)] {
+            let answer = try await h.request("PUT", "/containers/off/archive?path=/", body: tar.archive)
+            #expect([400, 413].contains(answer.status), "\(name)")
+        }
+        // Nothing was held, and nothing is left in the scratch directory.
+        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(Self.scratchEntries(h).isEmpty)
+        // Control: a small upload of a plain file is held.
+        var plain = TarBuilder()
+        plain.file("ok.txt", "ok")
+        #expect(try await h.request("PUT", "/containers/off/archive?path=/", body: plain.archive).status == 200)
+        #expect(await h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
     }
 
     @Test("an upload that tries to leave its directory is refused before anything is copied in")

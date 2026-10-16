@@ -257,6 +257,7 @@ public enum ContainerRoutes {
             await streams.waits.removed(engineID, failure: failure)
             await streams.attaches.release(engineID: engineID)
             await streams.execs.release(engineID: engineID)
+            await streams.copies.discard(engineID)
         }
 
         func stopTimeout(_ request: DockerRequest) throws(DockerAPIError) -> Int32 {
