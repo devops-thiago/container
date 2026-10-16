@@ -65,6 +65,10 @@ extension EngineContainersClient: EngineContainerTools {
         }
     }
 
+    func supportsCopyBeforeStart() async -> Bool {
+        (try? await ClientHealthCheck.ping(timeout: .seconds(5)))?.supports(.copyBeforeStart) ?? false
+    }
+
     /// The engine's errors as a Docker client should see them. The process and copy calls wrap
     /// what went wrong as their cause, so the message names it.
     private static func translatedTool<T>(_ body: () async throws -> T) async throws -> T {
