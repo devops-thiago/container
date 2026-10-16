@@ -121,7 +121,7 @@ struct DockerAPIServerTests {
     struct FakeEngine: EngineSystem {
         func summary() async throws -> EngineSummary {
             EngineSummary(
-                engineVersion: "1.6.0", engineCommit: "abc123", kernelVersion: "6.12.28", operatingSystem: "SiliconShip",
+                engineVersion: "1.1.0-252-g2b1a137", engineCommit: "abc123", kernelVersion: "6.12.28", operatingSystem: "SiliconShip",
                 architecture: "aarch64", cpus: 8, memoryBytes: 8 << 30, containers: 3, containersRunning: 1,
                 containersStopped: 2, images: 5, name: "test-engine", rootDirectory: "/tmp/engine")
         }
@@ -153,7 +153,15 @@ struct DockerAPIServerTests {
             let version = try await client.readToEnd()
             #expect(version.contains(#""ApiVersion":"1.48""#))
             #expect(version.contains(#""MinAPIVersion":"1.44""#))
-            #expect(version.contains(#""Version":"1.6.0""#))
+            let body = try #require(version.range(of: "\r\n\r\n").map { String(version[$0.upperBound...]) })
+            let json = try #require(try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+            // The server's Version is the Docker release of the API served, which clients
+            // compare with Docker's: Testcontainers refuses one below 1.6.0. The engine's own
+            // version, 1.x, stays on its component.
+            #expect(json["Version"] as? String == "28.0.0")
+            let components = try #require(json["Components"] as? [[String: Any]])
+            #expect(components.first?["Version"] as? String == "1.1.0-252-g2b1a137")
+            #expect((json["Platform"] as? [String: Any])?["Name"] as? String == "SiliconShip")
         }
         try await harness.withClient { second in
             try await second.send("GET /v1.44/info HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")

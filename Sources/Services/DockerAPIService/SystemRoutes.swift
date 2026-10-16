@@ -113,7 +113,8 @@ public enum SystemRoutes {
                         "Os": "linux", "Arch": engine.architecture, "KernelVersion": engine.kernelVersion,
                     ])
             ]
-            Version = engine.engineVersion
+            // The engine's own version is the component's, and `Platform` names it.
+            Version = DockerAPIVersion.dockerRelease
             ApiVersion = DockerAPIVersion.current.description
             MinAPIVersion = DockerAPIVersion.minimum.description
             GitCommit = engine.engineCommit
