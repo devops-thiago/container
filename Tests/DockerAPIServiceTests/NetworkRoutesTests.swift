@@ -207,7 +207,7 @@ struct NetworkRoutesTests {
         {"Container":"m-net-c","EndpointConfig":{"IPAMConfig":{},"Links":null,"Aliases":null,"DriverOpts":{},"GwPriority":0,"NetworkID":"","EndpointID":"","Gateway":"","IPAddress":"","MacAddress":"","IPPrefixLen":0,"IPv6Gateway":"","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"DNSNames":null}}
         """#
 
-    @Test("connect takes an IPAMConfig that names no address, as the Docker CLI sends; one with an address is a 400")
+    @Test("connect takes an IPAMConfig that names no address, as the Docker CLI sends; one with an address is a 400, while create warns")
     func connectEmptyIPAMConfig() async throws {
         let routes = NetworkRoutesTests()
         let addresses = [#"{"IPv4Address":"10.7.0.9"}"#, #"{"IPv6Address":"fd00::9"}"#, #"{"LinkLocalIPs":["169.254.0.9"]}"#]
@@ -224,6 +224,17 @@ struct NetworkRoutesTests {
         let inspect = try #require(try await routes.call(.GET, "/containers/m-net-c/json", on: routes.containerRouter).json() as? [String: Any])
         let networks = try #require((inspect["NetworkSettings"] as? [String: Any])?["Networks"] as? [String: Any])
         #expect(networks.keys.sorted() == ["bridge", "m229-net"])
+
+        // A create that asks for an address is made all the same, and says it was ignored.
+        let pinned = try await routes.call(
+            .POST, "/containers/create?name=m-net-ip",
+            body: #"{"Image":"alpine","HostConfig":{"NetworkMode":"m229-net"},"NetworkingConfig":{"EndpointsConfig":{"m229-net":{"IPAMConfig":{"IPv4Address":"10.7.0.9"}}}}}"#,
+            on: routes.containerRouter)
+        #expect(pinned.status == .created)
+        #expect(
+            (try pinned.json() as? [String: Any])?["Warnings"] as? [String] == [
+                "a static address is not supported by SiliconShip: the network assigns one; IPv4Address was ignored"
+            ])
 
         // Its fields sent empty, as another client may, is no request either.
         #expect(try await routes.call(.POST, "/networks/m229-net/disconnect", body: #"{"Container":"m-net-c"}"#).status == .ok)

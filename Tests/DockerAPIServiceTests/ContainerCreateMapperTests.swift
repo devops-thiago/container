@@ -225,25 +225,36 @@ struct ContainerCreateMapperTests {
         #expect(plan.extras.networkMode == "shop_default")
     }
 
-    @Test("an endpoint's IPAMConfig is refused only when it asks for an address")
+    @Test("an address an endpoint asks for is ignored with a warning; an IPAMConfig naming none says nothing")
     func endpointAddress() throws {
-        // `docker run --network n` with no `--ip` sends no IPAMConfig; another client may send
-        // it empty or with its fields empty.
-        for ipam in [#"{}"#, #"{"IPv4Address":"","IPv6Address":"","LinkLocalIPs":[]}"#, "null"] {
-            let plan = try Fixtures.plan(
+        func plan(_ ipam: String) throws -> DockerCreatePlan {
+            try Fixtures.plan(
                 #"{"Image":"alpine","HostConfig":{"NetworkMode":"shop_default"},"NetworkingConfig":{"EndpointsConfig":{"shop_default":{"IPAMConfig":\#(ipam)}}}}"#
             )
-            #expect(plan.configuration.networks.map(\.network) == ["shop_default"])
         }
-        // Control: an address, `docker run --ip`, `--ip6` or `--link-local-ip`, is refused, not dropped.
-        for ipam in [#"{"IPv4Address":"10.7.0.9"}"#, #"{"IPv6Address":"fd00::9"}"#, #"{"LinkLocalIPs":["169.254.0.9"]}"#] {
-            let error = errorMessage {
-                _ = try Fixtures.plan(
-                    #"{"Image":"alpine","HostConfig":{"NetworkMode":"shop_default"},"NetworkingConfig":{"EndpointsConfig":{"shop_default":{"IPAMConfig":\#(ipam)}}}}"#
-                )
-            }
-            #expect(error?.status == .badRequest)
-            #expect(error?.message == "a static address is not supported by SiliconShip: the network assigns one")
+        // Control: `docker run --network n` with no `--ip` sends no IPAMConfig; another client
+        // may send it empty or with its fields empty. None of these is a request, or a warning.
+        let plain = try plan("{}")
+        for ipam in [#"{}"#, #"{"IPv4Address":"","IPv6Address":"","LinkLocalIPs":[]}"#, "null"] {
+            let unaddressed = try plan(ipam)
+            #expect(unaddressed.configuration.networks.map(\.network) == ["shop_default"])
+            #expect(unaddressed.warnings.isEmpty)
+        }
+        // `docker run --ip`, `--ip6`, `--link-local-ip`, and compose's `ipv4_address` and
+        // `ipv6_address`: the container is made on the network's own address, and told so.
+        let cases = [
+            (#"{"IPv4Address":"10.7.0.9"}"#, ["IPv4Address"]),
+            (#"{"IPv6Address":"fd00::9"}"#, ["IPv6Address"]),
+            (#"{"LinkLocalIPs":["169.254.0.9"]}"#, ["LinkLocalIPs"]),
+            (#"{"IPv4Address":"10.7.0.9","IPv6Address":"fd00::9"}"#, ["IPv4Address", "IPv6Address"]),
+        ]
+        for (ipam, fields) in cases {
+            let addressed = try plan(ipam)
+            #expect(addressed.warnings == fields.map { "a static address is not supported by SiliconShip: the network assigns one; \($0) was ignored" })
+            #expect(addressed.configuration.networks.map(\.network) == plain.configuration.networks.map(\.network))
+            #expect(addressed.configuration.networks.map(\.options.hostname) == plain.configuration.networks.map(\.options.hostname))
+            #expect(addressed.configuration.networks.map(\.options.aliases) == plain.configuration.networks.map(\.options.aliases))
+            #expect(addressed.configuration.networks.allSatisfy { $0.options.macAddress == nil })
         }
     }
 

@@ -247,21 +247,41 @@ public struct DockerEndpointIPAMConfig: Codable, Sendable, Equatable {
         self.LinkLocalIPs = LinkLocalIPs
     }
 
-    /// Whether it names any address.
-    public var requestsAddress: Bool {
-        !(IPv4Address ?? "").isEmpty || !(IPv6Address ?? "").isEmpty || (LinkLocalIPs ?? []).contains { !$0.isEmpty }
+    static let notSupported = "a static address is not supported by SiliconShip: the network assigns one"
+
+    /// The fields that name an address.
+    public var requestedFields: [String] {
+        var fields: [String] = []
+        if !(IPv4Address ?? "").isEmpty { fields.append("IPv4Address") }
+        if !(IPv6Address ?? "").isEmpty { fields.append("IPv6Address") }
+        if (LinkLocalIPs ?? []).contains(where: { !$0.isEmpty }) { fields.append("LinkLocalIPs") }
+        return fields
     }
 
-    /// Refuses a request for an address: the engine's network assigns every one.
+    /// Whether it names any address.
+    public var requestsAddress: Bool { !requestedFields.isEmpty }
+
+    /// Refuses a request for an address, for `network connect`, whose answer has no warnings
+    /// to say it was ignored in: the engine's network assigns every address.
     public static func refuseAddress(_ config: DockerEndpointIPAMConfig?) throws(DockerAPIError) {
         if config?.requestsAddress == true {
-            throw .badRequest("a static address is not supported by SiliconShip: the network assigns one")
+            throw .badRequest(notSupported)
         }
+    }
+
+    /// A warning for each field that names an address, for a create, which runs the container
+    /// with the network's own address rather than failing a compose file that pins one.
+    public static func ignoredAddressWarnings(_ configs: [DockerEndpointIPAMConfig?]) -> [String] {
+        var fields: [String] = []
+        for field in configs.flatMap({ $0?.requestedFields ?? [] }) where !fields.contains(field) {
+            fields.append(field)
+        }
+        return fields.map { "\(notSupported); \($0) was ignored" }
     }
 }
 
 /// `NetworkingConfig.EndpointsConfig` values: the aliases are read, and an address asked for
-/// is refused.
+/// is warned about and ignored.
 public struct DockerEndpointSettings: Codable, Sendable, Equatable {
     public var Aliases: [String]?
     public var IPAMConfig: DockerEndpointIPAMConfig?
