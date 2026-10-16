@@ -66,13 +66,14 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// Docker's `State.Health`. Reset to starting at each start; unhealthy once the run ends,
     /// as Docker leaves it. Kept by this apiserver only, as runs do not outlive it.
     public var health: ContainerHealth?
-    /// Whether the last run ended because a person stopped or killed the container, as
-    /// opposed to its process ending by itself (a crash, an out-of-memory kill, a normal
-    /// exit). A stop records 143 or 137 as Docker does, and this tells such an exit from a
-    /// failure with the same code. False while a run is under way, after a restart under the
-    /// restart policy, and from each start. Nil from an engine that does not say, and in
-    /// snapshots stored before it did: not known.
-    public var stoppedByUser: Bool?
+    /// Whether the last run ended because a stop or a kill was asked for it, by a person or
+    /// by the engine going down, as opposed to its process ending by itself (a crash, an
+    /// out-of-memory kill, a normal exit). A stop records 143 or 137 as Docker does, and this
+    /// tells such an exit from a failure with the same code. A signal other than SIGKILL
+    /// counts only when the exit shows that signal ended the process. False while a run is
+    /// under way and after a restart under the restart policy. Nil from an engine that does
+    /// not say, and in snapshots or exit records written before it did: not known.
+    public var stopRequested: Bool?
 
     public init(
         configuration: ContainerConfiguration,
@@ -85,7 +86,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         restartCount: Int = 0,
         restartError: String? = nil,
         health: ContainerHealth? = nil,
-        stoppedByUser: Bool? = nil
+        stopRequested: Bool? = nil
     ) {
         self.configuration = configuration
         self.incarnation = incarnation
@@ -97,7 +98,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         self.restartCount = restartCount
         self.restartError = restartError
         self.health = health
-        self.stoppedByUser = stoppedByUser
+        self.stopRequested = stopRequested
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -111,7 +112,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         case restartCount
         case restartError
         case health
-        case stoppedByUser
+        case stopRequested
     }
 
     public init(from decoder: any Decoder) throws {
@@ -128,6 +129,6 @@ public struct ContainerSnapshot: Codable, Sendable {
         restartCount = try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
         restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
         health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
-        stoppedByUser = try container.decodeIfPresent(Bool.self, forKey: .stoppedByUser)
+        stopRequested = try container.decodeIfPresent(Bool.self, forKey: .stopRequested)
     }
 }
