@@ -681,10 +681,13 @@ let package = Package(
         .target(
             name: "DockerAPIService",
             dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                "ContainerResource",
             ],
             path: "Sources/Services/DockerAPIService"
         ),
@@ -709,9 +712,12 @@ let package = Package(
         .testTarget(
             name: "DockerAPIServiceTests",
             dependencies: [
+                .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                "ContainerResource",
                 "DockerAPIService",
             ]
         ),
