@@ -43,6 +43,6 @@ public struct DockerAPIError: Error, Sendable, Equatable {
 
     var jsonBody: Data {
         // Encoding a single string field cannot fail.
-        (try? JSONEncoder().encode(Body(message: message))) ?? Data(#"{"message":"internal error"}"#.utf8)
+        (try? DockerJSON.encoder.encode(Body(message: message))) ?? Data(#"{"message":"internal error"}"#.utf8)
     }
 }
