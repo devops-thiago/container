@@ -52,7 +52,7 @@ public struct DockerToolOptions: Sendable {
     }
 }
 
-/// The routes that work on a container's inside: exec, logs, stats, top and archive.
+/// The routes that work on a container's inside: exec, logs, stats, top, archive and export.
 public enum ContainerToolRoutes {
     public static func register<Engine: EngineContainers & EngineContainerTools>(
         on router: inout DockerRouter, engine: Engine, identities: DockerIdentityStore, streams: DockerContainerStreams,
@@ -67,6 +67,7 @@ public enum ContainerToolRoutes {
         router.add(.GET, "/containers/{id}/stats") { request, parameters in try await routes.stats(try parameters["id"], request) }
         router.add(.GET, "/containers/{id}/top") { request, parameters in try await routes.top(try parameters["id"], request) }
         router.add(.GET, "/containers/{id}/archive") { request, parameters in try await routes.archive(try parameters["id"], request) }
+        router.add(.GET, "/containers/{id}/export") { _, parameters in try await routes.export(try parameters["id"]) }
         router.add(.PUT, "/containers/{id}/archive", body: .spool(maxBytes: options.maxUploadBytes)) { request, parameters in
             try await routes.extract(try parameters["id"], request)
         }

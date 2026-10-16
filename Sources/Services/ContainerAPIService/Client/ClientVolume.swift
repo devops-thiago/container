@@ -102,4 +102,14 @@ public struct ClientVolume {
         let size = reply.uint64(key: .volumeSize)
         return size
     }
+
+    /// The bytes of the volume's files, as Docker reports a volume's size, or nil when the
+    /// engine cannot tell: while a container has it mounted, for one example.
+    public static func volumeDataSize(name: String) async throws -> UInt64? {
+        let client = XPCClient(service: serviceIdentifier)
+        let message = XPCMessage(route: .volumeDataSize)
+        message.set(key: .volumeName, value: name)
+        let reply = try await client.send(message)
+        return reply.uint64IfPresent(key: .volumeDataSize)
+    }
 }
