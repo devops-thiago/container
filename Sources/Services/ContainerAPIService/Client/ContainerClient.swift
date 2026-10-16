@@ -355,6 +355,15 @@ public struct ContainerClient: Sendable {
         return size
     }
 
+    /// What the container wrote to its root filesystem, as Docker reports `SizeRw`, or nil
+    /// when the engine cannot tell: while it runs, for one example.
+    public func writableSize(id: String) async throws -> UInt64? {
+        let request = XPCMessage(route: .containerWritableSize)
+        request.set(key: .id, value: id)
+        let reply = try await xpcClient.send(request)
+        return reply.uint64IfPresent(key: .containerWritableSize)
+    }
+
     /// Create a new process inside a running container.
     /// The process is in a created state and must still be started.
     /// An optional deadline bounds creation and subsequent start/wait requests together.

@@ -358,6 +358,23 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    /// The container's writable size; the reply leaves it out when the engine cannot tell.
+    @Sendable
+    public func writableSize(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let containerId = message.string(key: .id) else {
+            throw ContainerizationError(.invalidArgument, message: "id cannot be empty")
+        }
+        guard ManagedContainer.nameValid(containerId) else {
+            throw ContainerizationError(.invalidArgument, message: "container ID \(containerId) is not a valid container ID")
+        }
+
+        let reply = message.reply()
+        if let size = try await service.containerWritableSize(id: containerId) {
+            reply.set(key: .containerWritableSize, value: size)
+        }
+        return reply
+    }
+
     @Sendable
     public func logs(_ message: XPCMessage) async throws -> XPCMessage {
         let id = message.string(key: .id)

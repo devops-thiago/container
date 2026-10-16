@@ -181,6 +181,23 @@ struct VolumeRoutesTests {
         let empty = try #require(try await routes.call(.POST, "/volumes/prune?filters=%7B%22label%22%3A%5B%22m229%3D1%22%5D%7D").json() as? [String: Any])
         #expect(empty["VolumesDeleted"] as? [String] == [])
     }
+
+    @Test("a prune reclaims the bytes of the files it removed, and nothing it cannot measure")
+    func pruneReclaimed() async throws {
+        let volumes = FakeVolumes([FakeVolumes.volume("m533-a"), FakeVolumes.volume("m533-b")], unmeasured: ["m533-b"])
+        var router = DockerRouter()
+        VolumeRoutes.register(on: &router, engine: volumes, containers: FakeEngine(), identities: DockerIdentityStore(persistence: nil))
+        let request = try DockerRequest(method: .POST, uri: "/v1.48/volumes/prune?filters=%7B%22all%22%3A%5B%22true%22%5D%7D", headers: [:], body: ByteBuffer())
+        guard case .data(let status, _, let body, _) = await router.respond(to: request) else {
+            Issue.record("expected a whole response")
+            return
+        }
+        #expect(status == .ok)
+        let report = try #require(try JSONSerialization.jsonObject(with: Data(String(buffer: body).utf8)) as? [String: Any])
+        #expect(report["VolumesDeleted"] as? [String] == ["m533-a", "m533-b"])
+        // Control: both went, but only the measured one counts.
+        #expect(report["SpaceReclaimed"] as? Int == 1000)
+    }
 }
 
 extension DockerIdentityTable {
