@@ -50,7 +50,15 @@ public actor ContentStoreService {
             )
         }
 
-        return try await self.contentStore.get(digest: digest)?.path
+        if let content = try await self.contentStore.get(digest: digest) {
+            return content.path
+        }
+        // `LocalContentStore.get` answers nil for every failed open, an interrupted or refused
+        // one included. A blob that is there is not absent: an image store garbage collecting
+        // against "absent" keeps nothing a manifest it could not read references, and deletes
+        // the config and layers of an image that is still listed (devops-thiago/SiliconShip#435).
+        let path = try ParsedDigest(parsingPathComponent: digest).path(in: self.root.appendingPathComponent("blobs/sha256"))
+        return try ContentBlobOpen.isPresent(at: path) ? path : nil
     }
 
     @discardableResult
