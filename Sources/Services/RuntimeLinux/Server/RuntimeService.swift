@@ -53,6 +53,9 @@ public actor RuntimeService {
     private var networkSessions: [XPCClientSession] = []
     /// Runs the container's health check while its process runs, when it has one.
     private var healthMonitor: HealthMonitor?
+    /// The tmpfs mounts holding published sockets that are mounted in the VM, under the
+    /// container's root filesystem, for this run (see `PublishedSocketMounts`).
+    private var guestTmpfsMounted: [Filesystem] = []
 
     private static let sshAuthSocketGuestPath = "/var/host-services/ssh-auth.sock"
     private static let sshAuthSocketEnvVar = "SSH_AUTH_SOCK"
@@ -403,8 +406,9 @@ public actor RuntimeService {
                 primaryAddress: interfaces.first?.ipv4Address.address.description,
                 searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
                 extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description)
+            var guestTmpfs: [Filesystem] = []
             let container = try LinuxContainer(id, rootfs: rootfs, vmm: vmm, vm: vmResources, logger: self.log) { czConfig in
-                try Self.configureContainer(czConfig: &czConfig, config: config, dynamicEnv: dynamicEnv, log: self.log)
+                guestTmpfs = try Self.configureContainer(czConfig: &czConfig, config: config, dynamicEnv: dynamicEnv, log: self.log)
                 czConfig.interfaces = interfaces
                 czConfig.process.stdout = stdout
                 czConfig.process.stderr = stderr
@@ -419,13 +423,18 @@ public actor RuntimeService {
                 attachments: attachments,
                 guestHosts: guestHosts,
                 bundle: bundle,
-                io: (in: stdin, out: stdout, err: stderr)
+                io: (in: stdin, out: stdout, err: stderr),
+                guestTmpfs: guestTmpfs
             )
             await self.setContainer(ctrInfo)
             await self.setNetworkSessions(sessions)
 
             do {
                 try await container.create()
+                try await self.mountGuestTmpfs(ctrInfo)
+                for socket in config.publishedSockets {
+                    try socket.applyHostPermissions()
+                }
 
                 try await self.initializeWaiters(for: id)
                 try await self.monitor.registerProcess(id: config.id, onExit: self.onContainerExit)
@@ -1104,9 +1113,8 @@ public actor RuntimeService {
             let peers = try message.peers()
             let ctr = try getContainer()
             let hosts = Hosts(entries: try ctr.guestHosts.entries(peers: peers))
-            // Where the guest agent mounted the container's root filesystem; the same path
-            // `LinuxContainer` hands it at boot (its `guestRootfsPath`, which is not public).
-            let location = "/run/container/\(ctr.container.id)/rootfs"
+            // Where the guest agent mounted the container's root filesystem.
+            let location = PublishedSocketMounts.guestRootfs(containerID: ctr.container.id)
             try await ctr.container.withVirtualMachineInstance { vm in
                 let agent = try await vm.dialAgent()
                 do {
@@ -1413,12 +1421,16 @@ public actor RuntimeService {
         return result
     }
 
+    /// Configure `czConfig` from `config`.
+    ///
+    /// - Returns: the tmpfs mounts the runtime mounts in the VM itself once the container is
+    ///   created, because they hold published sockets (see `PublishedSocketMounts`).
     private static func configureContainer(
         czConfig: inout LinuxContainer.Configuration,
         config: ContainerConfiguration,
         dynamicEnv: [String: String] = [:],
         log: Logger? = nil,
-    ) throws {
+    ) throws -> [Filesystem] {
         czConfig.cpus = config.resources.cpus
         czConfig.memoryInBytes = config.resources.memoryInBytes
         czConfig.sysctl = Self.sysctlsWithDefaults(config.sysctls)
@@ -1460,7 +1472,9 @@ public actor RuntimeService {
                 shared.append(mount)
             }
         }
-        czConfig.mounts.append(contentsOf: try BindMountPlan.mounts(for: shared))
+        let socketMounts = PublishedSocketMounts(
+            mounts: shared, sockets: config.publishedSockets, otherDestinations: czConfig.mounts.map(\.destination))
+        czConfig.mounts.append(contentsOf: try BindMountPlan.mounts(for: socketMounts.inContainer))
 
         for publishedSocket in config.publishedSockets {
             // UnixSocketConfiguration (Containerization) takes URL; convert from FilePath at the boundary.
@@ -1496,6 +1510,58 @@ public actor RuntimeService {
         }
 
         try Self.configureInitialProcess(czConfig: &czConfig, config: config)
+        return socketMounts.inGuest
+    }
+
+    /// Mount the tmpfs mounts that hold published sockets in the VM, under the container's root
+    /// filesystem, before the container starts. What is mounted is recorded as it goes, so a
+    /// failure partway leaves the cleanup knowing what to detach.
+    private func mountGuestTmpfs(_ info: ContainerInfo) async throws {
+        guard !info.guestTmpfs.isEmpty else { return }
+        let rootfs = PublishedSocketMounts.guestRootfs(containerID: info.container.id)
+        for mount in info.guestTmpfs {
+            try await info.container.withVirtualMachineInstance { vm in
+                let agent = try await vm.dialAgent()
+                do {
+                    guard let vminitd = agent as? Vminitd else {
+                        throw ContainerizationError(.unsupported, message: "the VM's agent cannot mount a tmpfs for a published socket")
+                    }
+                    try await PublishedSocketMounts.mount([mount], rootfs: rootfs, agent: VminitdMountAgent(agent: vminitd))
+                } catch {
+                    try? await agent.close()
+                    throw error
+                }
+                try await agent.close()
+            }
+            self.guestTmpfsMounted.append(mount)
+            self.log.info("mounted a tmpfs holding a published socket in the VM", metadata: ["destination": "\(mount.destination)"])
+        }
+    }
+
+    /// Detach what `mountGuestTmpfs` mounted, so that stopping the container can unmount its
+    /// root filesystem. Best effort: a VM that is already gone has nothing left to detach.
+    private func unmountGuestTmpfs(_ container: LinuxContainer) async {
+        let mounted = self.guestTmpfsMounted
+        guard !mounted.isEmpty else { return }
+        self.guestTmpfsMounted = []
+        let rootfs = PublishedSocketMounts.guestRootfs(containerID: container.id)
+        do {
+            let errors = try await container.withVirtualMachineInstance { vm in
+                let agent = try await vm.dialAgent()
+                guard let vminitd = agent as? Vminitd else {
+                    try? await agent.close()
+                    throw ContainerizationError(.unsupported, message: "the VM's agent cannot unmount a tmpfs for a published socket")
+                }
+                let errors = await PublishedSocketMounts.unmount(mounted, rootfs: rootfs, agent: VminitdMountAgent(agent: vminitd))
+                try? await agent.close()
+                return errors.map { "\($0)" }
+            }
+            for error in errors {
+                self.log.warning("failed to detach a tmpfs holding a published socket", metadata: ["error": "\(error)"])
+            }
+        } catch {
+            self.log.warning("failed to detach the tmpfs mounts holding published sockets", metadata: ["error": "\(error)"])
+        }
     }
 
     private nonisolated func getDefaultNameservers(from attachments: [Attachment]) -> [String] {
@@ -1686,6 +1752,7 @@ public actor RuntimeService {
         }
 
         // Now actually bring down the vm.
+        await self.unmountGuestTmpfs(lc)
         try await lc.stop()
 
         return code
@@ -1698,6 +1765,7 @@ public actor RuntimeService {
         // Every way a run ends comes through here: a stop, the process exiting, a failed start.
         await self.stopHealthMonitor()
 
+        await self.unmountGuestTmpfs(container)
         do {
             try await container.stop()
         } catch {
@@ -1942,6 +2010,8 @@ extension RuntimeService {
         let guestHosts: GuestHosts
         let bundle: ContainerResource.Bundle
         let io: (in: FileHandle?, out: MultiWriter?, err: MultiWriter?)
+        /// The tmpfs mounts to mount in the VM once the container is created.
+        let guestTmpfs: [Filesystem]
     }
 
     /// States the underlying sandbox can be in.

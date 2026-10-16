@@ -54,6 +54,19 @@ struct RunDirectoryTests {
         #expect(mode(path) == 0o700)
     }
 
+    @Test("an engine's run directory is beside its app root, whoever asks")
+    func besideTheEngineAppRoot() throws {
+        let base = try scratch()
+        defer { try? FileManager.default.removeItem(atPath: base.string) }
+        let run = try PathUtils.runDirectory(engineAppRoot: base.appending("engine"))
+        #expect(FilePath(run.path(percentEncoded: false)).lexicallyNormalized() == base.appending("run").lexicallyNormalized())
+        #expect(mode(base.appending("run").string) == 0o700)
+        // Control: another app root gets another directory.
+        let other = try scratch()
+        defer { try? FileManager.default.removeItem(atPath: other.string) }
+        #expect(try PathUtils.runDirectory(engineAppRoot: other.appending("engine")) != run)
+    }
+
     @Test("a symlink or a file in its place is refused, not followed")
     func refusesImpostors() throws {
         let base = try scratch()

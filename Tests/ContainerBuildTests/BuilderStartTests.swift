@@ -20,6 +20,7 @@ import ContainerResource
 import ContainerizationError
 import ContainerizationOCI
 import Foundation
+import SystemPackage
 import Testing
 
 struct BuilderStartTests {
@@ -29,12 +30,22 @@ struct BuilderStartTests {
         build: BuildConfig(cpus: 2, memory: try! MemorySize("2048MB"), image: image)
     )
 
+    /// A run directory of a plausible length for an app group's container.
+    static let runDirectory = URL(fileURLWithPath: "/Users/me/Library/Group Containers/TEAM.dev.example.App/run", isDirectory: true)
+
     /// A spec from default options and an environment with nothing the start manages.
     static func spec(
         _ options: Builder.StartOptions = .init(),
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        runDirectory: URL? = nil
     ) throws -> Builder.StartSpec {
-        try Builder.StartSpec(options: options, containerSystemConfig: systemConfig, environment: environment)
+        try Builder.StartSpec(options: options, containerSystemConfig: systemConfig, environment: environment, runDirectory: runDirectory)
+    }
+
+    /// A run directory whose BuildKit socket path is exactly `bytes` long.
+    static func runDirectory(socketPathBytes bytes: Int) -> URL {
+        let fixed = "/" + "/\(Builder.buildKitSocketName)"
+        return URL(fileURLWithPath: "/" + String(repeating: "r", count: bytes - fixed.utf8.count), isDirectory: true)
     }
 
     /// The configuration a start from `spec` would have created.
@@ -61,6 +72,7 @@ struct BuilderStartTests {
             searchDomains: spec.dnsSearchDomains,
             options: spec.dnsOptions
         )
+        config.publishedSockets = spec.publishedSockets ?? []
         edit(&config)
         return config
     }
@@ -168,22 +180,125 @@ struct BuilderStartTests {
         #expect(spec.requiresRecreate(Self.existing(matching: spec) { $0.dns = nil }))
     }
 
+    @Test func eachHardDifferenceRecreatesNow() throws {
+        let spec = try Self.spec(runDirectory: Self.runDirectory)
+        // With a socket difference too: the hard one decides.
+        let existing = Self.existing(matching: spec) {
+            $0.resources.cpus = 8
+            $0.publishedSockets = []
+        }
+        #expect(spec.recreate(existing) == .now)
+        #expect(spec.recreate(Self.existing(matching: spec)) == .no)
+    }
+
+    // MARK: - Published BuildKit socket
+
+    @Test func theBuildKitSocketIsPublishedPrivatelyInTheRunDirectory() throws {
+        let sockets = try Builder.publishedSockets(runDirectory: Self.runDirectory)
+        #expect(sockets.count == 1)
+        let socket = try #require(sockets.first)
+        #expect(socket.containerPath == "/run/buildkit/buildkitd.sock")
+        #expect(socket.hostPath == FilePath(Self.runDirectory.path(percentEncoded: false)).appending("buildkitd.sock"))
+        #expect(socket.permissions == FilePermissions(rawValue: 0o600))
+    }
+
+    @Test func aSocketPathBuildxCannotDialIsNotPublished() throws {
+        #expect(PathUtils.maxDialableSocketPathBytes == 103)
+        let longest = Self.runDirectory(socketPathBytes: 103)
+        let published = try Builder.publishedSockets(runDirectory: longest)
+        #expect(published.first?.hostPath.string.utf8.count == 103)
+        // One byte more and there is nothing to publish.
+        #expect(try Builder.publishedSockets(runDirectory: Self.runDirectory(socketPathBytes: 104)).isEmpty)
+    }
+
+    @Test func theSpecCarriesTheSocketOnlyWhenTheRunDirectoryIsKnown() throws {
+        #expect(try Self.spec().publishedSockets == nil)
+        #expect(try Self.spec(runDirectory: Self.runDirectory).publishedSockets == Builder.publishedSockets(runDirectory: Self.runDirectory))
+        #expect(try Self.spec(runDirectory: Self.runDirectory(socketPathBytes: 104)).publishedSockets == [])
+    }
+
+    @Test func aBuilderWithoutTheSocketIsReplacedWhenStopped() throws {
+        let spec = try Self.spec(runDirectory: Self.runDirectory)
+        let old = Self.existing(matching: spec) { $0.publishedSockets = [] }
+        #expect(spec.recreate(old) == .whenStopped)
+        #expect(spec.requiresRecreate(old))
+    }
+
+    @Test func aBuilderWithASocketNoLongerWantedIsReplacedWhenStopped() throws {
+        let spec = try Self.spec(runDirectory: Self.runDirectory(socketPathBytes: 104))
+        let existing = Self.existing(matching: spec) { $0.publishedSockets = try! Builder.publishedSockets(runDirectory: Self.runDirectory) }
+        #expect(spec.recreate(existing) == .whenStopped)
+    }
+
+    @Test func aSocketThatChangedIsReplacedWhenStopped() throws {
+        let spec = try Self.spec(runDirectory: Self.runDirectory)
+        let elsewhere = try Builder.publishedSockets(runDirectory: URL(fileURLWithPath: "/Users/me/run", isDirectory: true))
+        #expect(spec.recreate(Self.existing(matching: spec) { $0.publishedSockets = elsewhere }) == .whenStopped)
+        let open = Self.existing(matching: spec) { $0.publishedSockets[0].permissions = FilePermissions(rawValue: 0o666) }
+        #expect(spec.recreate(open) == .whenStopped)
+    }
+
+    @Test func theSameSocketIsKept() throws {
+        let spec = try Self.spec(runDirectory: Self.runDirectory)
+        let existing = Self.existing(matching: spec)
+        #expect(existing.publishedSockets.count == 1)
+        #expect(spec.recreate(existing) == .no)
+    }
+
+    @Test func socketsCompareInAnyOrder() throws {
+        let a = try PublishSocket(containerPath: "/run/a.sock", hostPath: "/tmp/a.sock")
+        let b = try PublishSocket(containerPath: "/run/b.sock", hostPath: "/tmp/b.sock")
+        #expect(Builder.StartSpec.sameSockets([a, b], [b, a]))
+        #expect(!Builder.StartSpec.sameSockets([a, b], [a]))
+        #expect(!Builder.StartSpec.sameSockets([a, a], [a, b]))
+    }
+
+    @Test func anUnknownRunDirectoryLeavesTheSocketsAlone() throws {
+        // A caller that cannot find the run directory must not take a builder's socket away.
+        let unknown = try Self.spec()
+        let withSocket = Self.existing(matching: unknown) { $0.publishedSockets = try! Builder.publishedSockets(runDirectory: Self.runDirectory) }
+        #expect(unknown.recreate(withSocket) == .no)
+        #expect(unknown.recreate(Self.existing(matching: unknown)) == .no)
+    }
+
+    @Test func clientsOfOneEngineAgreeOnTheSocket() throws {
+        // The CLI and the Docker API agent take the run directory from the engine's app root,
+        // not from their own environments, which differ.
+        let appRoot = FilePath("/Users/me/Library/Application Support/com.apple.container")
+        let base = FileManager.default.temporaryDirectory.appending(path: "bks-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let engineAppRoot = FilePath(base.appending(path: "engine").path(percentEncoded: false))
+        let cli = try Self.spec(environment: ["CONTAINER_APP_ROOT": appRoot.string], runDirectory: PathUtils.runDirectory(engineAppRoot: engineAppRoot))
+        let agent = try Self.spec(environment: [:], runDirectory: PathUtils.runDirectory(engineAppRoot: engineAppRoot))
+        #expect(cli.publishedSockets == agent.publishedSockets)
+        #expect(agent.recreate(Self.existing(matching: cli)) == .no)
+    }
+
     // MARK: - Start action
 
     @Test func startActionFollowsStatusAndDifference() throws {
-        #expect(try Builder.startAction(status: nil, requiresRecreate: false) == .create)
-        #expect(try Builder.startAction(status: .unknown, requiresRecreate: true) == .create)
-        #expect(try Builder.startAction(status: .running, requiresRecreate: false) == .reuse)
-        #expect(try Builder.startAction(status: .running, requiresRecreate: true) == .stopAndRecreate)
-        #expect(try Builder.startAction(status: .stopped, requiresRecreate: false) == .restart)
-        #expect(try Builder.startAction(status: .stopped, requiresRecreate: true) == .deleteAndRecreate)
+        #expect(try Builder.startAction(status: nil, recreate: .no) == .create)
+        #expect(try Builder.startAction(status: .unknown, recreate: .now) == .create)
+        #expect(try Builder.startAction(status: .running, recreate: .no) == .reuse)
+        #expect(try Builder.startAction(status: .running, recreate: .now) == .stopAndRecreate)
+        #expect(try Builder.startAction(status: .stopped, recreate: .no) == .restart)
+        #expect(try Builder.startAction(status: .stopped, recreate: .now) == .deleteAndRecreate)
+    }
+
+    @Test func aRunningBuilderIsNeverStoppedForItsSockets() throws {
+        // It may be in the middle of a build nobody told the engine about.
+        #expect(try Builder.startAction(status: .running, recreate: .whenStopped) == .reuse)
+        // Stopped, it is replaced so the next run publishes.
+        #expect(try Builder.startAction(status: .stopped, recreate: .whenStopped) == .deleteAndRecreate)
+        #expect(try Builder.startAction(status: nil, recreate: .whenStopped) == .create)
     }
 
     @Test func aBuilderInTransitionCannotBeStarted() {
         for status in [RuntimeStatus.stopping, .restarting] {
-            for recreate in [false, true] {
+            for recreate in [Builder.Recreate.no, .whenStopped, .now] {
                 #expect(throws: ContainerizationError.self) {
-                    try Builder.startAction(status: status, requiresRecreate: recreate)
+                    try Builder.startAction(status: status, recreate: recreate)
                 }
             }
         }
