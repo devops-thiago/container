@@ -54,6 +54,8 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     private let log: Logger
     private let encoder: HTTPResponseEncoder
     private let decoder: ByteToMessageHandler<HTTPRequestDecoder>
+    /// The process on the other end, put on every request this connection carries.
+    private let peer: DockerPeer?
 
     private var head: HTTPRequestHead?
     private var body = ByteBuffer()
@@ -75,8 +77,9 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
     init(
         router: DockerRouter, limits: DockerHTTPLimits, log: Logger,
-        encoder: HTTPResponseEncoder, decoder: ByteToMessageHandler<HTTPRequestDecoder>
+        encoder: HTTPResponseEncoder, decoder: ByteToMessageHandler<HTTPRequestDecoder>, peer: DockerPeer? = nil
     ) {
+        self.peer = peer
         self.router = router
         self.limits = limits
         self.log = log
@@ -148,7 +151,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
                     switch result {
                     case .success(let file):
                         entry.bodyFile = file
-                        entry.parsed = Self.parse(head, body: ByteBuffer(), bodyFile: file)
+                        entry.parsed = Self.parse(head, body: ByteBuffer(), bodyFile: file, peer: self.peer)
                     case .failure(let error):
                         try? FileManager.default.removeItem(at: spool.url)
                         entry.parsed = .failure(DockerAPIError.internalError("could not store the request body: \(error)"))
@@ -158,7 +161,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
                 body = ByteBuffer()
                 return
             } else {
-                entry.parsed = Self.parse(head, body: body, bodyFile: nil)
+                entry.parsed = Self.parse(head, body: body, bodyFile: nil, peer: peer)
             }
             body = ByteBuffer()
             answerNext(context: context)
@@ -177,9 +180,10 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         }
     }
 
-    private static func parse(_ head: HTTPRequestHead, body: ByteBuffer, bodyFile: URL?) -> Result<DockerRequest, DockerAPIError> {
+    private static func parse(_ head: HTTPRequestHead, body: ByteBuffer, bodyFile: URL?, peer: DockerPeer?) -> Result<DockerRequest, DockerAPIError> {
         do {
-            return .success(try DockerRequest(method: head.method, uri: head.uri, headers: head.headers, body: body, bodyFile: bodyFile))
+            return .success(
+                try DockerRequest(method: head.method, uri: head.uri, headers: head.headers, body: body, bodyFile: bodyFile, peer: peer))
         } catch {
             return .failure(error)
         }
