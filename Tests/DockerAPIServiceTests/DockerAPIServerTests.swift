@@ -267,6 +267,38 @@ struct DockerAPIServerTests {
         }
     }
 
+    @Test("a stream route asked without Upgrade answers 200 and ends the body by closing, as dockerd does; with Upgrade, 101")
+    func hijackWithoutUpgrade() async throws {
+        let harness = try await Harness.start {
+            $0.add(.POST, "/exec/{id}/start") { _, _ in
+                .hijack(multiplexed: true) { stream in
+                    try await stream.write(ByteBuffer(string: "o"), stream: .stdout)
+                    stream.finishWriting()
+                }
+            }
+        }
+        defer { Task { try? await harness.stop() } }
+        let body = #"{"Detach":false,"Tty":false}"#
+        try await harness.withClient { client in
+            // docker-java's exec start without stdin: no Upgrade header.
+            try await client.send(
+                "POST /exec/e1/start HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)")
+            let head = try await client.read(through: "\r\n\r\n")
+            #expect(head.hasPrefix("HTTP/1.1 200 OK\r\n"))
+            #expect(head.contains("Content-Type: application/vnd.docker.multiplexed-stream"))
+            #expect(!head.lowercased().contains("content-length") && !head.lowercased().contains("transfer-encoding"))
+            #expect(Array(try await client.readToEnd().utf8) == [1, 0, 0, 0, 0, 0, 0, 1, UInt8(ascii: "o")])
+        }
+        // Control: the same request asking to upgrade is upgraded.
+        try await harness.withClient { client in
+            try await client.send(
+                "POST /exec/e1/start HTTP/1.1\r\nHost: d\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+            )
+            #expect(try await client.read(through: "\r\n\r\n").hasPrefix("HTTP/1.1 101 UPGRADED\r\n"))
+            #expect(Array(try await client.readToEnd().utf8) == [1, 0, 0, 0, 0, 0, 0, 1, UInt8(ascii: "o")])
+        }
+    }
+
     @Test("without a tty the hijacked output is framed")
     func hijackMultiplexed() async throws {
         let harness = try await Harness.start {

@@ -290,7 +290,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
             }
 
         case .hijack(let multiplexed, let body):
-            hijack(context: context, multiplexed: multiplexed, body: body)
+            hijack(context: context, multiplexed: multiplexed, upgrade: Self.asksToUpgrade(request), body: body)
         }
     }
 
@@ -308,14 +308,25 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         answerNext(context: context)
     }
 
+    /// Whether a request asks for its connection to be upgraded, as dockerd decides it: by an
+    /// `Upgrade` header being there at all.
+    static func asksToUpgrade(_ request: HTTPRequestHead) -> Bool {
+        request.headers.contains(name: "Upgrade")
+    }
+
     /// Answers `101 UPGRADED` and gives the connection to `body` as raw bytes.
+    ///
+    /// A request that did not ask to upgrade gets `200 OK` instead, as dockerd answers it, with
+    /// neither a length nor chunks: the stream is the body, and it ends when this side closes.
+    /// A client that sent no `Upgrade` header reads a 101 as an interim answer and waits for
+    /// another, which never comes; docker-java does so for an exec start without stdin.
     ///
     /// The encoder goes first, so the raw 101 can be written. The stream's handlers are added
     /// before the decoder leaves, so the bytes it still holds (`.forwardBytes`: stdin typed
     /// before the 101 was read) have somewhere to go; this handler passes on anything that
     /// reaches it once hijacked, so they arrive whichever of the two leaves first.
     private func hijack(
-        context: ChannelHandlerContext, multiplexed: Bool,
+        context: ChannelHandlerContext, multiplexed: Bool, upgrade: Bool,
         body: @escaping @Sendable (DockerHijackedStream) async throws -> Void
     ) {
         hijacked = true
@@ -328,8 +339,11 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
         do {
             pipeline.removeHandler(encoder).assumeIsolated().whenFailure { _ in channel.close(promise: nil) }
             let contentType = multiplexed ? "application/vnd.docker.multiplexed-stream" : "application/vnd.docker.raw-stream"
-            let upgrade = "HTTP/1.1 101 UPGRADED\r\nContent-Type: \(contentType)\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
-            context.writeAndFlush(NIOAny(ByteBuffer(string: upgrade)), promise: nil)
+            let head =
+                upgrade
+                ? "HTTP/1.1 101 UPGRADED\r\nContent-Type: \(contentType)\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+                : "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nConnection: close\r\n\r\n"
+            context.writeAndFlush(NIOAny(ByteBuffer(string: head)), promise: nil)
             let stream = try NIOAsyncChannel<ByteBuffer, ByteBuffer>(
                 wrappingChannelSynchronously: channel,
                 configuration: .init(isOutboundHalfClosureEnabled: true))
