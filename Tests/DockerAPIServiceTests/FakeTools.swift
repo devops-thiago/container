@@ -58,6 +58,12 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     private var statsCalls = 0
     private var getCalls = 0
     var createError: (any Error)?
+    /// Whether the engine copies into a container before its start.
+    var copyBeforeStart = false
+    /// What a copy in throws, once.
+    var copyInError: (any Error)?
+    /// The container's status at each copy in, in order.
+    private(set) var copyInStatuses: [RuntimeStatus?] = []
 
     init(snapshots: [ContainerSnapshot]) throws {
         base = FakeEngine(snapshots: snapshots)
@@ -210,11 +216,20 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         try FileManager.default.copyItem(atPath: from, toPath: destination.path)
     }
 
+    var copyInStatusCalls: [RuntimeStatus?] { lock.withLock { copyInStatuses } }
+
+    func supportsCopyBeforeStart() async -> Bool { lock.withLock { copyBeforeStart } }
+
     func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
-        lock.withLock {
+        let status = base.snapshot(container.id)?.status
+        let failure: (any Error)? = lock.withLock {
             copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))")
             copyRequesters.append("in \(requester ?? "-")")
+            copyInStatuses.append(status)
+            defer { copyInError = nil }
+            return copyInError
         }
+        if let failure { throw failure }
         let target = root.path + (destination.hasSuffix("/") ? destination : destination + "/") + source.lastPathComponent
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: target, isDirectory: &isDirectory) {
