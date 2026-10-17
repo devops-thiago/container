@@ -188,4 +188,42 @@ struct PrestartCopyTests {
             closeListener: { calls.withLock { $0.insert("close") } })
         #expect(calls.withLock { $0 } == ["rpc", "transfer", "close"])
     }
+    @Test("a failed transfer cancels the outstanding RPC", .timeLimit(.minutes(1)))
+    func failedTransferCancelsRPC() async {
+        struct TransferFailure: Error {}
+        let closed = Mutex(false)
+        await #expect(throws: TransferFailure.self) {
+            try await VminitdCopyAgent.runCopyTasks(
+                rpc: { try await Task.sleep(for: .seconds(120)) },
+                transfer: { throw TransferFailure() },
+                closeListener: { closed.withLock { $0 = true } })
+        }
+        #expect(closed.withLock { $0 })
+    }
+
+    @Test("cancelling a copy closes its pending listener and preserves cancellation", .timeLimit(.minutes(1)))
+    func cancelledCopyClosesListener() async {
+        struct NoConnection: Error {}
+        let (listening, entered) = AsyncStream<Void>.makeStream()
+        let (connections, finish) = AsyncStream<Void>.makeStream()
+        let closed = Mutex(false)
+        let copy = Task {
+            try await VminitdCopyAgent.runCopyTasks(
+                rpc: { try await Task.sleep(for: .seconds(120)) },
+                transfer: {
+                    entered.yield(())
+                    for await _ in connections {}
+                    throw NoConnection()
+                },
+                closeListener: {
+                    closed.withLock { $0 = true }
+                    finish.finish()
+                })
+        }
+        for await _ in listening { break }
+        copy.cancel()
+        await #expect(throws: CancellationError.self) { try await copy.value }
+        #expect(closed.withLock { $0 })
+        entered.finish()
+    }
 }

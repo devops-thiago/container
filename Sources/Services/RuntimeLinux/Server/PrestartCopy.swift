@@ -120,6 +120,7 @@ struct VminitdCopyAgent: GuestCopyAgent {
         transfer: @escaping @Sendable () async throws -> Void,
         closeListener: @escaping @Sendable () -> Void
     ) async throws {
+        try Task.checkCancellation()
         defer { closeListener() }
         try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -132,6 +133,7 @@ struct VminitdCopyAgent: GuestCopyAgent {
                     // remaining child, which may still be waiting for a guest connection.
                     closeListener()
                     group.cancelAll()
+                    try Task.checkCancellation()
                     throw error
                 }
             }
