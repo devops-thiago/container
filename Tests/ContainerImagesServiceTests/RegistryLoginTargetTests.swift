@@ -65,4 +65,15 @@ struct RegistryLoginTargetTests {
             }
         }
     }
+    @Test(
+        "registry login rejects URL syntax inside an authority",
+        arguments: [
+            "localhost:5000@registry.example", "[::1]:5000@registry.example", "user:password@registry.example",
+            "localhost:5000?other", "localhost:5000#other", "localhost:5000/path", "localhost%3A5000@registry.example",
+        ])
+    func malformedAuthority(server: String) {
+        #expect(throws: (any Error).self) {
+            try ImagesService.loginTarget(server: server, scheme: "http")
+        }
+    }
 }

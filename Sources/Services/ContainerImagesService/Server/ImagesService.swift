@@ -174,7 +174,9 @@ public actor ImagesService {
             throw ContainerizationError(.invalidArgument, message: "unsupported registry scheme \(scheme); use http or https")
         }
         let server = Reference.resolveDomain(domain: server)
-        guard let url = URL(string: "\(scheme)://\(server)"), let host = url.host, !host.isEmpty else {
+        guard !server.contains(where: { #"/\@?#%"#.contains($0) || $0.isWhitespace || $0.isNewline }),
+            let url = URL(string: "\(scheme)://\(server)"), let host = url.host, !host.isEmpty, url.user == nil, url.password == nil
+        else {
             throw ContainerizationError(.invalidArgument, message: "invalid registry \(server)")
         }
         return (host, url.port, scheme)
