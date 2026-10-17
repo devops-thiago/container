@@ -16,6 +16,7 @@
 
 import ContainerizationError
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ContainerRuntimeLinuxServer
@@ -154,5 +155,75 @@ struct PrestartCopyTests {
         #expect(first != second)
         // containerization's own allocator counts up from 0x1000_0000, one container at a time.
         #expect(VminitdCopyAgent.portBase > 0x1000_0000 + 0x10_0000)
+    }
+    @Test("RPC failure closes a listener whose guest never connected", .timeLimit(.minutes(1)))
+    func failedRPCReleasesListener() async throws {
+        struct Refused: Error {}
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let fallbackUsed = Mutex(false)
+        let fallback = Task {
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            fallbackUsed.withLock { $0 = true }
+            continuation.finish()
+        }
+        defer {
+            fallback.cancel()
+            continuation.finish()
+        }
+        await #expect(throws: Refused.self) {
+            try await VminitdCopyAgent.runCopyTasks(
+                rpc: { throw Refused() },
+                transfer: { for await _ in stream {} },
+                closeListener: { continuation.finish() })
+        }
+        #expect(!fallbackUsed.withLock { $0 }, "RPC failure must release the pending listener, without external rescue")
+    }
+
+    @Test("successful prestart copy waits for RPC and transfer and closes its listener")
+    func successfulCopyTasks() async throws {
+        let calls = Mutex(Set<String>())
+        try await VminitdCopyAgent.runCopyTasks(
+            rpc: { calls.withLock { $0.insert("rpc") } },
+            transfer: { calls.withLock { $0.insert("transfer") } },
+            closeListener: { calls.withLock { $0.insert("close") } })
+        #expect(calls.withLock { $0 } == ["rpc", "transfer", "close"])
+    }
+    @Test("a failed transfer cancels the outstanding RPC", .timeLimit(.minutes(1)))
+    func failedTransferCancelsRPC() async {
+        struct TransferFailure: Error {}
+        let closed = Mutex(false)
+        await #expect(throws: TransferFailure.self) {
+            try await VminitdCopyAgent.runCopyTasks(
+                rpc: { try await Task.sleep(for: .seconds(120)) },
+                transfer: { throw TransferFailure() },
+                closeListener: { closed.withLock { $0 = true } })
+        }
+        #expect(closed.withLock { $0 })
+    }
+
+    @Test("cancelling a copy closes its pending listener and preserves cancellation", .timeLimit(.minutes(1)))
+    func cancelledCopyClosesListener() async {
+        struct NoConnection: Error {}
+        let (listening, entered) = AsyncStream<Void>.makeStream()
+        let (connections, finish) = AsyncStream<Void>.makeStream()
+        let closed = Mutex(false)
+        let copy = Task {
+            try await VminitdCopyAgent.runCopyTasks(
+                rpc: { try await Task.sleep(for: .seconds(120)) },
+                transfer: {
+                    entered.yield(())
+                    for await _ in connections {}
+                    throw NoConnection()
+                },
+                closeListener: {
+                    closed.withLock { $0 = true }
+                    finish.finish()
+                })
+        }
+        for await _ in listening { break }
+        copy.cancel()
+        await #expect(throws: CancellationError.self) { try await copy.value }
+        #expect(closed.withLock { $0 })
+        entered.finish()
     }
 }
