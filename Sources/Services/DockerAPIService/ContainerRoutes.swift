@@ -220,7 +220,8 @@ public enum ContainerRoutes {
 
         /// Reports what this service just did to a container, as the engine has it now.
         func report(_ action: String, engineID: String, change: DockerEventBus.ContainerChange, extra: [String: String] = [:]) async {
-            guard let events, let snapshot = try? await engine.get(engineID), let container = await identities.join([snapshot]).first else { return }
+            guard let events, let snapshot = try? await engine.get(engineID) else { return }
+            let container = await identities.resolve(snapshot)
             await events.container(action, container, change: change, extra: extra)
         }
 
@@ -351,7 +352,8 @@ public enum ContainerRoutes {
             } else {
                 try await identities.rename(container, to: name, among: all)
             }
-            if let events, let renamed = await identities.join([try await engine.get(container.engineID) ?? container.snapshot]).first {
+            if let events {
+                let renamed = await identities.resolve(try await engine.get(container.engineID) ?? container.snapshot)
                 await events.container("rename", renamed, change: .none, extra: ["oldName": "/" + container.name])
             }
             return .empty()

@@ -448,7 +448,8 @@ struct EventTests {
     func containerRoutes() async throws {
         let engine = FakeEngine()
         let bus = DockerEventBus()
-        let identities = DockerIdentityStore(persistence: nil)
+        let persistence = MemoryIdentityPersistence()
+        let identities = DockerIdentityStore(persistence: persistence)
         var router = DockerRouter()
         ContainerRoutes.register(
             on: &router, engine: engine, identities: identities, streams: DockerContainerStreams(engine: engine, events: bus), now: { Fixtures.now },
@@ -460,12 +461,22 @@ struct EventTests {
             return status
         }
         #expect(try await call(.POST, "/containers/create?name=web", body: #"{"Image":"alpine","Labels":{"tier":"front"}}"#) == .created)
+        let before = await identities.records
+        #expect(before.count == 1)
+        #expect(before.first?.extras != nil)
+        #expect(try await call(.POST, "/containers/create?name=other", body: #"{"Image":"alpine","OpenStdin":false}"#) == .created)
+        #expect(await identities.records.contains(where: { $0 == before[0] }), "creating another container must preserve web's full record")
+        #expect(try await call(.POST, "/containers/other/rename?name=renamed") == .noContent)
+        #expect(await identities.records.contains(where: { $0 == before[0] }), "renaming another container must preserve web's full record")
+        #expect(await DockerIdentityStore(persistence: persistence).records.contains(where: { $0 == before[0] }), "the preserved metadata survives agent restart")
+        #expect(try await call(.DELETE, "/containers/renamed") == .noContent)
         #expect(try await call(.POST, "/containers/web/start") == .noContent)
         #expect(try await call(.POST, "/containers/web/stop") == .noContent)
         #expect(try await call(.POST, "/containers/web/rename?name=api") == .noContent)
         #expect(try await call(.DELETE, "/containers/api") == .noContent)
 
-        let events = await stream.take(7)
+        let allEvents = await stream.take(10)
+        let events = allEvents.filter { $0.actorID == allEvents[0].actorID }
         #expect(events.map(\.action) == ["create", "start", "kill", "die", "stop", "rename", "destroy"])
         #expect(events[0].attributes["tier"] == "front")
         #expect(events[0].attributes["image"] == "alpine")
