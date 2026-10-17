@@ -15,7 +15,9 @@
 //===----------------------------------------------------------------------===//
 
 import Foundation
+import Logging
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
 import Testing
 
@@ -116,5 +118,31 @@ struct DockerSpooledBodyTests {
             #expect(await StreamHarness.eventually { spool.files.count == 1 })
         }
         #expect(await StreamHarness.eventually { spool.files.isEmpty })
+    }
+    @Test("disconnect during final spool flush releases the completed body", arguments: [false, true])
+    func disconnectDuringFinish(inputClosed: Bool) throws {
+        let spool = try Spool()
+        let loop = EmbeddedEventLoop()
+        let gate = loop.makePromise(of: Void.self)
+        var router = DockerRouter()
+        router.add(.PUT, "/upload", body: .spool(maxBytes: 64)) { _, _ in
+            Issue.record("a disconnected upload must never reach the route")
+            return .empty()
+        }
+        let handler = DockerHTTPHandler(
+            router: router, limits: DockerHTTPLimits(spoolDirectory: spool.directory), log: Logger(label: "spool-test"),
+            encoder: HTTPResponseEncoder(), decoder: ByteToMessageHandler(HTTPRequestDecoder()),
+            finishSpool: { body in body.finish().flatMap { file in gate.futureResult.map { file } } })
+        let channel = EmbeddedChannel(handler: handler, loop: loop)
+        try channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: .PUT, uri: "/upload")))
+        try channel.writeInbound(HTTPServerRequestPart.end(nil))
+        loop.run()
+        #expect(spool.files.count == 1, "finished HTTP body remains owned while its flush waits")
+        if inputClosed { channel.pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed) } else { channel.pipeline.fireChannelInactive() }
+        loop.run()
+        gate.succeed(())
+        loop.run()
+        #expect(spool.files.isEmpty, "late completion must discard the file after the queue was cleared")
+        _ = try channel.finish(acceptAlreadyClosed: true)
     }
 }
