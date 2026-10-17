@@ -41,7 +41,8 @@ struct LoopbackRegistryTests {
             "128.0.0.1", "126.255.255.255:5000", "10.0.0.1:5000", "192.168.1.10", "172.16.0.1", "0.0.0.0", "169.254.0.1",
             "127.0.0", "127.000.000.001", "0x7f.0.0.1", "2130706433",
             "[::2]", "[::]:5000", "[fd00::1]:5000", "[fe80::1]", "[::1%lo0]:5000", "[::ffff:10.0.0.1]",
-            "registry.example", "registry.example:5000", "ghcr.io", "docker.io", "", ":5000",
+            "localhost:5000@registry.example", "[::1]:5000@registry.example", "localhost:5000?x", "localhost:5000#x", "registry.example", "registry.example:5000", "ghcr.io",
+            "docker.io", "", ":5000",
         ])
     func notLoopback(authority: String) {
         #expect(!LoopbackRegistry.isLoopback(authority))
