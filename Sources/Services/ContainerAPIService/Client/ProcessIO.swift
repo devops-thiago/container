@@ -26,6 +26,7 @@ public struct ProcessIO: Sendable {
     var ioTracker: IoTracker?
 
     static let signalSet: [Int32] = [
+        SIGHUP,
         SIGTERM,
         SIGINT,
         SIGUSR1,
@@ -48,23 +49,44 @@ public struct ProcessIO: Sendable {
     /// process instead, which is then forwarded.
     public let rawConsole: Bool
 
+    static func configureRawConsole(
+        _ current: Terminal,
+        setRaw: (Terminal) throws -> Void = { try $0.setraw() }
+    ) throws -> Bool {
+        do {
+            try setRaw(current)
+            return true
+        } catch let error as POSIXError where error.code == .EPERM {
+            // The launcher may already have configured the terminal. The sandbox
+            // refuses the write even when the requested settings are unchanged.
+            return hasRawInput(descriptor: current.handle.fileDescriptor)
+        }
+    }
+
+    static func hasRawInput(descriptor: Int32) -> Bool {
+        var attributes = termios()
+        guard tcgetattr(descriptor, &attributes) == 0 else { return false }
+        let timing = withUnsafeBytes(of: attributes.c_cc) { ($0[Int(VMIN)], $0[Int(VTIME)]) }
+        return attributes.c_lflag & tcflag_t(ICANON | ECHO | ECHONL | ISIG | IEXTEN) == 0
+            // Darwin's cfmakeraw sets IGNBRK; it does not transform keyboard bytes.
+            && attributes.c_iflag & tcflag_t(BRKINT | PARMRK | ISTRIP | ICRNL | INLCR | IGNCR | IXON) == 0
+            && attributes.c_cflag & tcflag_t(CSIZE | PARENB) == tcflag_t(CS8)
+            && timing.0 == 1 && timing.1 == 0
+    }
+
     public static func create(tty: Bool, interactive: Bool, detach: Bool) throws -> ProcessIO {
         var rawConsole = false
         let current: Terminal? = try {
-            if !tty || !interactive {
+            if detach || !tty || !interactive {
                 return nil
             }
             let current = try Terminal(descriptor: STDIN_FILENO)
-            do {
-                try current.setraw()
-                rawConsole = true
-            } catch let error as POSIXError where error.code == .EPERM {
-                // The App Sandbox denies the terminal ioctls to a sandboxed command line, so
-                // the terminal cannot be set raw. It stays as it is, in line mode: what is
-                // typed reaches the container a line at a time, with the terminal's own
-                // echo and editing, which is a shell that works rather than a run that
-                // fails with "Operation not permitted".
-                FileHandle.standardError.write(Data("the terminal stays in line mode: this command line may not set it raw\n".utf8))
+            rawConsole = try Self.configureRawConsole(current)
+            if !rawConsole {
+                FileHandle.standardError.write(
+                    Data(
+                        "the terminal stays in line mode: this command line may not set it raw\nUpdate the container command in SiliconShip Settings for interactive terminal input.\n"
+                            .utf8))
             }
             return current
         }()
@@ -175,7 +197,12 @@ public struct ProcessIO: Sendable {
 
     public func handleProcess(process: ClientProcess, log: Logger) async throws -> Int32 {
         let signals = AsyncSignalHandler.create(notify: Self.signalSet)
-        return try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
+        return try await handleProcess(process: process, log: log, signalStream: signals.signals)
+    }
+
+    /// The stream seam keeps tests from installing or sending signals to their runner.
+    func handleProcess(process: ClientProcess, log: Logger, signalStream: AsyncStream<Int32>) async throws -> Int32 {
+        try await withThrowingTaskGroup(of: Int32?.self, returning: Int32.self) { group in
             try await process.start()
             try closeAfterStart()
 
@@ -191,8 +218,8 @@ public struct ProcessIO: Sendable {
             }
 
             if let current = console {
-                // The size is best effort too: the ioctl that reads it is denied where raw
-                // mode was, and a container that cannot be told its terminal's size still runs.
+                // Reading the size is allowed for a Terminal-launched sandboxed CLI.
+                // Keep it best effort for detached or disappearing terminals.
                 if let size = try? current.size {
                     // It's supremely possible the process could've exited already. We shouldn't treat
                     // this as fatal.
@@ -215,25 +242,24 @@ public struct ProcessIO: Sendable {
                     return nil
                 }
             }
-            // Without a raw console the terminal, or whoever runs the command, turns Ctrl-C
-            // and the rest into signals for this process; they are the container's.
-            if !rawConsole {
-                _ = group.addTaskUnlessCancelled {
-                    for await sig in signals.signals {
-                        do {
-                            try await process.kill(sig)
-                        } catch {
-                            log.error(
-                                "failed to send signal",
-                                metadata: [
-                                    "signal": "\(sig)",
-                                    "error": "\(error)",
-                                ]
-                            )
-                        }
+            // Raw input carries keyboard Ctrl-C as a byte, but kill/termination still
+            // delivers host signals. Forward those in either mode. Window changes have
+            // their own resize task and must not also be sent as guest process signals.
+            _ = group.addTaskUnlessCancelled {
+                for await sig in signalStream where sig != SIGWINCH {
+                    do {
+                        try await process.kill(sig)
+                    } catch {
+                        log.error(
+                            "failed to send signal",
+                            metadata: [
+                                "signal": "\(sig)",
+                                "error": "\(error)",
+                            ]
+                        )
                     }
-                    return nil
                 }
+                return nil
             }
 
             while true {
