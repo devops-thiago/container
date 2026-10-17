@@ -300,8 +300,11 @@ public enum ContainerCreateMapper {
         if nanoCPUs > 0 {
             // A VM has whole CPUs: a fraction is rounded up, so the container gets at least
             // what it asked for.
-            resources.cpus = Int((nanoCPUs + 999_999_999) / 1_000_000_000)
+            let (rounded, overflow) = nanoCPUs.addingReportingOverflow(999_999_999)
+            guard !overflow else { throw .badRequest("invalid CPU count: NanoCPUs is too large") }
+            resources.cpus = Int(rounded / 1_000_000_000)
         } else if cpuCount > 0 {
+            guard cpuCount < Int.max else { throw .badRequest("invalid CPU count: CPU count is too large") }
             resources.cpus = Int(cpuCount)
         }
         if let memory = host.Memory, memory != 0 {
@@ -426,7 +429,7 @@ public enum ContainerCreateMapper {
                     } catch {
                         throw .internalError("no free host port for \(key): \(error)")
                     }
-                } else if let port = UInt16(text.split(separator: "-", maxSplits: 1)[0]), port > 0 {
+                } else if let port = validHostPort(text) {
                     hostPort = port
                 } else {
                     throw .badRequest("invalid host port: \(text)")
@@ -447,7 +450,18 @@ public enum ContainerCreateMapper {
         return ports
     }
 
+    /// A single port or the first port of a valid inclusive range, matching existing behavior.
+    private static func validHostPort(_ text: String) -> UInt16? {
+        let parts = text.split(separator: "-", omittingEmptySubsequences: false)
+        guard (1...2).contains(parts.count), let first = UInt16(parts[0]), first > 0 else { return nil }
+        if parts.count == 2 {
+            guard let last = UInt16(parts[1]), last >= first else { return nil }
+        }
+        return first
+    }
+
     /// `80/tcp`, `53/udp`, or `80` meaning tcp.
+
     static func portKey(_ key: String) throws(DockerAPIError) -> (UInt16, PublishProtocol) {
         let parts = key.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
         guard let port = UInt16(parts[0]), port > 0 else {

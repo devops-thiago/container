@@ -453,4 +453,23 @@ struct ContainerCreateMapperTests {
         #expect(plain.dns?.domain == "test")
         #expect(plain.networks.first?.options.hostname == "abcdef012345.test.")
     }
+    @Test("CPU extremes return a client error instead of terminating the agent", arguments: [Int64.min, Int64.max])
+    func cpuBoundaries(value: Int64) {
+        for field in ["NanoCpus", "CpuCount"] {
+            #expect(errorMessage { _ = try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"\(field)\":\(value)}}") }?.status == .badRequest)
+        }
+    }
+
+    @Test("malformed host port ranges return a client error", arguments: ["-", "--", "-80", "80-", "80-x", "80-79", "80-81-82"])
+    func malformedPortRange(port: String) {
+        #expect(errorMessage { _ = try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"PortBindings\":{\"80/tcp\":[{\"HostPort\":\"\(port)\"}]}}}") }?.status == .badRequest)
+    }
+
+    @Test("valid CPU rounding and host port range behavior remain")
+    func boundaryControls() throws {
+        for (input, cpus) in [(1, 1), (1_000_000_000, 1), (1_000_000_001, 2)] {
+            #expect(try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"NanoCpus\":\(input)}}").configuration.resources.cpus == cpus)
+        }
+        #expect(try Fixtures.plan(#"{"Image":"a","HostConfig":{"PortBindings":{"80/tcp":[{"HostPort":"8080-8090"}]}}}"#).configuration.publishedPorts.first?.hostPort == 8080)
+    }
 }
