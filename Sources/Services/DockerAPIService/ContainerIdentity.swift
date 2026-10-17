@@ -187,6 +187,14 @@ public struct DockerIdentityTable: Sendable, Equatable {
         return containers
     }
 
+    /// Refresh one observed container without treating other containers as deleted.
+    public mutating func resolve(_ snapshot: ContainerSnapshot) -> DockerContainer {
+        var single = DockerIdentityTable(records: records[snapshot.id].map { [$0] } ?? [])
+        let container = single.join([snapshot])[0]
+        records[snapshot.id] = single.records[snapshot.id]
+        return container
+    }
+
     /// The name the engine keeps for a container: its name label, or its engine ID without one.
     public static func engineName(_ snapshot: ContainerSnapshot) -> String {
         engineName(id: snapshot.id, labels: snapshot.configuration.labels)
@@ -353,6 +361,14 @@ public actor DockerIdentityStore {
             try? save()
         }
         return containers
+    }
+
+    /// A point observation cannot prove that unrelated containers no longer exist.
+    public func resolve(_ snapshot: ContainerSnapshot) -> DockerContainer {
+        let before = table
+        let container = table.resolve(snapshot)
+        if table != before { try? save() }
+        return container
     }
 
     /// Sets aside `name` (or a generated one) and a new Docker ID for a create.
