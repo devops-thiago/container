@@ -42,6 +42,9 @@ public enum LoopbackRegistry {
     /// `127.0.0.0/8`, or `::1` (also as the IPv4-mapped form of a `127.0.0.0/8` address), with
     /// or without a port.
     public static func isLoopback(_ authority: String) -> Bool {
+        // An authority is not a URL. Reject syntax that URL parsing could interpret as
+        // user information, a path, or an escaped delimiter before choosing plain HTTP.
+        guard !authority.contains(where: { #"/\@?#%"#.contains($0) || $0.isWhitespace || $0.isNewline }) else { return false }
         let host = host(of: authority)
         if host.lowercased() == "localhost" {
             return true
