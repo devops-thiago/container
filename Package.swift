@@ -710,6 +710,7 @@ let package = Package(
         .testTarget(
             name: "DockerAPIServiceTests",
             dependencies: [
+                .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 .product(name: "Logging", package: "swift-log"),

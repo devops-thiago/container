@@ -49,6 +49,7 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
+    private let finishSpool: (DockerSpooledBody) -> EventLoopFuture<URL>
     private let router: DockerRouter
     private let limits: DockerHTTPLimits
     private let log: Logger
@@ -77,8 +78,10 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
 
     init(
         router: DockerRouter, limits: DockerHTTPLimits, log: Logger,
-        encoder: HTTPResponseEncoder, decoder: ByteToMessageHandler<HTTPRequestDecoder>, peer: DockerPeer? = nil
+        encoder: HTTPResponseEncoder, decoder: ByteToMessageHandler<HTTPRequestDecoder>, peer: DockerPeer? = nil,
+        finishSpool: @escaping (DockerSpooledBody) -> EventLoopFuture<URL> = { $0.finish() }
     ) {
+        self.finishSpool = finishSpool
         self.peer = peer
         self.router = router
         self.limits = limits
@@ -147,7 +150,13 @@ final class DockerHTTPHandler: ChannelInboundHandler, RemovableChannelHandler {
                 // Answered once the body is all on disk; later requests wait their turn.
                 self.spool = nil
                 resumeReading(context: context)
-                spool.finish().assumeIsolated().whenComplete { result in
+                finishSpool(spool).assumeIsolated().whenComplete { result in
+                    // Disconnect can clear the queue while the final write is still pending.
+                    // In that case this completion still owns the file; no route can take it.
+                    guard self.queue.contains(where: { $0 === entry }) else {
+                        spool.discard()
+                        return
+                    }
                     switch result {
                     case .success(let file):
                         entry.bodyFile = file
