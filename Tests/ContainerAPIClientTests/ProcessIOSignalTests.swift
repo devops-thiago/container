@@ -47,7 +47,7 @@ private actor TerminalSignalProcess: ClientProcess {
 }
 
 struct ProcessIOSignalTests {
-    @Test("external signals reach the guest in raw and canonical modes", arguments: [true, false], [SIGTERM, SIGINT, SIGHUP])
+    @Test("external signals reach the guest in raw and canonical modes", arguments: [true, false], [SIGTERM, SIGINT, SIGQUIT, SIGHUP])
     func forwardsSignals(raw: Bool, terminatingSignal: Int32) async throws {
         let process = TerminalSignalProcess(terminatingSignal: terminatingSignal)
         let io = ProcessIO(

@@ -29,6 +29,7 @@ public struct ProcessIO: Sendable {
         SIGHUP,
         SIGTERM,
         SIGINT,
+        SIGQUIT,
         SIGUSR1,
         SIGUSR2,
         SIGWINCH,
