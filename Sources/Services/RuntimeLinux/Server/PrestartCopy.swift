@@ -100,19 +100,45 @@ struct VminitdCopyAgent: GuestCopyAgent {
         let port = Self.port()
         let listener = try vm.listen(port)
         defer { try? listener.finish() }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
+        try await Self.runCopyTasks(
+            rpc: {
                 try await agent.copy(
-                    direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: isDirectory)
-            }
-            group.addTask {
+                    direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents)
+            },
+            transfer: {
                 guard let connection = await listener.first(where: { _ in true }) else {
                     throw ContainerizationError(.internalError, message: "copyIn: the VM did not connect for the copy")
                 }
                 try listener.finish()
                 try await Self.send(source, isDirectory: isDirectory, to: connection)
+            },
+            closeListener: { try? listener.finish() })
+    }
+
+    static func runCopyTasks(
+        rpc: @escaping @Sendable () async throws -> Void,
+        transfer: @escaping @Sendable () async throws -> Void,
+        closeListener: @escaping @Sendable () -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        defer { closeListener() }
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask(operation: rpc)
+                group.addTask(operation: transfer)
+                do {
+                    while try await group.next() != nil {}
+                } catch {
+                    // Closing the listener must happen before the group waits for its
+                    // remaining child, which may still be waiting for a guest connection.
+                    closeListener()
+                    group.cancelAll()
+                    try Task.checkCancellation()
+                    throw error
+                }
             }
-            try await group.waitForAll()
+        } onCancel: {
+            closeListener()
         }
     }
 
