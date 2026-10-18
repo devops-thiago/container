@@ -102,8 +102,8 @@ struct VminitdCopyAgent: GuestCopyAgent {
         defer { try? listener.finish() }
         try await Self.runCopyTasks(
             rpc: {
-                try await agent.copy(
-                    direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents)
+                try await Self.requestCopy(
+                    agent: agent, isDirectory: isDirectory, root: root, path: path, port: port, mode: mode, createParents: createParents)
             },
             transfer: {
                 guard let connection = await listener.first(where: { _ in true }) else {
@@ -113,6 +113,13 @@ struct VminitdCopyAgent: GuestCopyAgent {
                 try await Self.send(source, isDirectory: isDirectory, to: connection)
             },
             closeListener: { try? listener.finish() })
+    }
+
+    /// The RPC and the payload must agree: otherwise the guest writes the archive bytes as
+    /// a regular file. Keep this at the real Vminitd boundary so tests can decode the request.
+    static func requestCopy(agent: Vminitd, isDirectory: Bool, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool) async throws {
+        try await agent.copy(
+            direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: isDirectory)
     }
 
     static func runCopyTasks(
@@ -144,7 +151,7 @@ struct VminitdCopyAgent: GuestCopyAgent {
 
     /// Writes `source` to `connection` off the cooperative pool, and closes it: a directory as
     /// a gzipped pax archive of its contents, a file as its bytes.
-    private static func send(_ source: URL, isDirectory: Bool, to connection: FileHandle) async throws {
+    static func send(_ source: URL, isDirectory: Bool, to connection: FileHandle) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
