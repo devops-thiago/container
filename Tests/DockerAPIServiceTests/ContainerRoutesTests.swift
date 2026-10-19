@@ -73,8 +73,16 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
         lock.withLock { processes[id] }
     }
 
+    /// Holds the next list once it has read the containers, before it answers.
+    var listGate: ListGate?
+
     func list() async throws -> [ContainerSnapshot] {
-        lock.withLock { snapshots }
+        let (listed, gate) = lock.withLock {
+            defer { listGate = nil }
+            return (snapshots, listGate)
+        }
+        await gate?.hold()
+        return listed
     }
 
     func get(_ engineID: String) async throws -> ContainerSnapshot? {
@@ -217,6 +225,35 @@ final class FakeEngine: EngineContainers, @unchecked Sendable {
                 snapshots[index].configuration.labels[DockerLabels.name] = name
             }
         }
+    }
+}
+
+/// A list held between reading the engine's containers and answering, so that a test can run
+/// other routes in that window.
+struct ListGate: Sendable {
+    private let held: AsyncStream<Void>
+    private let heldSignal: AsyncStream<Void>.Continuation
+    private let released: AsyncStream<Void>
+    private let releaseSignal: AsyncStream<Void>.Continuation
+
+    init() {
+        (held, heldSignal) = AsyncStream<Void>.makeStream()
+        (released, releaseSignal) = AsyncStream<Void>.makeStream()
+    }
+
+    /// The list's side: says it has read the containers, then waits to be let go.
+    func hold() async {
+        heldSignal.yield()
+        for await _ in released { break }
+    }
+
+    /// The test's side: returns once the list has read the containers.
+    func waitUntilHeld() async {
+        for await _ in held { break }
+    }
+
+    func release() {
+        releaseSignal.yield()
     }
 }
 
@@ -393,6 +430,48 @@ struct ContainerRoutesTests {
         _ = try await create("db")
         #expect(try await call(.DELETE, "/containers/db").status == .noContent)
         #expect(!(engine.calls.last ?? "").hasPrefix("volume rm"))
+    }
+
+    @Test("containers made while a list was being taken keep their extras when that list is joined: --rm and rm -v behave")
+    func listTakenBeforeCreate() async throws {
+        let gate = ListGate()
+        engine.listGate = gate
+        // `docker ps` reads the engine's containers before either create, and answers after both.
+        async let stale = call(.GET, "/containers/json?all=1")
+        await gate.waitUntilHeld()
+        let made = try await call(.POST, "/containers/create?name=once", body: #"{"Image":"alpine","HostConfig":{"AutoRemove":true}}"#)
+        #expect(made.status == .created)
+        let kept = try await call(.POST, "/containers/create?name=data", body: #"{"Image":"alpine","Volumes":{"/data":{}}}"#)
+        #expect(kept.status == .created)
+        gate.release()
+        #expect(try await stale.body == "[]")
+
+        let records = await identities.records
+        #expect(Set(records.map(\.name)) == ["once", "data"])
+        #expect(records.allSatisfy { $0.extras != nil })
+        let inspect = try #require(try await call(.GET, "/containers/once/json").json() as? [String: Any])
+        #expect((inspect["HostConfig"] as? [String: Any])?["AutoRemove"] as? Bool == true)
+
+        // --rm: a start that fails removes the container, as dockerd does.
+        let once = try #require(engine.plans.first?.configuration.id)
+        engine.bootstrapError = DockerAPIError.internalError("no VM")
+        #expect(try await call(.POST, "/containers/once/start").status == .internalServerError)
+        #expect(engine.calls.contains("delete \(once) true"))
+        #expect(engine.snapshot(once) == nil)
+
+        // rm -v: the volume the create made for the container goes with it.
+        let anonymous = try #require(engine.plans.last?.extras.anonymousVolumes.first)
+        #expect(try await call(.DELETE, "/containers/data?v=1").status == .noContent)
+        #expect(engine.calls.last == "volume rm \(anonymous)")
+
+        // Control: a container deleted behind this service's back loses its record at the
+        // next list, made after the delete.
+        _ = try await create("gone")
+        let gone = try #require(engine.plans.last?.configuration.id)
+        try await engine.delete(try #require(engine.snapshot(gone)), force: true)
+        #expect(await identities.records.map(\.name) == ["gone"])
+        #expect(try await call(.GET, "/containers/json?all=1").body == "[]")
+        #expect(await identities.records.isEmpty)
     }
 
     @Test("rename takes a free name, refuses a taken one, and the old name stops resolving")

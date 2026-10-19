@@ -126,13 +126,13 @@ struct ContainerIdentityTests {
         let store = DockerIdentityStore(persistence: persistence)
         let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
         let foreign = Fixtures.snapshot(Fixtures.configuration(id: "my-app"))
-        var all = await store.join([web, foreign])
+        var all = try await store.join { [web, foreign] }
         try await store.rename(all[0], to: "/front", among: all)
         await #expect(throws: DockerAPIError.badRequest("Renaming a container with the same name as its current name")) {
             try await store.rename(all[1], to: "my-app", among: all)
         }
         await #expect(throws: DockerAPIError.badRequest("Neither old nor new names may be empty")) { try await store.rename(all[1], to: "", among: all) }
-        all = await store.join([web, foreign])
+        all = try await store.join { [web, foreign] }
         await #expect(throws: DockerAPIError.self) { try await store.rename(all[1], to: "front", among: all) }
         do {
             try await store.rename(all[1], to: "front", among: all)
@@ -144,11 +144,73 @@ struct ContainerIdentityTests {
         try await store.rename(all[1], to: "legacy", among: all)
 
         let restarted = DockerIdentityStore(persistence: persistence)
-        let rejoined = await restarted.join([web, foreign])
+        let rejoined = try await restarted.join { [web, foreign] }
         #expect(rejoined.map(\.name) == ["front", "legacy"])
         #expect(rejoined[1].dockerID == DockerIdentityTable.foreignID(engineID: "my-app"))
         // Control: a store that lost its file falls back to the labels and the engine IDs.
-        #expect(await DockerIdentityStore(persistence: nil).join([web, foreign]).map(\.name) == ["web", "my-app"])
+        #expect(try await DockerIdentityStore(persistence: nil).join { [web, foreign] }.map(\.name) == ["web", "my-app"])
+    }
+
+    @Test("a join keeps the records made after its list was taken; one taken after them forgets those that are gone")
+    func listTakenBeforeCommit() async throws {
+        let persistence = MemoryIdentityPersistence()
+        let store = DockerIdentityStore(persistence: persistence)
+        let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
+        let reservation = DockerIdentityReservation(name: "api", dockerID: Fixtures.id("def456abc123"))
+        let extras = DockerContainerExtras(image: "alpine", imageID: "sha256:1", autoRemove: true, anonymousVolumes: ["volume"])
+        // The list is taken, a create commits, then the list is joined.
+        let joined = try await store.join {
+            await store.commit(reservation, incarnation: "inc-1", extras: extras)
+            return [web]
+        }
+        #expect(joined.map(\.name) == ["web"])
+        #expect(await store.records.first { $0.name == "api" }?.extras == extras)
+        #expect(try persistence.load().contains { $0.name == "api" && $0.extras == extras })
+        // Two lists in flight: the one joined first must not make the other forget the change.
+        let reservation2 = DockerIdentityReservation(name: "db", dockerID: Fixtures.id("fed456abc123"))
+        let api = Fixtures.dockerContainer(name: "api", dockerID: reservation.dockerID)
+        _ = try await store.join {
+            _ = try await store.join {
+                await store.commit(reservation2, incarnation: "inc-1", extras: extras)
+                return [web, api]
+            }
+            return [web, api]
+        }
+        #expect(Set(await store.records.map(\.name)) == ["web", "api", "db"])
+        #expect(await store.records.first { $0.name == "api" }?.extras == extras)
+        // Control: a list taken after the creates that does not have their containers means
+        // they are gone, and their records go.
+        _ = try await store.join { [web] }
+        #expect(await store.records.map(\.name) == ["web"])
+    }
+
+    @Test("a rename or delete made after a list was taken is not undone when that list is joined")
+    func listTakenBeforeRenameOrDelete() async throws {
+        let store = DockerIdentityStore(persistence: nil)
+        let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
+        let all = try await store.join { [web] }
+        // The engine took the new name after the list read the old label.
+        _ = try await store.join {
+            await store.renamedInEngine(all[0], to: "front")
+            return [web]
+        }
+        #expect(await store.records.map(\.name) == ["front"])
+        // Control: a list taken after the rename that still has the old label is the engine's word.
+        _ = try await store.join { [web] }
+        #expect(await store.records.map(\.name) == ["web"])
+
+        // Deleted after the list read it: the list still shows it, but no record comes back.
+        let stale = try await store.join {
+            await store.forget(engineID: "abc123def456")
+            return [web]
+        }
+        #expect(stale.map(\.name) == ["web"])
+        #expect(stale.first?.dockerID == Fixtures.id("abc123def456"))
+        #expect(await store.records.isEmpty)
+        // Control: a list taken after the delete that still has the container brings its
+        // record back from the labels.
+        _ = try await store.join { [web] }
+        #expect(await store.records.map(\.name) == ["web"])
     }
 
     @Test("records go to disk owner-only and come back; a missing file is an empty store")
@@ -201,7 +263,7 @@ struct ContainerIdentityTests {
     }
 
     @Test("a rename the engine could not keep wins over the label until it has it; one from before names lived in the engine is one too")
-    func localRenames() async {
+    func localRenames() async throws {
         let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
         for record in [
             DockerContainerRecord(engineID: "abc123def456", incarnation: "inc-1", dockerID: Fixtures.id("abc123def456"), name: "front", localRename: true),
@@ -220,11 +282,11 @@ struct ContainerIdentityTests {
         #expect(table.records["abc123def456"]?.localRename == false)
 
         let store = DockerIdentityStore(persistence: nil)
-        _ = await store.join([web])
-        let all = await store.join([web])
+        _ = try await store.join { [web] }
+        let all = try await store.join { [web] }
         try? await store.rename(all[0], to: "front", among: all)
-        #expect(await store.localRenames([web]).map(\.1) == ["front"])
+        #expect(try await store.localRenames { [web] }.map(\.1) == ["front"])
         await store.renamedInEngine(all[0], to: "front")
-        #expect(await store.localRenames([web]).isEmpty)
+        #expect(try await store.localRenames { [web] }.isEmpty)
     }
 }

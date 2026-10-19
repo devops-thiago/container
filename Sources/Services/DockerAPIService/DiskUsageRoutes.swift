@@ -66,7 +66,7 @@ public enum DiskUsageRoutes {
             throw DockerAPIError.badRequest("unknown object type: \(type)")
         }
         let wants = { (type: String) in asked.isEmpty || asked.contains(type) }
-        let all = await identities.join(try await containers.list())
+        let all = try await identities.join { try await containers.list() }
 
         var answer = DockerDiskUsage(LayersSize: 0, Images: nil, Containers: nil, Volumes: nil, BuildCache: nil)
         if wants("image") {

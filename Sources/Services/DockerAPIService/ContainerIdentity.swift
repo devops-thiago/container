@@ -163,11 +163,22 @@ public struct DockerIdentityTable: Sendable, Equatable {
 
     /// Joins every engine container with its identity, and forgets records whose container is
     /// gone or was made again under the same engine ID.
-    public mutating func join(_ snapshots: [ContainerSnapshot]) -> [DockerContainer] {
-        var kept: [String: DockerContainerRecord] = [:]
+    ///
+    /// - Parameter newer: the engine IDs whose records changed after `snapshots` were listed.
+    ///   The list is older than those records: they are kept as they are, even when the list
+    ///   does not have their container, and none is made again from the list's labels.
+    public mutating func join(_ snapshots: [ContainerSnapshot], newer: Set<String> = []) -> [DockerContainer] {
+        var kept = records.filter { newer.contains($0.key) }
         let containers = snapshots.map { snapshot -> DockerContainer in
-            let labels = snapshot.configuration.labels
             let engineName = Self.engineName(snapshot)
+            if newer.contains(snapshot.id) {
+                // A record made, changed or forgotten since this list: the list's view of the
+                // container is the stale one, and a forgotten one's container is gone.
+                if let record = records[snapshot.id] ?? Self.labelled(snapshot) {
+                    return DockerContainer(snapshot: snapshot, dockerID: record.dockerID, name: record.name, extras: record.extras)
+                }
+                return DockerContainer(snapshot: snapshot, dockerID: Self.foreignID(engineID: snapshot.id), name: engineName)
+            }
             if var record = records[snapshot.id], Self.sameIncarnation(record.incarnation, snapshot.incarnation) {
                 let local = record.isLocalRename(engineName: engineName)
                 record.localRename = local
@@ -175,9 +186,7 @@ public struct DockerIdentityTable: Sendable, Equatable {
                 kept[snapshot.id] = record
                 return DockerContainer(snapshot: snapshot, dockerID: record.dockerID, name: record.name, extras: record.extras)
             }
-            if let id = labels[DockerLabels.id], Self.isDockerID(id), id.hasPrefix(snapshot.id) {
-                let record = DockerContainerRecord(
-                    engineID: snapshot.id, incarnation: snapshot.incarnation, dockerID: id, name: engineName, localRename: false)
+            if let record = Self.labelled(snapshot) {
                 kept[snapshot.id] = record
                 return DockerContainer(snapshot: snapshot, dockerID: record.dockerID, name: record.name)
             }
@@ -185,6 +194,13 @@ public struct DockerIdentityTable: Sendable, Equatable {
         }
         records = kept
         return containers
+    }
+
+    /// The record a container this service made carries in its labels, without the extras
+    /// only a record keeps.
+    private static func labelled(_ snapshot: ContainerSnapshot) -> DockerContainerRecord? {
+        guard let id = snapshot.configuration.labels[DockerLabels.id], isDockerID(id), id.hasPrefix(snapshot.id) else { return nil }
+        return DockerContainerRecord(engineID: snapshot.id, incarnation: snapshot.incarnation, dockerID: id, name: engineName(snapshot), localRename: false)
     }
 
     /// Refresh one observed container without treating other containers as deleted.
@@ -336,6 +352,14 @@ public actor DockerIdentityStore {
 
     private var table: DockerIdentityTable
     private var reserved: [String: DockerIdentityReservation] = [:]
+    /// Counts the changes made here to records, so that a join can tell the records that
+    /// changed after its list was taken.
+    private var generation: UInt64 = 0
+    /// The generation of the last change to each record, by engine ID, while a list taken
+    /// before it can still be joined.
+    private var changed: [String: UInt64] = [:]
+    /// The generations at which the lists not yet joined were taken, with how many of each.
+    private var listings: [UInt64: Int] = [:]
     private let persistence: (any DockerIdentityPersistence)?
     private var generator: any RandomNumberGenerator
 
@@ -351,10 +375,18 @@ public actor DockerIdentityStore {
         table.records.values.sorted { $0.engineID < $1.engineID }
     }
 
-    /// The engine's containers as Docker sees them.
-    public func join(_ snapshots: [ContainerSnapshot]) -> [DockerContainer] {
+    /// The engine's containers as Docker sees them, from the list `list` takes.
+    ///
+    /// A create, rename or delete can finish here while the list is being taken. The list
+    /// then predates it, so the records it changed are kept as they are rather than made
+    /// again, without their extras, from the list.
+    public func join(_ list: @Sendable () async throws -> [ContainerSnapshot]) async throws -> [DockerContainer] {
+        let listedAt = generation
+        listings[listedAt, default: 0] += 1
+        defer { listed(at: listedAt) }
+        let snapshots = try await list()
         let before = table
-        let containers = table.join(snapshots)
+        let containers = table.join(snapshots, newer: Set(changed.filter { $0.value > listedAt }.keys))
         if table != before {
             // Saving again at the next change is as good as saving now; a failure here only
             // means a label has to bring a name back after a restart.
@@ -363,11 +395,36 @@ public actor DockerIdentityStore {
         return containers
     }
 
+    /// A list taken at `listedAt` was joined: changes no list still to be joined predates
+    /// need not be remembered.
+    private func listed(at listedAt: UInt64) {
+        if listings[listedAt, default: 0] > 1 {
+            listings[listedAt, default: 0] -= 1
+        } else {
+            listings[listedAt] = nil
+        }
+        guard let oldest = listings.keys.min() else {
+            changed.removeAll()
+            return
+        }
+        changed = changed.filter { $0.value > oldest }
+    }
+
+    /// Notes a change to `engineID`'s record, for the joins of lists taken before it.
+    private func touch(_ engineID: String) {
+        generation += 1
+        guard !listings.isEmpty else { return }
+        changed[engineID] = generation
+    }
+
     /// A point observation cannot prove that unrelated containers no longer exist.
     public func resolve(_ snapshot: ContainerSnapshot) -> DockerContainer {
         let before = table
         let container = table.resolve(snapshot)
-        if table != before { try? save() }
+        if table != before {
+            touch(snapshot.id)
+            try? save()
+        }
         return container
     }
 
@@ -425,6 +482,7 @@ public actor DockerIdentityStore {
         table.insert(
             DockerContainerRecord(
                 engineID: reservation.engineID, incarnation: incarnation, dockerID: reservation.dockerID, name: reservation.name, extras: extras))
+        touch(reservation.engineID)
         try? save()
     }
 
@@ -459,6 +517,7 @@ public actor DockerIdentityStore {
     public func rename(_ container: DockerContainer, to requested: String, among containers: [DockerContainer]) throws(DockerAPIError) {
         let name = try checkRename(container, to: requested, among: containers)
         table.rename(container, to: name)
+        touch(container.engineID)
         do {
             try save()
         } catch {
@@ -469,13 +528,14 @@ public actor DockerIdentityStore {
     /// The engine has `container` under `name` now: the label is where the name is.
     public func renamedInEngine(_ container: DockerContainer, to name: String) {
         table.rename(container, to: name, local: false)
+        touch(container.engineID)
         try? save()
     }
 
     /// The renames made here that the engine does not have, as `(container, name)`, for an
     /// engine that can now keep them.
-    public func localRenames(_ snapshots: [ContainerSnapshot]) -> [(DockerContainer, String)] {
-        join(snapshots).compactMap { container in
+    public func localRenames(_ list: @Sendable () async throws -> [ContainerSnapshot]) async throws -> [(DockerContainer, String)] {
+        try await join(list).compactMap { container in
             guard let record = table.records[container.engineID], record.localRename == true else { return nil }
             return (container, record.name)
         }
@@ -487,6 +547,7 @@ public actor DockerIdentityStore {
         table.insert(
             DockerContainerRecord(
                 engineID: container.engineID, incarnation: incarnation, dockerID: container.dockerID, name: container.name, extras: container.extras))
+        touch(container.engineID)
         try? save()
     }
 
@@ -494,6 +555,7 @@ public actor DockerIdentityStore {
     public func forget(engineID: String) {
         guard table.records[engineID] != nil else { return }
         table.remove(engineID: engineID)
+        touch(engineID)
         try? save()
     }
 

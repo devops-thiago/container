@@ -223,7 +223,7 @@ public enum VolumeRoutes {
         }
 
         func users() async throws -> [String: [String]] {
-            VolumeMapper.users(await identities.join(try await containers.list()))
+            VolumeMapper.users(try await identities.join { try await containers.list() })
         }
 
         func list(_ request: DockerRequest) async throws -> DockerResponse {
