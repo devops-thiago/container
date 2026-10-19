@@ -213,6 +213,33 @@ struct ContainerIdentityTests {
         #expect(await store.records.map(\.name) == ["web"])
     }
 
+    @Test("an older list joined after a newer one does not undo what the newer one found")
+    func overlappingListsJoinedOutOfOrder() async throws {
+        let web = Fixtures.dockerContainer(name: "web", dockerID: Fixtures.id("abc123def456"))
+        let renamed = Fixtures.dockerContainer(name: "front", dockerID: Fixtures.id("abc123def456"))
+
+        // Gone: list A still has the container, list B, taken and joined inside A, does not.
+        let store = DockerIdentityStore(persistence: nil)
+        _ = try await store.join { [web] }
+        _ = try await store.join {
+            _ = try await store.join { [] }
+            return [web]
+        }
+        #expect(await store.records.isEmpty)
+
+        // Renamed by another client of the engine: B reads the new label, A the old one.
+        _ = try await store.join { [web] }
+        _ = try await store.join {
+            _ = try await store.join { [renamed] }
+            return [web]
+        }
+        #expect(await store.records.map(\.name) == ["front"])
+
+        // Control: lists joined in the order they were taken; the later one is the engine's word.
+        _ = try await store.join { [web] }
+        #expect(await store.records.map(\.name) == ["web"])
+    }
+
     @Test("records go to disk owner-only and come back; a missing file is an empty store")
     func fileRoundTrip() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "dapi-identity-\(UUID().uuidString)")

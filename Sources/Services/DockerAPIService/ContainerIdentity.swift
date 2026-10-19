@@ -388,6 +388,11 @@ public actor DockerIdentityStore {
         let before = table
         let containers = table.join(snapshots, newer: Set(changed.filter { $0.value > listedAt }.keys))
         if table != before {
+            // What this list adopted, renamed or dropped is newer than any list taken before it.
+            let engineIDs = Set(before.records.keys).union(table.records.keys)
+            for engineID in engineIDs where before.records[engineID] != table.records[engineID] {
+                touch(engineID)
+            }
             // Saving again at the next change is as good as saving now; a failure here only
             // means a label has to bring a name back after a restart.
             try? save()
