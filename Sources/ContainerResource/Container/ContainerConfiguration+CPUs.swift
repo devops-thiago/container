@@ -23,6 +23,21 @@ extension ContainerConfiguration.Resources {
         VZVirtualMachineConfiguration.maximumAllowedCPUCount
     }
 
+    /// `count` brought into the range a VM can have, 0 to `virtualCPUs`.
+    public static func clampedCPUCount(_ count: Int, virtualCPUs: Int = maximumVirtualCPUs) -> Int {
+        min(max(count, 0), virtualCPUs)
+    }
+
+    /// These resources with CPU counts no VM can have brought into range, for a configuration
+    /// saved before create refused them. The VM is the one such a count always gave, since the
+    /// runtime gives a VM at most the host's CPUs, and nothing it computes from them overflows.
+    public func clampedCPUs(virtualCPUs: Int = Self.maximumVirtualCPUs) -> Self {
+        var resources = self
+        resources.cpus = Self.clampedCPUCount(cpus, virtualCPUs: virtualCPUs)
+        resources.cpuOverhead = Self.clampedCPUCount(cpuOverhead, virtualCPUs: virtualCPUs)
+        return resources
+    }
+
     /// Refuses CPU counts no VM can have. Up to Virtualization's limit a count works as it
     /// always has: the runtime gives the VM at most the host's CPUs. Past it the count means
     /// nothing, and far past it the runtime's CPU quota (`cpus * 100_000`) and the VM's CPU

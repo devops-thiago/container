@@ -250,9 +250,7 @@ public actor RuntimeService {
             try bundle.createLogFile()
 
             var config = try bundle.configuration
-            // A configuration saved before create refused them can hold CPU counts that
-            // overflow the VM's CPU count or the CPU quota, which traps this helper.
-            try config.resources.validateCPUs()
+            config.resources = Self.bootableResources(config.resources)
 
             var kernel = try bundle.kernel
             // Built-in defaults keyed by arg name. Each is applied only if the user did not already
@@ -1430,6 +1428,14 @@ public actor RuntimeService {
             }
             await setState(.stopped)
         }
+    }
+
+    /// The resources a saved configuration boots with. One saved before create refused CPU
+    /// counts no VM can have may hold one, which would overflow the VM's CPU count and the CPU
+    /// quota (`cpus * 100_000`) and trap this helper; it boots clamped instead, with the VM it
+    /// always had, the runtime giving a VM at most the host's CPUs.
+    static func bootableResources(_ resources: ContainerConfiguration.Resources) -> ContainerConfiguration.Resources {
+        resources.clampedCPUs()
     }
 
     /// The guest's sysctls: the caller's, plus two defaults for the keys it left unset.

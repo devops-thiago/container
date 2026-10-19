@@ -1483,9 +1483,14 @@ struct ParserTest {
         #expect(error?.message.contains("invalid CPU count") == true)
     }
 
-    @Test func testResourcesRefuseADefaultCPUCountNoVMCanHave() throws {
+    @Test(arguments: [(100, ContainerConfiguration.Resources.maximumVirtualCPUs), (100_000_000_000_000, ContainerConfiguration.Resources.maximumVirtualCPUs), (-1, 0), (6, 6)])
+    func testResourcesClampADefaultCPUCount(defaultCPUs: Int, expected: Int) throws {
+        // A system property is not the user's to correct at every command: the Docker API
+        // agent's defaults and the builder read it too.
+        #expect(try Parser.resources(cpus: nil, memory: nil, defaultCPUs: defaultCPUs, defaultMemory: MemorySize("1g")).cpus == expected)
+        // Control: a count the user gives is still refused.
         #expect(throws: ContainerizationError.self) {
-            _ = try Parser.resources(cpus: nil, memory: nil, defaultCPUs: 100_000_000_000_000, defaultMemory: MemorySize("1g"))
+            _ = try Parser.resources(cpus: Int64(defaultCPUs < 0 ? -1 : 100), memory: nil, defaultCPUs: defaultCPUs, defaultMemory: MemorySize("1g"))
         }
     }
 
