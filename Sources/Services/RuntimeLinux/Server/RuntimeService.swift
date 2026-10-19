@@ -250,6 +250,9 @@ public actor RuntimeService {
             try bundle.createLogFile()
 
             var config = try bundle.configuration
+            // A configuration saved before create refused them can hold CPU counts that
+            // overflow the VM's CPU count or the CPU quota, which traps this helper.
+            try config.resources.validateCPUs()
 
             var kernel = try bundle.kernel
             // Built-in defaults keyed by arg name. Each is applied only if the user did not already

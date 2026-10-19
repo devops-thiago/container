@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Containerization
 import ContainerizationError
 import ContainerizationExtras
@@ -1471,6 +1472,33 @@ struct ParserTest {
         let result = try Parser.resources(cpus: 1, memory: "256m", defaultCPUs: 8, defaultMemory: MemorySize("2g"))
         #expect(result.cpus == 1)
         #expect(result.memoryInBytes == 256.mib())
+    }
+
+    @Test(arguments: [Int64(100_000_000_000_000), Int64.max - 1, Int64.max, -1, Int64.min])
+    func testResourcesRefuseCPUCountsNoVMCanHave(cpus: Int64) throws {
+        let error = #expect(throws: ContainerizationError.self) {
+            _ = try Parser.resources(cpus: cpus, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+        }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("invalid CPU count") == true)
+    }
+
+    @Test func testResourcesRefuseADefaultCPUCountNoVMCanHave() throws {
+        #expect(throws: ContainerizationError.self) {
+            _ = try Parser.resources(cpus: nil, memory: nil, defaultCPUs: 100_000_000_000_000, defaultMemory: MemorySize("1g"))
+        }
+    }
+
+    @Test func testResourcesKeepEveryCPUCountAVMCanHave() throws {
+        // More than the host has is the native CLI's to ask for: the VM gets the host's.
+        let maximum = ContainerConfiguration.Resources.maximumVirtualCPUs
+        for cpus in [Int64(0), 1, 4, Int64(ProcessInfo.processInfo.activeProcessorCount + 1), Int64(maximum)] {
+            #expect(try Parser.resources(cpus: cpus, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g")).cpus == Int(cpus))
+        }
+        // Negative control: one past the most a VM can have is refused.
+        #expect(throws: ContainerizationError.self) {
+            _ = try Parser.resources(cpus: Int64(maximum) + 1, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+        }
     }
 
     @Test func testResourcesBuildPropertyLookup() async throws {

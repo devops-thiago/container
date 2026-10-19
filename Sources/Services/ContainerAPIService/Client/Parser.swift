@@ -115,6 +115,7 @@ public struct Parser {
         if let cpus {
             resource.cpus = Int(cpus)
         }
+        try resource.validateCPUs()
 
         if let memory {
             resource.memoryInBytes = try Parser.memoryStringAsMiB(memory).mib()
