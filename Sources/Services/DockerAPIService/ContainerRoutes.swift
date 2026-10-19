@@ -124,8 +124,8 @@ public enum ContainerRoutes {
     /// label, which every client reads, has them. Nothing when it still cannot; a name it
     /// refuses (another container took it in the engine meanwhile) stays here.
     public static func moveLocalRenamesToEngine(engine: some EngineContainers, identities: DockerIdentityStore, log: Logger) async {
-        guard await engine.supportsRename(), let snapshots = try? await engine.list() else { return }
-        for (container, name) in await identities.localRenames(snapshots) {
+        guard await engine.supportsRename(), let renames = try? await identities.localRenames({ try await engine.list() }) else { return }
+        for (container, name) in renames {
             do {
                 try await engine.rename(container.snapshot, to: name)
                 await identities.renamedInEngine(container, to: name)
@@ -143,7 +143,7 @@ public enum ContainerRoutes {
         let events: DockerEventBus?
 
         func containers() async throws -> [DockerContainer] {
-            await identities.join(try await engine.list())
+            try await identities.join { try await engine.list() }
         }
 
         func context() async throws -> DockerViewContext {
