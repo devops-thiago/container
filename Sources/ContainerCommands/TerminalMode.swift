@@ -15,18 +15,31 @@
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
+import ContainerAPIClient
+import ContainerResource
 import Foundation
 
 extension Application {
     /// Use the same parser as execution: a guest argument named `-it`, an option value,
     /// help or a detached command must not change the host terminal's input mode.
-    static func terminalMode(arguments: [String]) -> String {
+    ///
+    /// - Parameter container: the container `start` would start, by the ID it was given; only
+    ///   asked for a `start` that attaches stdin, whose terminal is the container's.
+    static func terminalMode(
+        arguments: [String],
+        container: (String) async -> ContainerSnapshot? = { try? await ContainerClient().get(id: $0) }
+    ) async -> String {
         guard let command = try? parseAsRoot(arguments) else { return "none" }
         switch command {
         case let command as ContainerExec:
             return command.processFlags.tty && command.processFlags.interactive && !command.detach ? "raw" : "none"
         case let command as ContainerRun:
             return command.processFlags.tty && command.processFlags.interactive && !command.managementFlags.detach ? "raw" : "none"
+        case let command as MachineRun:
+            return command.usesRawTerminal ? "raw" : "none"
+        case let command as ContainerStart:
+            guard command.interactive, let snapshot = await container(command.containerId) else { return "none" }
+            return command.usesRawTerminal(snapshot) ? "raw" : "none"
         default:
             return "none"
         }
