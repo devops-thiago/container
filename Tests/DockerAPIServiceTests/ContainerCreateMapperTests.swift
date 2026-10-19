@@ -460,6 +460,31 @@ struct ContainerCreateMapperTests {
         }
     }
 
+    @Test("a CPU count past the host's is refused at create, in dockerd's words", arguments: [Int64(100_000_000_000_000), Int64.max - 1])
+    func cpuCountPastTheHost(value: Int64) {
+        let host = ProcessInfo.processInfo.activeProcessorCount
+        let refusal = DockerAPIError.badRequest("range of CPUs is from 0.01 to \(host).00, as there are only \(host) CPUs available")
+        #expect(errorMessage { _ = try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"CpuCount\":\(value)}}") } == refusal)
+        #expect(errorMessage { _ = try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"NanoCpus\":\(value)}}") } == refusal)
+    }
+
+    @Test("every CPU count up to the host's is kept; one more is refused", arguments: [1, 2, 10, 64])
+    func cpuCountBound(hostCPUs: Int) throws {
+        func cpus(_ json: String) throws -> Int {
+            let host = try JSONDecoder().decode(DockerHostConfig.self, from: Data(json.utf8))
+            return try ContainerCreateMapper.resources(host, defaults: Fixtures.defaults, hostCPUs: hostCPUs).cpus
+        }
+        let refusal = DockerAPIError.badRequest(
+            "range of CPUs is from 0.01 to \(hostCPUs).00, as there are only \(hostCPUs) CPUs available")
+        #expect(try cpus("{\"CpuCount\":\(hostCPUs)}") == hostCPUs)
+        #expect(try cpus("{\"NanoCpus\":\(hostCPUs * 1_000_000_000)}") == hostCPUs)
+        #expect(try cpus("{\"NanoCpus\":\(hostCPUs * 1_000_000_000 - 1)}") == hostCPUs)
+        #expect(errorMessage { _ = try cpus("{\"CpuCount\":\(hostCPUs + 1)}") } == refusal)
+        #expect(errorMessage { _ = try cpus("{\"NanoCpus\":\(hostCPUs * 1_000_000_000 + 1)}") } == refusal)
+        // Control: the engine's default is not the client's, and is not refused here.
+        #expect(try cpus("{}") == Fixtures.defaults.cpus)
+    }
+
     @Test("malformed host port ranges return a client error", arguments: ["-", "--", "-80", "80-", "80-x", "80-79", "80-81-82"])
     func malformedPortRange(port: String) {
         #expect(errorMessage { _ = try Fixtures.plan("{\"Image\":\"a\",\"HostConfig\":{\"PortBindings\":{\"80/tcp\":[{\"HostPort\":\"\(port)\"}]}}}") }?.status == .badRequest)

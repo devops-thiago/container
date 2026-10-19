@@ -153,3 +153,44 @@ struct ContainerConfigurationCreationDateTests {
         #expect(decoded.creationDate == Date(timeIntervalSince1970: 0))
     }
 }
+
+struct ContainerCPUBoundTests {
+    @Test("CPU counts up to Virtualization's limit are kept, with or without the VM's own CPU")
+    func keepsCountsAVMCanHave() throws {
+        var resources = ContainerConfiguration.Resources()
+        for cpus in [0, 1, 4, 63, 64] {
+            resources.cpus = cpus
+            try resources.validateCPUs(virtualCPUs: 64)
+        }
+        // A machine keeps no CPU of its own.
+        resources.cpuOverhead = 0
+        try resources.validateCPUs(virtualCPUs: 64)
+    }
+
+    @Test(
+        "CPU counts no VM can have are refused before they overflow the runtime",
+        arguments: [65, 100_000_000_000_000, Int.max / 100_000 + 1, Int.max - 1, Int.max, -1, Int.min])
+    func refusesCountsNoVMCanHave(cpus: Int) {
+        var resources = ContainerConfiguration.Resources()
+        resources.cpus = cpus
+        #expect(throws: Error.self) { try resources.validateCPUs(virtualCPUs: 64) }
+    }
+
+    @Test("an overhead outside the VM's limit is refused, so the sum cannot overflow", arguments: [-1, 65, Int.min, Int.max])
+    func refusesOverhead(overhead: Int) {
+        var resources = ContainerConfiguration.Resources()
+        resources.cpus = 1
+        resources.cpuOverhead = overhead
+        #expect(throws: Error.self) { try resources.validateCPUs(virtualCPUs: 64) }
+    }
+
+    @Test("the production limit is Virtualization's")
+    func productionLimit() throws {
+        #expect(ContainerConfiguration.Resources.maximumVirtualCPUs >= ProcessInfo.processInfo.activeProcessorCount)
+        var resources = ContainerConfiguration.Resources()
+        resources.cpus = ContainerConfiguration.Resources.maximumVirtualCPUs
+        try resources.validateCPUs()
+        resources.cpus += 1
+        #expect(throws: Error.self) { try resources.validateCPUs() }
+    }
+}

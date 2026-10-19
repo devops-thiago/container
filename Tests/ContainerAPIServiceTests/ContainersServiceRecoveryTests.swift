@@ -251,6 +251,29 @@ struct ContainersServiceRecoveryTests {
         #expect(try fixture.contents() == before)
     }
 
+    @Test("Create refuses a CPU count no VM can have, from any client, before any resource preparation", arguments: [100_000_000_000_000, Int.max - 1, -1])
+    func createRejectsOutOfRangeCPUs(cpus: Int) async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let before = try fixture.contents()
+        let service = try ContainersService(
+            appRoot: fixture.root, pluginLoader: fixture.loader(),
+            containerSystemConfig: ContainerSystemConfig(), log: fixture.log)
+        var configuration = fixture.configuration
+        configuration.id = "too-many-cpus"
+        configuration.resources.cpus = cpus
+        let error = await #expect(throws: ContainerizationError.self) {
+            try await service.create(
+                configuration: configuration,
+                kernel: .init(path: fixture.bundle.appendingPathComponent("kernel.bin"), platform: .linuxArm), options: .default)
+        }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("invalid CPU count") == true)
+        #expect(!FileManager.default.fileExists(atPath: fixture.containers.appendingPathComponent(configuration.id).path))
+        #expect(try await service.list().isEmpty)
+        #expect(try fixture.contents() == before)
+    }
+
     @Test("Creating a container cannot reuse an ID with preserved recovery data")
     func createRejectsPreservedBundle() async throws {
         let fixture = try Fixture()

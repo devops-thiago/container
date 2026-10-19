@@ -80,7 +80,7 @@ public enum ContainerToolRoutes {
         let options: DockerToolOptions
 
         func find(_ reference: String) async throws -> DockerContainer {
-            try DockerIdentityTable.resolve(reference, in: await identities.join(try await engine.list()))
+            try DockerIdentityTable.resolve(reference, in: try await identities.join { try await engine.list() })
         }
 
         /// `reference`'s container, refused as dockerd refuses one that is not running.

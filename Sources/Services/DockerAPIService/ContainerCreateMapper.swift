@@ -285,7 +285,11 @@ public enum ContainerCreateMapper {
         return user + image.filter { !keys.contains(key($0)) }
     }
 
-    static func resources(_ host: DockerHostConfig, defaults: DockerCreateDefaults) throws(DockerAPIError) -> ContainerConfiguration.Resources {
+    /// - Parameter hostCPUs: the CPUs there are, which dockerd counts with `runtime.NumCPU()`
+    ///   and the runtime gives a VM at most.
+    static func resources(
+        _ host: DockerHostConfig, defaults: DockerCreateDefaults, hostCPUs: Int = ProcessInfo.processInfo.activeProcessorCount
+    ) throws(DockerAPIError) -> ContainerConfiguration.Resources {
         var resources = ContainerConfiguration.Resources()
         resources.cpus = defaults.cpus
         resources.memoryInBytes = defaults.memoryInBytes
@@ -297,14 +301,18 @@ public enum ContainerCreateMapper {
         if nanoCPUs > 0 && cpuCount > 0 {
             throw .badRequest("Conflicting options: CPU count and NanoCPUs cannot both be set")
         }
+        // dockerd refuses more CPUs than there are, in these words (moby daemon_unix.go,
+        // verifyPlatformContainerResources). The runtime would give the VM no more than the
+        // host's anyway, and far more overflows its CPU quota (`cpus * 100_000`). dockerd only
+        // has the NanoCPUs check; CpuCount is the same quantity here, so it gets the same one.
+        guard nanoCPUs <= Int64(hostCPUs) * 1_000_000_000, cpuCount <= Int64(hostCPUs) else {
+            throw .badRequest("range of CPUs is from 0.01 to \(hostCPUs).00, as there are only \(hostCPUs) CPUs available")
+        }
         if nanoCPUs > 0 {
             // A VM has whole CPUs: a fraction is rounded up, so the container gets at least
             // what it asked for.
-            let (rounded, overflow) = nanoCPUs.addingReportingOverflow(999_999_999)
-            guard !overflow else { throw .badRequest("invalid CPU count: NanoCPUs is too large") }
-            resources.cpus = Int(rounded / 1_000_000_000)
+            resources.cpus = Int((nanoCPUs + 999_999_999) / 1_000_000_000)
         } else if cpuCount > 0 {
-            guard cpuCount < Int.max else { throw .badRequest("invalid CPU count: CPU count is too large") }
             resources.cpus = Int(cpuCount)
         }
         if let memory = host.Memory, memory != 0 {
@@ -461,7 +469,6 @@ public enum ContainerCreateMapper {
     }
 
     /// `80/tcp`, `53/udp`, or `80` meaning tcp.
-
     static func portKey(_ key: String) throws(DockerAPIError) -> (UInt16, PublishProtocol) {
         let parts = key.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
         guard let port = UInt16(parts[0]), port > 0 else {

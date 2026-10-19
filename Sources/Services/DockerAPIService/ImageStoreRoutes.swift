@@ -80,7 +80,7 @@ extension ImageRoutes {
         }
 
         func dockerContainers() async throws -> [DockerContainer] {
-            await identities.join(try await containers.list())
+            try await identities.join { try await containers.list() }
         }
 
         func list(_ request: DockerRequest) async throws -> DockerResponse {

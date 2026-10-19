@@ -40,7 +40,7 @@ struct EngineRenameTests {
 
         // This service restarted with nothing kept: the engine's label has the name.
         let restarted = DockerIdentityStore(persistence: nil)
-        let joined = await restarted.join(try await routes.engine.list())
+        let joined = try await restarted.join { try await routes.engine.list() }
         #expect(joined.first { $0.dockerID == id }?.name == "front")
 
         // Renamed by another client of the engine (the CLI plugin): this service follows.
@@ -84,7 +84,7 @@ struct EngineRenameTests {
         routes.engine.keepsNames = true
         await ContainerRoutes.moveLocalRenamesToEngine(engine: routes.engine, identities: routes.identities, log: log)
         #expect(routes.engine.labelsSet == ["\(id.prefix(12)) \(DockerLabels.name)=front"])
-        #expect(await routes.identities.localRenames(try await routes.engine.list()).isEmpty)
+        #expect(try await routes.identities.localRenames { try await routes.engine.list() }.isEmpty)
         // Once is enough.
         await ContainerRoutes.moveLocalRenamesToEngine(engine: routes.engine, identities: routes.identities, log: log)
         #expect(routes.engine.labelsSet.count == 1)
