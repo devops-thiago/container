@@ -71,6 +71,36 @@ struct ProcessIORawConsoleTests {
         #expect(!ProcessIO.hasRawInput(descriptor: -1))
     }
 
+    @Test("a current launcher's raw terminal gets no advice; an outdated launcher's line mode names the update")
+    func launcherAdvice() throws {
+        try withTerminal { terminal, descriptor in
+            // An outdated launcher leaves the terminal as the shell had it, and the sandbox
+            // refuses the CLI's own change: the advice is printed.
+            let outdated = try ProcessIO.configureRawConsole(terminal) { _ in throw POSIXError(.EPERM) }
+            #expect(!outdated)
+            let advice = try #require(ProcessIO.lineModeNotice(rawConsole: outdated, launcherSetsRaw: true))
+            #expect(advice.contains("Update the container command in SiliconShip Settings"))
+
+            // A current launcher sets the terminal as its wrapper does, before the CLI starts.
+            let stty = Process()
+            stty.executableURL = URL(fileURLWithPath: "/bin/stty")
+            stty.arguments = ["raw", "-echo", "opost"]
+            stty.standardInput = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+            try stty.run()
+            stty.waitUntilExit()
+            try #require(stty.terminationStatus == 0)
+            let current = try ProcessIO.configureRawConsole(terminal) { _ in throw POSIXError(.EPERM) }
+            #expect(current)
+            #expect(ProcessIO.lineModeNotice(rawConsole: current, launcherSetsRaw: true) == nil)
+        }
+    }
+
+    @Test("line mode the launcher does not cover, such as a machine's first-boot setup, says nothing")
+    func uncoveredLineMode() {
+        #expect(ProcessIO.lineModeNotice(rawConsole: false, launcherSetsRaw: false) == nil)
+        #expect(ProcessIO.lineModeNotice(rawConsole: true, launcherSetsRaw: false) == nil)
+    }
+
     private func withTerminal(_ body: (Terminal, Int32) throws -> Void) throws {
         var master: Int32 = -1
         var slave: Int32 = -1

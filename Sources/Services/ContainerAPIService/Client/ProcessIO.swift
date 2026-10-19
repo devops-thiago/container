@@ -75,7 +75,18 @@ public struct ProcessIO: Sendable {
             && timing.0 == 1 && timing.1 == 0
     }
 
-    public static func create(tty: Bool, interactive: Bool, detach: Bool) throws -> ProcessIO {
+    /// What to say when the console could not be set raw. Only for an invocation the
+    /// SiliconShip launcher sets raw itself does line mode mean that launcher is outdated, and
+    /// updating it helps; for any other, line mode is all there is, and nothing is said.
+    public static func lineModeNotice(rawConsole: Bool, launcherSetsRaw: Bool) -> String? {
+        guard !rawConsole, launcherSetsRaw else { return nil }
+        return "the terminal stays in line mode: this command line may not set it raw\n"
+            + "Update the container command in SiliconShip Settings for interactive terminal input.\n"
+    }
+
+    /// - Parameter launcherSetsRaw: the SiliconShip launcher's terminal-mode probe answers raw
+    ///   for this invocation, so a current launcher sets the terminal raw before the CLI starts.
+    public static func create(tty: Bool, interactive: Bool, detach: Bool, launcherSetsRaw: Bool = false) throws -> ProcessIO {
         var rawConsole = false
         let current: Terminal? = try {
             if detach || !tty || !interactive {
@@ -83,11 +94,8 @@ public struct ProcessIO: Sendable {
             }
             let current = try Terminal(descriptor: STDIN_FILENO)
             rawConsole = try Self.configureRawConsole(current)
-            if !rawConsole {
-                FileHandle.standardError.write(
-                    Data(
-                        "the terminal stays in line mode: this command line may not set it raw\nUpdate the container command in SiliconShip Settings for interactive terminal input.\n"
-                            .utf8))
+            if let notice = Self.lineModeNotice(rawConsole: rawConsole, launcherSetsRaw: launcherSetsRaw) {
+                FileHandle.standardError.write(Data(notice.utf8))
             }
             return current
         }()

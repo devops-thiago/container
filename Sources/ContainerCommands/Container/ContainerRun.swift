@@ -129,10 +129,12 @@ extension Application {
 
             let detach = self.managementFlags.detach
             do {
+                // Raw exactly when the launcher's probe answers raw (`Application.terminalMode`).
                 let io = try ProcessIO.create(
                     tty: self.processFlags.tty,
                     interactive: self.processFlags.interactive,
-                    detach: detach
+                    detach: detach,
+                    launcherSetsRaw: true
                 )
                 defer {
                     try? io.close()
