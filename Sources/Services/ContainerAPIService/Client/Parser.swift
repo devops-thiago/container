@@ -154,11 +154,14 @@ public struct Parser {
         defaultMemory: MemorySize,
     ) throws -> ContainerConfiguration.Resources {
         var resource = ContainerConfiguration.Resources()
-        resource.cpus = defaultCPUs
+        // A default from the system properties is not the user's to correct here: one no VM
+        // can have is brought into range, as the runtime always gave the VM the host's at most.
+        resource.cpus = ContainerConfiguration.Resources.clampedCPUCount(defaultCPUs)
         resource.memoryInBytes = Int64(defaultMemory.measurement.converted(to: .mebibytes).value).mib()
 
         if let cpus {
             resource.cpus = Int(cpus)
+            try resource.validateCPUs()
         }
 
         if let memory {
