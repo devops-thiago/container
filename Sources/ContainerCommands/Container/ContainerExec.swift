@@ -80,7 +80,8 @@ extension Application {
             config.supplementalGroups.append(contentsOf: additionalGroups)
 
             do {
-                let io = try ProcessIO.create(tty: tty, interactive: stdin, detach: self.detach)
+                // Raw exactly when the launcher's probe answers raw (`Application.terminalMode`).
+                let io = try ProcessIO.create(tty: tty, interactive: stdin, detach: self.detach, launcherSetsRaw: true)
                 defer {
                     try? io.close()
                 }

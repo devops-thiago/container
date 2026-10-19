@@ -83,9 +83,10 @@ public struct Application: AsyncLoggableCommand {
 
     public static func main() async throws {
         // The user-launched wrapper needs this answer before starting the sandboxed CLI.
-        // Parsing does not run a command, contact the engine or request file access.
+        // Parsing does not run a command or request file access; only `start -i` reads the
+        // container it names from the engine, for whether its process has a terminal.
         if CommandLine.arguments.dropFirst().first == "--_siliconship-terminal-mode" {
-            print(terminalMode(arguments: Array(CommandLine.arguments.dropFirst(2))))
+            print(await terminalMode(arguments: Array(CommandLine.arguments.dropFirst(2))))
             return
         }
         ProgressBar.restoreCursorAtExit()

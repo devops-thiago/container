@@ -53,6 +53,17 @@ extension Application {
         @Argument(parsing: .captureForPassthrough, help: "Command arguments")
         var arguments: [String] = []
 
+        /// The login shell, run when no command is given, is interactive on a terminal; a
+        /// command is as its flags ask.
+        var processTerminal: (tty: Bool, interactive: Bool) {
+            executable == nil ? (true, true) : (processFlags.tty, processFlags.interactive)
+        }
+
+        /// Whether this run gives the process the host terminal's raw keys.
+        var usesRawTerminal: Bool {
+            processTerminal.tty && processTerminal.interactive && !detach
+        }
+
         public func run() async throws {
             let client = MachineClient()
             let containerClient = ContainerClient()
@@ -68,19 +79,8 @@ extension Application {
             // Default runs `/sbin.machine/init -s` to find the shell for user
             let executablePath = FilePath("/\(MachineBundle.sbinDirectory)").appending(MachineBundle.initFile).string
 
-            let args: [String]
-            let tty: Bool
-            let interactive: Bool
-
-            if let executable {
-                args = ["-s", executable] + arguments
-                tty = processFlags.tty
-                interactive = processFlags.interactive
-            } else {
-                args = ["-s"]
-                tty = true
-                interactive = true
-            }
+            let args = executable.map { ["-s", $0] + arguments } ?? ["-s"]
+            let (tty, interactive) = processTerminal
 
             // If not root user, get default user from machine configuration
             let defaultUser: ProcessConfiguration.User = {
@@ -115,7 +115,8 @@ extension Application {
                 supplementalGroups: additionalGroups
             )
 
-            let io = try ProcessIO.create(tty: tty, interactive: interactive, detach: detach)
+            // Raw exactly when `usesRawTerminal`, which the launcher's probe answers.
+            let io = try ProcessIO.create(tty: tty, interactive: interactive, detach: detach, launcherSetsRaw: true)
             defer {
                 try? io.close()
             }

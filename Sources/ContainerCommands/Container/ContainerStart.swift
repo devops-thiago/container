@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerResource
 import ContainerizationError
 import ContainerizationOS
 import Foundation
@@ -40,6 +41,18 @@ extension Application {
 
         @Argument(help: "Container ID")
         var containerId: String
+
+        /// Whether this start gives `container`'s process the host terminal's raw keys: it
+        /// attaches stdin to a process with a terminal that is not running yet.
+        func usesRawTerminal(_ container: ContainerSnapshot) -> Bool {
+            interactive && container.configuration.initProcess.terminal && container.status != .running
+        }
+
+        /// Whether a line-mode console here means the launcher is outdated. It does not: the
+        /// launcher's probe reads the container from the engine, and when that read fails it
+        /// answers line mode even where this start's own read succeeds. So start gives no
+        /// update advice.
+        static let lineModeMeansOutdatedLauncher = false
 
         public func run() async throws {
             var exitCode: Int32 = 127
@@ -81,7 +94,8 @@ extension Application {
                 let io = try ProcessIO.create(
                     tty: container.configuration.initProcess.terminal,
                     interactive: self.interactive,
-                    detach: detach
+                    detach: detach,
+                    launcherSetsRaw: Self.lineModeMeansOutdatedLauncher
                 )
                 defer {
                     try? io.close()
