@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerResource
 import ContainerizationError
 import ContainerizationOS
 import Foundation
@@ -40,6 +41,12 @@ extension Application {
 
         @Argument(help: "Container ID")
         var containerId: String
+
+        /// Whether this start gives `container`'s process the host terminal's raw keys: it
+        /// attaches stdin to a process with a terminal that is not running yet.
+        func usesRawTerminal(_ container: ContainerSnapshot) -> Bool {
+            interactive && container.configuration.initProcess.terminal && container.status != .running
+        }
 
         public func run() async throws {
             var exitCode: Int32 = 127
@@ -78,10 +85,12 @@ extension Application {
             }
 
             do {
+                // Raw exactly when `usesRawTerminal`, which the launcher's probe answers.
                 let io = try ProcessIO.create(
                     tty: container.configuration.initProcess.terminal,
                     interactive: self.interactive,
-                    detach: detach
+                    detach: detach,
+                    launcherSetsRaw: true
                 )
                 defer {
                     try? io.close()
