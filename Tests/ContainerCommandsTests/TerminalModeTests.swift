@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerResource
 import Foundation
 import Synchronization
@@ -93,6 +94,17 @@ struct TerminalModeTests {
         #expect(await mode(["start", "-ai", "web"], terminal: false) == "none")
         #expect(await mode(["start", "-ai", "web"], terminal: true, status: .running) == "none")
         #expect(await mode(["start", "-ai", "web"], terminal: true, exists: false) == "none")
+    }
+
+    @Test("a start whose probe could not read the container gives no update advice in line mode")
+    func startAfterFailedLookup() async {
+        // The probe's read failed, so a current launcher left line mode; start's own read then
+        // succeeds and finds a tty container. Line mode there is no sign of an old launcher.
+        #expect(await Application.terminalMode(arguments: ["start", "-ai", "web"]) { _ in nil } == "none")
+        #expect(ProcessIO.lineModeNotice(rawConsole: false, launcherSetsRaw: Application.ContainerStart.lineModeMeansOutdatedLauncher) == nil)
+        // Control: exec, whose probe only parses, still names the update.
+        #expect(await Application.terminalMode(arguments: ["exec", "-it", "web", "sh"], container: Self.noLookup) == "raw")
+        #expect(ProcessIO.lineModeNotice(rawConsole: false, launcherSetsRaw: true) != nil)
     }
 
     private static func snapshot(id: String, terminal: Bool, status: RuntimeStatus) -> ContainerSnapshot {

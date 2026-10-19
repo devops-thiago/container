@@ -78,7 +78,7 @@ public struct ProcessIO: Sendable {
     /// What to say when the console could not be set raw. Only for an invocation the
     /// SiliconShip launcher sets raw itself does line mode mean that launcher is outdated, and
     /// updating it helps; for any other, line mode is all there is, and nothing is said.
-    static func lineModeNotice(rawConsole: Bool, launcherSetsRaw: Bool) -> String? {
+    public static func lineModeNotice(rawConsole: Bool, launcherSetsRaw: Bool) -> String? {
         guard !rawConsole, launcherSetsRaw else { return nil }
         return "the terminal stays in line mode: this command line may not set it raw\n"
             + "Update the container command in SiliconShip Settings for interactive terminal input.\n"
