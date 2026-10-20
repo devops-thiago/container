@@ -88,20 +88,22 @@ struct TerminalModeTests {
         #expect(await mode(["start", "-i", "web"], terminal: true) == "raw")
         #expect(await mode(["start", "--attach", "--interactive", "web"], terminal: true) == "raw")
         #expect(looked.withLock { $0 } == ["web", "web", "web"])
-        // Controls: without a terminal stdin is a pipe, a running container cannot be attached,
-        // and a container the engine does not have (or an engine that does not answer) is not
-        // guessed at.
+        // Controls: without a terminal stdin is a pipe; a running container cannot be
+        // attached. Missing metadata must remain distinct from these known states.
         #expect(await mode(["start", "-ai", "web"], terminal: false) == "none")
         #expect(await mode(["start", "-ai", "web"], terminal: true, status: .running) == "none")
-        #expect(await mode(["start", "-ai", "web"], terminal: true, exists: false) == "none")
+        #expect(await mode(["start", "-ai", "web"], terminal: true, exists: false) == "unavailable")
     }
 
-    @Test("a start whose probe could not read the container gives no update advice in line mode")
+    @Test("a failed start probe is distinct from a known non-TTY session")
     func startAfterFailedLookup() async {
-        // The probe's read failed, so a current launcher left line mode; start's own read then
-        // succeeds and finds a tty container. Line mode there is no sign of an old launcher.
-        #expect(await Application.terminalMode(arguments: ["start", "-ai", "web"]) { _ in nil } == "none")
-        #expect(ProcessIO.lineModeNotice(rawConsole: false, launcherSetsRaw: Application.ContainerStart.lineModeMeansOutdatedLauncher) == nil)
+        // Unknown metadata must not authorize a canonical interactive session. The wrapper
+        // refuses unavailable probes before executing start; a later attempt can succeed.
+        #expect(await Application.terminalMode(arguments: ["start", "-ai", "web"]) { _ in nil } == "unavailable")
+        #expect(
+            await Application.terminalMode(arguments: ["start", "-ai", "web"]) { id in
+                Self.snapshot(id: id, terminal: true, status: .stopped)
+            } == "raw", "a later attempt can use the recovered metadata")
         // Control: exec, whose probe only parses, still names the update.
         #expect(await Application.terminalMode(arguments: ["exec", "-it", "web", "sh"], container: Self.noLookup) == "raw")
         #expect(ProcessIO.lineModeNotice(rawConsole: false, launcherSetsRaw: true) != nil)
