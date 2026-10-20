@@ -48,10 +48,9 @@ extension Application {
             interactive && container.configuration.initProcess.terminal && container.status != .running
         }
 
-        /// Whether a line-mode console here means the launcher is outdated. It does not: the
-        /// launcher's probe reads the container from the engine, and when that read fails it
-        /// answers line mode even where this start's own read succeeds. So start gives no
-        /// update advice.
+        /// A direct invocation can lack the launcher's raw terminal setup. That alone does
+        /// not establish an outdated launcher. Current launchers refuse unavailable probes
+        /// before executing start rather than allowing that failure to reach this path.
         static let lineModeMeansOutdatedLauncher = false
 
         public func run() async throws {
