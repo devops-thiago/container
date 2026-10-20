@@ -245,11 +245,17 @@ struct DockerExtractedEntry: Equatable, Sendable {
 /// it.
 ///
 /// Each entry's name is checked before anything is written for it: an absolute name, a `..`
-/// component, a name that passes through a symlink the archive made, a symlink whose target is
-/// absolute or climbs out of the root, a hard link to anything but a file already unpacked, a
-/// device or pipe, and anything past the size or entry bounds are each refused, and the whole
-/// upload with them. Files are created without following links, so an entry cannot write
-/// through one either.
+/// component, a NUL byte, a name that passes through a symlink the archive made, a symlink
+/// whose target is absolute or climbs out of the root, a hard link to anything but a file
+/// already unpacked, a device or pipe, and anything past the size or entry bounds are each
+/// refused, and the whole upload with them. Files are created without following links, so an
+/// entry cannot write through one either.
+///
+/// A header no writer could have made is refused the same way, never trusted: a pax record
+/// whose length does not cover it, a number past `Int64.max` or negative, and a body the
+/// archive ends before. The rules are those of Go's archive/tar, which the Docker CLI writes
+/// these archives with and dockerd reads them with; as there, a directory's or a link's size
+/// field is not a body (`carriesData`).
 struct DockerTarExtractor {
     var maxBytes: Int
     var maxEntries: Int
@@ -260,7 +266,7 @@ struct DockerTarExtractor {
     func extract(_ archive: URL, into root: URL) throws -> [DockerExtractedEntry] {
         let handle = try FileHandle(forReadingFrom: archive)
         defer { try? handle.close() }
-        var reader = BlockReader(handle: handle)
+        var reader = try BlockReader(handle: handle)
         let rootPath = root.path(percentEncoded: false)
         var state = State()
         var paxPath: String?
@@ -291,7 +297,10 @@ struct DockerTarExtractor {
                     paxPath = records["path"] ?? paxPath
                     paxLink = records["linkpath"] ?? paxLink
                     if let text = records["size"] {
-                        guard let value = UInt64(text) else { throw DockerTarRejection(message: "invalid size in an extended header") }
+                        // Go's archive/tar reads it as an Int64 and refuses the rest.
+                        guard let value = UInt64(text), value <= UInt64(Int64.max) else {
+                            throw DockerTarRejection(message: "invalid size in an extended header")
+                        }
                         paxSize = value
                     }
                 case .gnuLongName:
@@ -319,18 +328,18 @@ struct DockerTarExtractor {
             let components = try Self.components(name)
             guard !components.isEmpty else {
                 // The archive's own root, `./`.
-                try reader.skip(size)
+                if Self.carriesData(type) { try reader.skip(size) }
                 continue
             }
             try state.checkParents(components)
             let relative = components.joined(separator: "/")
             let path = rootPath + "/" + relative
 
+            // A directory or a link has no body, whatever its size field says (`carriesData`).
             switch type {
             case .directory:
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.makeDirectory(path, relative: relative, mode: mode)
-                try reader.skip(size)
             case .file, .contiguous:
                 guard size <= UInt64(maxBytes - state.bytes) else {
                     throw DockerTarRejection(message: "the archive holds more than \(maxBytes) bytes")
@@ -343,7 +352,6 @@ struct DockerTarExtractor {
                 }
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.makeSymlink(path, relative: relative, target: link)
-                try reader.skip(size)
             case .hardLink:
                 let targetComponents = try Self.components(link)
                 let target = targetComponents.joined(separator: "/")
@@ -352,7 +360,6 @@ struct DockerTarExtractor {
                 }
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.makeHardLink(path, relative: relative, target: rootPath + "/" + target)
-                try reader.skip(size)
             default:
                 throw DockerTarRejection(message: "unsupported entry type for \(relative): only files, directories and links can be copied")
             }
@@ -361,9 +368,23 @@ struct DockerTarExtractor {
         return state.topLevel
     }
 
-    /// The path components of an entry name, refused when absolute or climbing.
+    /// Whether an entry of `type` has a body after its header. A directory, a link, a device
+    /// or a pipe has none, whatever its size field says: POSIX makes a directory's size an
+    /// allocation hint to ignore and a link's zero, and Go's archive/tar, which the Docker CLI
+    /// writes these archives with and dockerd reads them with, writes and reads them as a
+    /// header alone.
+    static func carriesData(_ type: DockerTar.EntryType) -> Bool {
+        switch type {
+        case .hardLink, .symlink, .characterDevice, .blockDevice, .directory, .fifo: false
+        case .file, .contiguous, .paxExtended, .paxGlobal, .gnuLongName, .gnuLongLink: true
+        }
+    }
+
+    /// The path components of an entry name, refused when absolute or climbing, or with a NUL
+    /// in it: the calls that make the entry would stop at the NUL and act on another name.
     static func components(_ name: String) throws -> [String] {
         guard !name.hasPrefix("/") else { throw DockerTarRejection(message: "the archive has an absolute path: \(name)") }
+        guard !name.utf8.contains(0) else { throw DockerTarRejection(message: "the archive has a path with a NUL byte in it") }
         var parts: [String] = []
         for part in name.split(separator: "/", omittingEmptySubsequences: true) {
             if part == "." { continue }
@@ -374,9 +395,10 @@ struct DockerTarExtractor {
     }
 
     /// Whether a symlink at `components` with target `link` resolves inside the root, by its
-    /// words alone. An absolute target is refused: on the host it would point at the host.
+    /// words alone. An absolute target is refused: on the host it would point at the host. So
+    /// is one with a NUL in it, which `symlink` would cut there.
     static func linkStaysInside(_ link: String, from components: [String]) -> Bool {
-        guard !link.isEmpty, !link.hasPrefix("/") else { return false }
+        guard !link.isEmpty, !link.hasPrefix("/"), !link.utf8.contains(0) else { return false }
         var resolved = Array(components.dropLast())
         for part in link.split(separator: "/", omittingEmptySubsequences: true) {
             switch part {
@@ -403,11 +425,15 @@ struct DockerTarExtractor {
     }
 
     /// A numeric field: octal digits, or GNU's base-256 with the top bit of the first byte set.
+    /// Refused past `Int64.max`, and when negative: Go's archive/tar allows neither, and no
+    /// field read here can be negative.
     static func number(_ field: ArraySlice<UInt8>) throws -> UInt64 {
         if let first = field.first, first & 0x80 != 0 {
-            var value: UInt64 = UInt64(first & 0x7F)
+            // Two's complement in the bits after the marker: the next bit is the sign.
+            guard first & 0x40 == 0 else { throw DockerTarRejection(message: "invalid number in a tar header") }
+            var value: UInt64 = UInt64(first & 0x3F)
             for byte in field.dropFirst() {
-                guard value <= UInt64.max >> 8 else { throw DockerTarRejection(message: "invalid number in a tar header") }
+                guard value <= UInt64(Int64.max) >> 8 else { throw DockerTarRejection(message: "invalid number in a tar header") }
                 value = value << 8 | UInt64(byte)
             }
             return value
@@ -439,23 +465,36 @@ struct DockerTarExtractor {
         return prefix.isEmpty ? name : prefix + "/" + name
     }
 
+    /// The records of a pax extended header, `"<length> <key>=<value>\n"`, where the length
+    /// counts the whole record, its own digits included.
+    ///
+    /// A record is refused, and the archive with it, as Go's archive/tar refuses it: a length
+    /// that is not decimal digits, that does not reach past the digits, the space and the
+    /// newline, or that runs past the header; a record without its newline or its `=`; and an
+    /// empty key. The slices are taken only once the length is known to fit.
     static func paxRecords(_ data: [UInt8]) throws -> [String: String] {
         var records: [String: String] = [:]
         var rest = data[...]
         while !rest.isEmpty {
-            guard let space = rest.firstIndex(of: UInt8(ascii: " ")),
-                let length = Int(String(decoding: rest[rest.startIndex..<space], as: UTF8.self)), length > 0, length <= rest.count
-            else { throw DockerTarRejection(message: "invalid extended header") }
-            let record = rest[(space + 1)..<(rest.startIndex + length)]
-            rest = rest[(rest.startIndex + length)...]
-            guard let equals = record.firstIndex(of: UInt8(ascii: "=")) else { throw DockerTarRejection(message: "invalid extended header") }
+            guard let space = rest.firstIndex(of: UInt8(ascii: " ")) else { throw Self.invalidPAX }
+            let digits = rest[rest.startIndex..<space]
+            guard !digits.isEmpty, digits.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }),
+                let length = Int(String(decoding: digits, as: UTF8.self)),
+                // Past the digits and the space there is at least the newline.
+                length > digits.count + 1, length <= rest.count
+            else { throw Self.invalidPAX }
+            let end = rest.startIndex + length
+            guard rest[end - 1] == UInt8(ascii: "\n") else { throw Self.invalidPAX }
+            let record = rest[(space + 1)..<(end - 1)]
+            rest = rest[end...]
+            guard let equals = record.firstIndex(of: UInt8(ascii: "=")), equals > record.startIndex else { throw Self.invalidPAX }
             let key = String(decoding: record[record.startIndex..<equals], as: UTF8.self)
-            var value = record[(equals + 1)...]
-            if value.last == UInt8(ascii: "\n") { value = value.dropLast() }
-            records[key] = String(decoding: value, as: UTF8.self)
+            records[key] = String(decoding: record[(equals + 1)...], as: UTF8.self)
         }
         return records
     }
+
+    private static let invalidPAX = DockerTarRejection(message: "invalid extended header")
 
     /// What has been unpacked so far.
     struct State {
@@ -553,6 +592,14 @@ struct DockerTarExtractor {
     /// Reads an archive a block at a time, through a bounded buffer.
     struct BlockReader {
         let handle: FileHandle
+        /// How long the archive is: no entry may claim a body past it.
+        let length: UInt64
+
+        init(handle: FileHandle) throws {
+            self.handle = handle
+            length = try handle.seekToEnd()
+            try handle.seek(toOffset: 0)
+        }
 
         /// The next block, or nil at the end of the file.
         mutating func block() throws -> [UInt8]? {
@@ -570,11 +617,16 @@ struct DockerTarExtractor {
             return Array(data)
         }
 
+        /// Passes over `size` bytes of content and the padding after them, which the archive
+        /// must hold: a seek past its end would not fail, so the sum is checked, and so is the
+        /// arithmetic that makes it.
         mutating func skip(_ size: UInt64) throws {
             guard size > 0 else { return }
-            let total = size + UInt64(DockerTar.padding(Int(size % UInt64(DockerTar.blockSize))).count)
-            let offset = try handle.offset()
-            try handle.seek(toOffset: offset + total)
+            let padding = UInt64(DockerTar.padding(Int(size % UInt64(DockerTar.blockSize))).count)
+            let (total, overflow) = size.addingReportingOverflow(padding)
+            let (end, past) = try handle.offset().addingReportingOverflow(total)
+            guard !overflow, !past, end <= length else { throw DockerTarRejection(message: "the archive ends in the middle of an entry") }
+            try handle.seek(toOffset: end)
         }
 
         mutating func copy(_ size: UInt64, to fd: Int32) throws {

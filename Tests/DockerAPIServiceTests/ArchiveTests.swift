@@ -47,6 +47,40 @@ struct TarBuilder {
         bytes += DockerTar.header(.init(name: name, type: type, mode: 0o644, mtime: Fixtures.now))
     }
 
+    /// A header with `size` in its octal field and nothing after it.
+    mutating func header(_ name: String, type: DockerTar.EntryType, size: UInt64, link: String = "") {
+        bytes += DockerTar.ustar(name: name, prefix: "", type: type, mode: 0o644, size: size, mtime: Fixtures.now, link: link)
+    }
+
+    /// A header whose 12-byte size field is `field` as it is, with nothing after it.
+    mutating func header(_ name: String, type: DockerTar.EntryType, sizeField field: [UInt8], link: String = "") {
+        var block = DockerTar.ustar(name: name, prefix: "", type: type, mode: 0o644, size: 0, mtime: Fixtures.now, link: link)
+        block.replaceSubrange(124..<136, with: field)
+        Self.checksum(&block)
+        bytes += block
+    }
+
+    /// A pax extended header holding `records` as they are.
+    mutating func pax(_ records: [UInt8]) {
+        bytes += DockerTar.ustar(
+            name: "PaxHeaders/x", prefix: "", type: .paxExtended, mode: 0o644, size: UInt64(records.count), mtime: Fixtures.now, link: "")
+        bytes += records + DockerTar.padding(records.count)
+    }
+
+    /// GNU's base-256 encoding of `value` in a 12-byte field.
+    static func base256(_ value: UInt64) -> [UInt8] {
+        [0x80, 0, 0, 0] + (0..<8).map { UInt8(truncatingIfNeeded: value >> (8 * (7 - $0))) }
+    }
+
+    /// Writes a block's checksum again after a change to it.
+    static func checksum(_ block: inout [UInt8]) {
+        for index in 148..<156 { block[index] = UInt8(ascii: " ") }
+        let digits = String(block.reduce(0) { $0 + Int($1) }, radix: 8)
+        for (index, byte) in (String(repeating: "0", count: max(6 - digits.count, 0)) + digits).utf8.enumerated() { block[148 + index] = byte }
+        block[154] = 0
+        block[155] = UInt8(ascii: " ")
+    }
+
     var archive: [UInt8] { bytes + DockerTar.end }
 }
 
@@ -222,6 +256,132 @@ struct TarGuardTests {
         #expect(header.count == DockerTar.blockSize)
         _ = try scratch.extract(header + Array("z".utf8) + DockerTar.padding(1) + DockerTar.end)
         #expect(scratch.contents(name) == "z")
+    }
+
+    @Test("a pax record's length must be decimal digits reaching past its space to its newline, and it must have a key and an equals sign")
+    func paxRecordLengths() throws {
+        // A length that stops at or before the space, runs past the header or is not digits; a
+        // record without its newline; a record without a key.
+        for record in ["1 ", "01 ", "2 ", "3 \n", "0 a=\n", "9 a=\n", "+6 a=\n", " a=\n", "5 a=x", "6 ab=x\n", "3 a\n", "4 =\n"] {
+            #expect(throws: DockerTarRejection.self, "\(record.debugDescription)") { try DockerTarExtractor.paxRecords(Array(record.utf8)) }
+            let scratch = try Scratch()
+            var tar = TarBuilder()
+            tar.pax(Array(record.utf8))
+            tar.file("after.txt", "x")
+            #expect(throws: DockerTarRejection.self, "\(record.debugDescription)") { try scratch.extract(tar.archive) }
+            #expect(scratch.leaked.isEmpty)
+            #expect(scratch.contents("after.txt") == nil)
+        }
+        // Control: what the writer makes, an unknown key among them, a value with its own `=`,
+        // and an empty value.
+        let long = String(repeating: "p", count: 300)
+        let records = try DockerTarExtractor.paxRecords(DockerTar.paxRecords([("path", long), ("linkpath", "../t"), ("size", "12"), ("comment", "a=b")]))
+        #expect(records == ["path": long, "linkpath": "../t", "size": "12", "comment": "a=b"])
+        #expect(try DockerTarExtractor.paxRecords(Array("6 ab=\n".utf8)) == ["ab": ""])
+    }
+
+    @Test("a size no header can carry is refused: base-256 past Int64.max or negative, and a pax size past it")
+    func sizesPastInt64() throws {
+        let fields: [(String, [UInt8])] = [
+            ("UInt64.max", TarBuilder.base256(UInt64.max)), ("UInt64.max - 511", TarBuilder.base256(UInt64.max - 511)),
+            ("2^63", TarBuilder.base256(UInt64(1) << 63)), ("-1", [UInt8](repeating: 0xFF, count: 12)),
+        ]
+        for (name, field) in fields {
+            for type in [DockerTar.EntryType.directory, .symlink, .hardLink, .file] {
+                let scratch = try Scratch()
+                var tar = TarBuilder()
+                tar.file("t", "target")
+                tar.header("e", type: type, sizeField: field, link: "t")
+                #expect(throws: DockerTarRejection.self, "\(name) on \(type)") { try scratch.extract(tar.archive) }
+                #expect(scratch.leaked.isEmpty)
+            }
+        }
+        for size in ["18446744073709551615", "9223372036854775808", "-1", "", "x"] {
+            let scratch = try Scratch()
+            var tar = TarBuilder()
+            tar.pax(DockerTar.paxRecords([("size", size)]))
+            tar.directory("d")
+            #expect(throws: DockerTarRejection.self, "\(size)") { try scratch.extract(tar.archive) }
+        }
+        // Control: Int64.max itself is a number, which a directory ignores and a file cannot hold.
+        let scratch = try Scratch()
+        var tar = TarBuilder()
+        tar.header("d/", type: .directory, sizeField: TarBuilder.base256(UInt64(Int64.max)))
+        tar.file("d/f", "f")
+        #expect(try scratch.extract(tar.archive).map(\.name) == ["d"])
+        #expect(scratch.contents("d/f") == "f")
+        var file = TarBuilder()
+        file.header("f", type: .file, sizeField: TarBuilder.base256(UInt64(Int64.max)))
+        let other = try Scratch()
+        #expect(throws: DockerTarRejection.self) { try other.extract(file.archive) }
+    }
+
+    @Test("a directory's or a link's size field is not a body, as Go's archive/tar reads it: the next header follows at once")
+    func headerOnlySizes() throws {
+        let scratch = try Scratch()
+        var tar = TarBuilder()
+        tar.header("d/", type: .directory, size: 4096)
+        tar.file("d/f", "inside")
+        tar.file("t", "target")
+        tar.header("l", type: .symlink, size: 0o77777777777, link: "t")
+        tar.header("h", type: .hardLink, size: 7, link: "t")
+        tar.pax(DockerTar.paxRecords([("size", "9223372036854775807")]))
+        tar.directory("e")
+        tar.header("./", type: .directory, size: 4096)
+        tar.file("last", "last")
+        let entries = try scratch.extract(tar.archive)
+        #expect(entries.map(\.name) == ["d", "t", "l", "h", "e", "last"])
+        #expect(scratch.contents("d/f") == "inside")
+        #expect(scratch.contents("l") == "target")
+        #expect(scratch.contents("h") == "target")
+        #expect(scratch.contents("last") == "last")
+        #expect(scratch.leaked.isEmpty)
+    }
+
+    @Test("a body the archive ends before is refused, the root entry's included")
+    func bodiesPastTheEnd() throws {
+        // A file, and the root entry as a file, each claiming more than follows.
+        for (name, type) in [("f", DockerTar.EntryType.file), ("./", .file), ("./", .contiguous)] {
+            for size: UInt64 in [4096, UInt64(Int64.max) - 511, UInt64(Int64.max)] {
+                let scratch = try Scratch()
+                var tar = TarBuilder()
+                tar.header(name, type: type, sizeField: TarBuilder.base256(size))
+                tar.bytes += [UInt8](repeating: 0, count: 1024)
+                #expect(throws: DockerTarRejection.self, "\(name) \(size)") { try scratch.extract(tar.archive) }
+                #expect(scratch.leaked.isEmpty)
+            }
+        }
+        // Control: a root entry whose body is there is passed over, and what follows is read.
+        let scratch = try Scratch()
+        var tar = TarBuilder()
+        tar.header("./", type: .file, size: 1000)
+        tar.bytes += [UInt8](repeating: UInt8(ascii: "r"), count: 1000) + DockerTar.padding(1000)
+        tar.file("after", "after")
+        #expect(try scratch.extract(tar.archive).map(\.name) == ["after"])
+        #expect(scratch.contents("after") == "after")
+    }
+
+    @Test("a NUL in a name or a link target is refused: the calls that make the entry would stop at it")
+    func nulInNames() throws {
+        var climbing = TarBuilder()
+        climbing.pax(DockerTar.paxRecords([("path", "..\u{0}/escape")]))
+        climbing.file("x", "x")
+        var inner = TarBuilder()
+        inner.pax(DockerTar.paxRecords([("path", "a\u{0}b")]))
+        inner.directory("d")
+        var links = TarBuilder()
+        links.file("t", "t")
+        links.pax(DockerTar.paxRecords([("linkpath", "t\u{0}/../../x")]))
+        links.symlink("l", to: "t")
+        var hard = TarBuilder()
+        hard.file("t", "t")
+        hard.pax(DockerTar.paxRecords([("linkpath", "t\u{0}")]))
+        hard.hardLink("h", to: "t")
+        for (name, tar) in [("path", climbing), ("inner", inner), ("linkpath", links), ("hard link", hard)] {
+            let scratch = try Scratch()
+            #expect(throws: DockerTarRejection.self, "\(name)") { try scratch.extract(tar.archive) }
+            #expect(scratch.leaked.isEmpty, "\(name)")
+        }
     }
 }
 
@@ -491,6 +651,51 @@ struct ArchiveRouteTests {
         let answer = try await h.request("PUT", "/containers/box/archive?path=/", body: tar.archive)
         #expect(answer.status == 400)
         #expect(h.tools.copyCalls.isEmpty)
+    }
+
+    /// The archives that stopped the service before the parser checked them: a pax record
+    /// whose length stops at its space, and sizes no header can carry on a directory.
+    static var malformed: [(String, [UInt8])] {
+        var short = TarBuilder()
+        short.pax(Array("1 ".utf8))
+        short.directory("d")
+        var leadingZero = TarBuilder()
+        leadingZero.pax(Array("01 ".utf8))
+        leadingZero.directory("d")
+        var max = TarBuilder()
+        max.header("d/", type: .directory, sizeField: TarBuilder.base256(UInt64.max))
+        var nearMax = TarBuilder()
+        nearMax.header("d/", type: .directory, sizeField: TarBuilder.base256(UInt64.max - 511))
+        var paxSize = TarBuilder()
+        paxSize.pax(DockerTar.paxRecords([("size", "18446744073709551615")]))
+        paxSize.directory("d")
+        return [
+            ("pax length 1", short.archive), ("pax length 01", leadingZero.archive), ("base-256 UInt64.max", max.archive),
+            ("base-256 UInt64.max - 511", nearMax.archive), ("pax size UInt64.max", paxSize.archive),
+        ]
+    }
+
+    @Test("a malformed archive is a 400 in words, into a running container or one waiting for a start, and the service goes on")
+    func malformedUploads() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        for (name, archive) in Self.malformed {
+            for container in ["box", "off"] {
+                let answer = try await h.request("PUT", "/containers/\(container)/archive?path=/", body: archive, contentType: "application/x-tar")
+                #expect(answer.status == 400, "\(name) into \(container)")
+                let message = try answer.json()["message"] as? String
+                #expect(message?.hasPrefix("invalid ") == true, "\(name) into \(container): \(message ?? "")")
+            }
+        }
+        #expect(h.tools.copyCalls.isEmpty)
+        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
+        // Control: the same service takes a well-formed upload after them.
+        var tar = TarBuilder()
+        tar.file("ok.txt", "ok")
+        #expect(try await h.request("PUT", "/containers/box/archive?path=/", body: tar.archive).status == 200)
+        #expect(h.tools.copyCalls == ["in ok.txt / 644"])
     }
 
     @Test("noOverwriteDirNonDir refuses replacing a directory with a file; without it the copy goes ahead")
