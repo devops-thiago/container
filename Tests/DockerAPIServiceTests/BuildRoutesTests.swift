@@ -622,6 +622,22 @@ struct BuildRoutesTests {
         #expect(try await post(harness, "t=m231-x", body: B.tar(B.context)).head.hasPrefix("HTTP/1.1 200"))
     }
 
+    @Test("a malformed context is a 400 in words, not a stopped service: the builder is never asked")
+    func malformedContext() async throws {
+        let harness = try await harness()
+        defer { Task { try? await harness.stop() } }
+        for (name, archive) in ArchiveRouteTests.malformed {
+            let answer = try await post(harness, "t=m231-bad", body: archive)
+            #expect(answer.head.hasPrefix("HTTP/1.1 400"), "\(name)")
+            #expect(answer.text.hasPrefix(#"{"message":"invalid build context: invalid "#), "\(name): \(answer.text)")
+        }
+        #expect(builder.requests.isEmpty)
+        try await waitForEmptyScratch()
+        #expect(try scratchEntries().isEmpty)
+        // Control: the same harness builds a good context after them.
+        #expect(try await post(harness, "t=m231-ok", body: B.tar(B.context)).head.hasPrefix("HTTP/1.1 200"))
+    }
+
     @Test("a body past the bound is refused while it arrives")
     func bodyBound() async throws {
         let harness = try await harness(limits: .init(maxBodyBytes: 2048))
