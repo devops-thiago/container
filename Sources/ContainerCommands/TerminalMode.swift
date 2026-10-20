@@ -38,7 +38,10 @@ extension Application {
         case let command as MachineRun:
             return command.usesRawTerminal ? "raw" : "none"
         case let command as ContainerStart:
-            guard command.interactive, let snapshot = await container(command.containerId) else { return "none" }
+            guard command.interactive else { return "none" }
+            // Unknown metadata is not evidence of a non-TTY container. The launcher must
+            // refuse this attempt before it starts an interactive session in line mode.
+            guard let snapshot = await container(command.containerId) else { return "unavailable" }
             return command.usesRawTerminal(snapshot) ? "raw" : "none"
         default:
             return "none"
