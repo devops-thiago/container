@@ -106,8 +106,13 @@ public struct Application: AsyncLoggableCommand {
         let fullArgs = CommandLine.arguments
         let args = Array(fullArgs.dropFirst())
 
+        if let version = Self.dockerVersionFlag(args) {
+            print(version)
+            return
+        }
+
         do {
-            var command = try Application.parseAsRoot(args)
+            var command = try Application.parseDockerSpellings(args)
             if var asyncCommand = command as? AsyncParsableCommand {
                 try await asyncCommand.run()
             } else {
@@ -132,6 +137,19 @@ public struct Application: AsyncLoggableCommand {
         }
     }
 
+    /// What `container -v` prints: `-v` alone is Docker's `--version`, which tools that drive
+    /// the Docker CLI run first. Anywhere else `-v` belongs to the command it follows
+    /// (`run -v` is a volume), and nil is returned.
+    static func dockerVersionFlag(_ arguments: [String]) -> String? {
+        arguments == ["-v"] ? configuration.version : nil
+    }
+
+    /// Load the system configuration using `appRoot` / `installRoot` reported by the
+    /// daemon. `container system start` MUST have previously been run to start the daemon.
+    public static func loadContainerSystemConfig() async throws -> ContainerSystemConfig {
+        try await ClientHealthCheck.loadContainerSystemConfig()
+    }
+
     public func validate() throws {
         // Not really a "validation", but a cheat to run this before
         // any of the commands do their business.
@@ -153,11 +171,13 @@ public struct Application: AsyncLoggableCommand {
     private static func otherCommands() -> [any ParsableCommand.Type] {
         guard #available(macOS 26, *) else {
             return [
-                SystemCommand.self
+                ContainerEvents.self,
+                SystemCommand.self,
             ] + Application.systemRootSpellings
         }
 
         return [
+            ContainerEvents.self,
             NetworkCommand.self,
             SystemCommand.self,
         ] + Application.systemRootSpellings

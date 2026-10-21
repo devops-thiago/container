@@ -459,6 +459,30 @@ struct ParserTest {
         }
     }
 
+    /// Docker Desktop's bind consistency, which Dev Containers adds on macOS: accepted, and the
+    /// mount is the one without it.
+    @Test(arguments: ["cached", "consistent", "delegated", "default"])
+    func testMountBindConsistencyIsIgnored(consistency: String) throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("test-bind-consistency-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let with = try Parser.mount("type=bind,source=\(tempDir.path),target=/workspaces/p,consistency=\(consistency)")
+        let without = try Parser.mount("type=bind,source=\(tempDir.path),target=/workspaces/p")
+        guard case .filesystem(let fs) = with, case .filesystem(let plain) = without else {
+            Issue.record("Expected filesystem mounts")
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        #expect(try encoder.encode(fs) == encoder.encode(plain))
+        #expect(fs.destination == "/workspaces/p")
+        // Any other directive is still refused.
+        #expect(throws: (any Error).self) { try Parser.mount("type=bind,source=\(tempDir.path),target=/x,coherence=cached") }
+    }
+
     @Test
     func testMountTmpfsWithMode() throws {
         let result = try Parser.mount("type=tmpfs,dst=/foo,size=64m,mode=1777")

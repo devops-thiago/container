@@ -18,9 +18,12 @@ import ContainerAPIClient
 import DockerAPIService
 import Foundation
 
-/// The engine summary `/version` and `/info` report, read from the API server.
-struct EngineSystemClient: EngineSystem {
-    func summary() async throws -> EngineSummary {
+/// The engine summary `/version` and `/info` report, read from the API server: what the
+/// Docker API agent serves and `container info --format` prints.
+public struct EngineSystemClient: EngineSystem {
+    public init() {}
+
+    public func summary() async throws -> EngineSummary {
         let health = try await ClientHealthCheck.ping()
         let containers = try await ContainerClient().list()
         let images = try await ClientImage.list()
@@ -28,10 +31,9 @@ struct EngineSystemClient: EngineSystem {
         return EngineSummary(
             engineVersion: health.apiServerVersion,
             engineCommit: health.apiServerCommit,
-            // Each container boots its own VM; there is no one kernel to name.
-            kernelVersion: "",
+            kernelVersion: EngineSummary.kernelVersion,
             operatingSystem: "SiliconShip",
-            architecture: "aarch64",
+            architecture: EngineSummary.architecture,
             cpus: ProcessInfo.processInfo.activeProcessorCount,
             memoryBytes: Int64(clamping: ProcessInfo.processInfo.physicalMemory),
             containers: containers.count,

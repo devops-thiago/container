@@ -64,11 +64,35 @@ extension Application {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        /// Docker's `--sig-proxy`, which tools that drive the Docker CLI pass as
+        /// `--sig-proxy=false` to keep a container running when they stop this command. A bool
+        /// flag as Docker's: alone it is true, and a value only follows `=`
+        /// (`Application.parseDockerSpellings` hands that form to `sigProxyValue`).
+        @Flag(name: .customLong("sig-proxy"), help: .hidden)
+        var sigProxyFlag = false
+
+        @Option(name: .customLong(DockerSpellings.sigProxyValue), help: .hidden)
+        var sigProxyValue: String?
+
+        /// Whether the signals this command receives go to the container.
+        var proxySignals: Bool {
+            sigProxyValue.flatMap(DockerBool.init(argument:))?.value ?? true
+        }
+
         @Argument(help: "Image name")
         var image: String
 
         @Argument(parsing: .captureForPassthrough, help: "Container init process arguments")
         var arguments: [String] = []
+
+        public func validate() throws {
+            if let value = sigProxyValue, DockerBool(argument: value) == nil {
+                throw ValidationError(DockerSpellings.invalidBool(value, flag: "--sig-proxy"))
+            }
+            if try !managementFlags.attachStreams.isEmpty && managementFlags.detach {
+                throw ValidationError("conflicting options: cannot specify both --attach and --detach")
+            }
+        }
 
         public func run() async throws {
             unsupportedFlags.warnAboutGivenFlags()
@@ -134,7 +158,8 @@ extension Application {
                     tty: self.processFlags.tty,
                     interactive: self.processFlags.interactive,
                     detach: detach,
-                    launcherSetsRaw: true
+                    launcherSetsRaw: true,
+                    streams: try self.managementFlags.attachStreams
                 )
                 defer {
                     try? io.close()
@@ -171,7 +196,7 @@ extension Application {
                     return
                 }
 
-                if !self.processFlags.tty {
+                if !self.processFlags.tty && proxySignals {
                     var handler = SignalThreshold(threshold: 3, signals: [SIGINT, SIGTERM])
                     let log = self.log
                     handler.start {
@@ -180,7 +205,7 @@ extension Application {
                     }
                 }
 
-                exitCode = try await io.handleProcess(process: process, log: log)
+                exitCode = try await io.handleProcess(process: process, log: log, proxySignals: proxySignals)
             } catch {
                 try? await client.delete(id: id)
                 if error is ContainerizationError {

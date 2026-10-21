@@ -19,9 +19,9 @@ import ContainerPersistence
 import ContainerResource
 import ContainerizationError
 import ContainerizationOCI
+import DockerAPIEngine
 import DockerAPIService
 import Foundation
-import Synchronization
 import TerminalProgress
 
 /// The image routes' engine beyond pull: the images service, through the client the
@@ -30,14 +30,7 @@ extension EngineImagesClient {
     func list() async throws -> [EngineImageRecord] {
         try await EngineErrors.translated {
             let system = try await EngineContainersClient.systemConfig()
-            var records: [EngineImageRecord] = []
-            for image in try await ClientImage.list() {
-                var record = try await ImageRecordCache.shared.record(for: image)
-                record.infrastructure = Utility.isInfraImage(
-                    name: image.reference, builderImage: system.build.image, initImage: system.vminit.image)
-                records.append(record)
-            }
-            return records
+            return try await EngineImageRecords.list(builderImage: system.build.image, initImage: system.vminit.image)
         }
     }
 
@@ -126,98 +119,7 @@ extension EngineImagesClient {
 extension EngineContainersClient {
     /// Image ID by index digest, for the containers the engine made without this service.
     func imageIDs() async throws -> [String: String] {
-        var ids: [String: String] = [:]
-        for image in try await ClientImage.list() {
-            ids[image.digest] = try await ImageRecordCache.shared.record(for: image).id
-        }
-        return ids
-    }
-}
-
-/// What the content store says about each image, by the digest its references name. Content
-/// is immutable, but which of an index's platforms is here changes with pulls; the cache is
-/// dropped whenever the images service reports a change.
-final class ImageRecordCache: Sendable {
-    static let shared = ImageRecordCache()
-
-    private struct State {
-        var generation: String?
-        var records: [String: EngineImageRecord] = [:]
-    }
-
-    private let state = Mutex(State())
-
-    /// A bound on what is kept: far more images than anyone has, and a reset rather than an
-    /// eviction policy past it.
-    private static let limit = 4096
-
-    func record(for image: ClientImage) async throws -> EngineImageRecord {
-        let generation = try? await ClientImage.state().map { "\($0.processNonce)/\($0.stateGeneration)" }
-        let cached = state.withLock { state -> EngineImageRecord? in
-            if generation == nil || state.generation != generation || state.records.count > Self.limit {
-                state.generation = generation
-                state.records = [:]
-            }
-            return state.records[image.digest]
-        }
-        if var cached {
-            cached.reference = image.reference
-            return cached
-        }
-        let record = try await Self.read(image)
-        state.withLock { state in
-            if state.generation == generation { state.records[image.digest] = record }
-        }
-        return record
-    }
-
-    /// Reads the image's index, each manifest and the config the ID comes from: the host
-    /// platform's, else the first platform whose content is here.
-    static func read(_ image: ClientImage) async throws -> EngineImageRecord {
-        let descriptor = image.descriptor
-        let target = DockerDescriptor(mediaType: descriptor.mediaType, digest: descriptor.digest, size: descriptor.size)
-        guard let indexData = try await image.blob(descriptor.digest), let index = try? JSONDecoder().decode(Index.self, from: indexData) else {
-            return EngineImageRecord(reference: image.reference, target: target, id: descriptor.digest, size: 0, config: nil)
-        }
-        let host = ClientImage.hostPlatform
-        var manifests: [EngineImageManifest] = []
-        var hostChoice: (EngineImageManifest, Manifest)?
-        var fallback: (EngineImageManifest, Manifest)?
-        for entry in index.manifests {
-            let manifest = try await image.blob(entry.digest).flatMap { try? JSONDecoder().decode(Manifest.self, from: $0) }
-            var configPresent = false
-            if let manifest {
-                configPresent = try await image.blob(manifest.config.digest) != nil
-            }
-            let kind: EngineImageManifest.Kind
-            if entry.annotations?["vnd.docker.reference.type"] == "attestation-manifest" {
-                kind = .attestation
-            } else if let platform = entry.platform, platform.os != "unknown" {
-                kind = .image
-            } else {
-                kind = .unknown
-            }
-            let summary = EngineImageManifest(
-                descriptor: DockerDescriptor(mediaType: entry.mediaType, digest: entry.digest, size: entry.size),
-                kind: kind,
-                platform: entry.platform.map { ($0.os, $0.architecture, $0.variant) },
-                available: manifest != nil && configPresent,
-                contentSize: entry.size + (manifest.map { $0.config.size + $0.layers.reduce(0) { $0 + $1.size } } ?? 0),
-                attestationFor: kind == .attestation ? entry.annotations?["vnd.docker.reference.digest"] : nil)
-            manifests.append(summary)
-            guard kind == .image, summary.available, let manifest else { continue }
-            if hostChoice == nil, entry.platform == host { hostChoice = (summary, manifest) }
-            if fallback == nil { fallback = (summary, manifest) }
-        }
-        guard let (chosen, manifest) = hostChoice ?? fallback else {
-            return EngineImageRecord(reference: image.reference, target: target, id: descriptor.digest, size: 0, config: nil, manifests: manifests)
-        }
-        let config = try await image.blob(manifest.config.digest).flatMap { try? JSONDecoder().decode(DockerImageConfigDocument.self, from: $0) }
-        return EngineImageRecord(
-            reference: image.reference, target: target, id: manifest.config.digest, size: chosen.contentSize, config: config,
-            layerSizes: manifest.layers.map(\.size), manifests: manifests, manifestDigest: chosen.descriptor.digest,
-            content: [EngineImageBlob(digest: chosen.descriptor.digest, size: chosen.descriptor.size)]
-                + ([manifest.config] + manifest.layers).map { EngineImageBlob(digest: $0.digest, size: $0.size) })
+        try await EngineImageRecords.imageIDs()
     }
 }
 

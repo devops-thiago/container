@@ -37,24 +37,24 @@ public struct DockerEvent: Sendable, Equatable {
     /// The message on the wire. Below API 1.52, which is all this service speaks, dockerd adds
     /// the fields it deprecated in 1.22 to container and image events: the CLI read them until
     /// 25.0.
-    struct Message: Encodable {
-        struct ActorBody: Encodable {
-            let ID: String
-            let Attributes: [String: String]
+    public struct Message: Encodable, Sendable {
+        public struct ActorBody: Encodable, Sendable {
+            public let ID: String
+            public let Attributes: [String: String]
         }
 
-        let status: String?
-        let id: String?
-        let from: String?
-        let `Type`: String
-        let Action: String
-        let Actor: ActorBody
-        let scope: String
-        let time: Int64
-        let timeNano: Int64
+        public let status: String?
+        public let id: String?
+        public let from: String?
+        public let `Type`: String
+        public let Action: String
+        public let Actor: ActorBody
+        public let scope: String
+        public let time: Int64
+        public let timeNano: Int64
     }
 
-    var message: Message {
+    public var message: Message {
         let nanos = Int64((time.timeIntervalSince1970 * 1_000_000_000).rounded())
         let legacy = type == "container" || type == "image"
         return Message(
@@ -165,6 +165,14 @@ public actor DockerEventBus {
     private let feed: (any DockerEngineEventFeed)?
     private let log: Logger
     private let now: @Sendable () -> Date
+    /// The ID an engine event's container is reported by.
+    private let eventID: @Sendable (ContainerEvent) -> String
+    /// Changes from this moment on are reported, the ones before the first reading included;
+    /// nil reports only what happens after it.
+    private var reportSince: Date?
+    /// Containers whose create or start the first reading reported, with when it was taken: the
+    /// engine's own event for that change, older than the reading, is not said again.
+    private var reportedByReading: [String: Date] = [:]
     private var subscribers: [UInt64: Subscriber] = [:]
     private var nextID: UInt64 = 0
     private var poller: Task<Void, Never>?
@@ -199,15 +207,21 @@ public actor DockerEventBus {
     ///   routes see them; nil reports only what this service does.
     /// - Parameter feed: the engine's container events, followed while anyone is subscribed and
     ///   the engine has them; `source` is read instead when it does not.
+    /// - Parameter eventID: the ID an engine event's container is reported by: its Docker ID
+    ///   unless given, which is what `source` must give its containers as well.
     public init(
         limits: DockerEventLimits = .init(), log: Logger = Logger(label: "DockerAPIService"), now: @escaping @Sendable () -> Date = { Date() },
-        source: ContainerSource? = nil, feed: (any DockerEngineEventFeed)? = nil
+        source: ContainerSource? = nil, feed: (any DockerEngineEventFeed)? = nil,
+        eventID: @escaping @Sendable (ContainerEvent) -> String = { DockerEventBus.dockerID($0) },
+        reportSince: Date? = nil
     ) {
+        self.reportSince = reportSince
         self.limits = limits
         self.source = source
         self.feed = feed
         self.log = log
         self.now = now
+        self.eventID = eventID
     }
 
     // MARK: Subscribers
@@ -432,7 +446,10 @@ public actor DockerEventBus {
                 break
             }
         }
-        guard let message = Self.dockerEvent(event) else { return }
+        if let reading = reportedByReading[engineID], event.action == .create || event.action == .start, event.time <= reading {
+            return
+        }
+        guard let message = Self.dockerEvent(event, actorID: eventID(event)) else { return }
         switch event.action {
         case .create, .start:
             exitReported.remove(engineID)
@@ -484,6 +501,12 @@ public actor DockerEventBus {
     /// An engine event as dockerd reports a container's: its labels, image and name as
     /// attributes, read from the event itself, since the container may be gone by now.
     static func dockerEvent(_ event: ContainerEvent) -> DockerEvent? {
+        dockerEvent(event, actorID: dockerID(event))
+    }
+
+    /// An engine event as `dockerEvent(_:)` makes it, with `actorID` as the container's ID:
+    /// `container events` reports the engine's own ID, which its other commands take.
+    public static func dockerEvent(_ event: ContainerEvent, actorID: String) -> DockerEvent? {
         var attributes = attributes(event)
         let action: String
         switch event.action {
@@ -502,12 +525,12 @@ public actor DockerEventBus {
         default:
             action = event.action.rawValue
         }
-        return DockerEvent(type: "container", action: action, actorID: dockerID(event), attributes: attributes, time: event.time)
+        return DockerEvent(type: "container", action: action, actorID: actorID, attributes: attributes, time: event.time)
     }
 
     /// The Docker ID of an event's container: the one this service gave it, or the hash of its
     /// engine ID for one it did not make.
-    static func dockerID(_ event: ContainerEvent) -> String {
+    public static func dockerID(_ event: ContainerEvent) -> String {
         if let id = event.labels[DockerLabels.id], DockerIdentityTable.isDockerID(id), id.hasPrefix(event.id) {
             return id
         }
@@ -540,6 +563,10 @@ public actor DockerEventBus {
     func apply(_ containers: [DockerContainer], readingBegan began: UInt64) {
         guard var previous = baseline else {
             baseline = Dictionary(containers.map { ($0.engineID, Self.observe($0)) }, uniquingKeysWith: { first, _ in first })
+            if let since = reportSince {
+                reportSince = nil
+                reportChanges(since: since, in: containers)
+            }
             return
         }
         var seen = Set<String>()
@@ -587,6 +614,26 @@ public actor DockerEventBus {
         // What this service changed before the reading began is in the reading now.
         touched = touched.filter { $0.value > began }
         baseline = previous
+    }
+
+    /// What the first reading shows was made or started since `since`, which the engine's events
+    /// may have said before anyone followed them.
+    private func reportChanges(since: Date, in containers: [DockerContainer]) {
+        let reading = now()
+        for container in containers {
+            let snapshot = container.snapshot
+            let observed = Self.observe(container)
+            var reported = false
+            if snapshot.configuration.creationDate >= since {
+                report("create", observed)
+                reported = true
+            }
+            if observed.state == .running, let started = snapshot.startedDate, started >= since {
+                report("start", observed)
+                reported = true
+            }
+            if reported { reportedByReading[container.engineID] = reading }
+        }
     }
 
     private func report(_ action: String, _ observed: Observed, exitCode: Int32? = nil) {
