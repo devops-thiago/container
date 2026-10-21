@@ -17,6 +17,7 @@
 import ContainerResource
 import CryptoKit
 import Foundation
+import Logging
 
 /// The labels this service puts on the containers it creates. They are written at create, and
 /// only the name changes after: the engine lets that one label change, and no other.
@@ -362,13 +363,25 @@ public actor DockerIdentityStore {
     private var listings: [UInt64: Int] = [:]
     private let persistence: (any DockerIdentityPersistence)?
     private var generator: any RandomNumberGenerator
+    private let log: Logger
 
     /// A store that starts from what `persistence` holds. One that cannot be read starts empty:
     /// the labels on the containers this service made bring their identities back.
-    public init(persistence: (any DockerIdentityPersistence)?, generator: any RandomNumberGenerator = SystemRandomNumberGenerator()) {
+    ///
+    /// Every save that fails is logged here; the changes a client asked for also throw it.
+    public init(
+        persistence: (any DockerIdentityPersistence)?, generator: any RandomNumberGenerator = SystemRandomNumberGenerator(),
+        log: Logger = Logger(label: "DockerAPIService")
+    ) {
         self.persistence = persistence
         self.generator = generator
-        table = DockerIdentityTable(records: (try? persistence?.load()) ?? [])
+        self.log = log
+        do {
+            table = DockerIdentityTable(records: try persistence?.load() ?? [])
+        } catch {
+            log.error("could not read the container identities; starting from the labels", metadata: ["error": "\(error)"])
+            table = DockerIdentityTable(records: [])
+        }
     }
 
     public var records: [DockerContainerRecord] {
@@ -394,7 +407,7 @@ public actor DockerIdentityStore {
                 touch(engineID)
             }
             // Saving again at the next change is as good as saving now; a failure here only
-            // means a label has to bring a name back after a restart.
+            // means a label has to bring a name back after a restart. It is logged.
             try? save()
         }
         return containers
@@ -423,12 +436,15 @@ public actor DockerIdentityStore {
     }
 
     /// A point observation cannot prove that unrelated containers no longer exist.
-    public func resolve(_ snapshot: ContainerSnapshot) -> DockerContainer {
+    ///
+    /// Throws when what it learned could not be saved; it is kept here all the same, since the
+    /// engine has the container either way.
+    public func resolve(_ snapshot: ContainerSnapshot) throws(DockerAPIError) -> DockerContainer {
         let before = table
         let container = table.resolve(snapshot)
         if table != before {
             touch(snapshot.id)
-            try? save()
+            try save(or: "could not keep the container's identity")
         }
         return container
     }
@@ -481,14 +497,22 @@ public actor DockerIdentityStore {
         )
     }
 
-    /// Records a create that succeeded and lets its reservation go.
-    public func commit(_ reservation: DockerIdentityReservation, incarnation: String, extras: DockerContainerExtras?) {
+    /// Records a create that succeeded and lets its reservation go. When the record cannot be
+    /// saved it is not kept either and this throws: the caller removes the container, as
+    /// dockerd removes one it could not write to disk.
+    public func commit(_ reservation: DockerIdentityReservation, incarnation: String, extras: DockerContainerExtras?) throws(DockerAPIError) {
         reserved[reservation.name] = nil
+        let before = table
         table.insert(
             DockerContainerRecord(
                 engineID: reservation.engineID, incarnation: incarnation, dockerID: reservation.dockerID, name: reservation.name, extras: extras))
         touch(reservation.engineID)
-        try? save()
+        do {
+            try save(or: "could not keep the new container's identity")
+        } catch {
+            table = before
+            throw error
+        }
     }
 
     /// Lets the reservation of a create that failed go.
@@ -518,23 +542,33 @@ public actor DockerIdentityStore {
     }
 
     /// Renames `container` here alone, for an engine that cannot keep names: this store keeps
-    /// the name, over the label, until the engine has it.
+    /// the name, over the label, until the engine has it. A name that cannot be saved is not
+    /// kept, as dockerd keeps the old name when it cannot write the new one.
     public func rename(_ container: DockerContainer, to requested: String, among containers: [DockerContainer]) throws(DockerAPIError) {
         let name = try checkRename(container, to: requested, among: containers)
+        let before = table
         table.rename(container, to: name)
         touch(container.engineID)
         do {
-            try save()
+            try save(or: "could not keep the new name")
         } catch {
-            throw .internalError("could not keep the new name: \(error)")
+            table = before
+            throw error
         }
     }
 
-    /// The engine has `container` under `name` now: the label is where the name is.
-    public func renamedInEngine(_ container: DockerContainer, to name: String) {
+    /// The engine has `container` under `name` now: the label is where the name is. A name
+    /// that cannot be saved is not kept here, and the caller gives the engine the old one back.
+    public func renamedInEngine(_ container: DockerContainer, to name: String) throws(DockerAPIError) {
+        let before = table
         table.rename(container, to: name, local: false)
         touch(container.engineID)
-        try? save()
+        do {
+            try save(or: "could not keep the new name")
+        } catch {
+            table = before
+            throw error
+        }
     }
 
     /// The renames made here that the engine does not have, as `(container, name)`, for an
@@ -548,23 +582,43 @@ public actor DockerIdentityStore {
 
     /// Keeps `container`'s identity when it was deleted and made again under the same engine ID,
     /// as connecting it to a network does: the new incarnation would otherwise lose its record.
-    public func recreated(_ container: DockerContainer, incarnation: String) {
+    ///
+    /// Throws when the record could not be saved; it is kept here all the same, since the
+    /// container exists either way.
+    public func recreated(_ container: DockerContainer, incarnation: String) throws(DockerAPIError) {
         table.insert(
             DockerContainerRecord(
                 engineID: container.engineID, incarnation: incarnation, dockerID: container.dockerID, name: container.name, extras: container.extras))
         touch(container.engineID)
-        try? save()
+        try save(or: "could not keep the container's identity")
     }
 
-    /// Forgets a container that was deleted.
-    public func forget(engineID: String) {
+    /// Forgets a container that was deleted. Throws when that could not be saved; it is
+    /// forgotten here all the same, since the container is gone either way.
+    public func forget(engineID: String) throws(DockerAPIError) {
         guard table.records[engineID] != nil else { return }
         table.remove(engineID: engineID)
         touch(engineID)
-        try? save()
+        try save(or: "could not forget the removed container")
     }
 
-    private func save() throws {
-        try persistence?.save(records)
+    /// Saves the table, logging a failure and throwing it as a server error that starts with
+    /// `failure`.
+    private func save(or failure: String = "could not save the container identities") throws(DockerAPIError) {
+        do {
+            try persistence?.save(records)
+        } catch {
+            log.error("\(failure)", metadata: ["error": "\(error)"])
+            throw .internalError("\(failure): \(Self.reason(error))")
+        }
+    }
+
+    /// The file and the system's reason, for a failure Foundation describes at length.
+    static func reason(_ error: any Error) -> String {
+        let error = error as NSError
+        guard let path = error.userInfo[NSFilePathErrorKey] as? String,
+            let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError, underlying.domain == NSPOSIXErrorDomain
+        else { return error.localizedDescription }
+        return "\(path): \(String(cString: strerror(Int32(underlying.code))))"
     }
 }
