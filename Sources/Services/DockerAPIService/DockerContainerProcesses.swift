@@ -117,8 +117,13 @@ public actor DockerContainerProcesses {
             // Uploaded while it was not running: in place before anything runs in it.
             if let tools {
                 let snapshot = container.snapshot
-                try await copies.apply(engineID, starting: true) { source, destination, mode, requester in
-                    try await tools.copyIn(snapshot, source: source, destination: destination, mode: mode, requester: requester)
+                do {
+                    try await copies.apply(engineID, starting: true) { source, destination, mode, requester in
+                        try await tools.copyIn(snapshot, source: source, destination: destination, mode: mode, requester: requester)
+                    }
+                } catch {
+                    log.error("could not copy in what was held for the start", metadata: ["container": "\(engineID)", "error": "\(Self.message(error))"])
+                    throw error
                 }
             }
             if !claimed.isEmpty {
@@ -269,6 +274,5 @@ public struct DockerContainerStreams: Sendable {
         await attaches.shutdown()
         await waits.shutdown()
         await execs.shutdown()
-        await copies.shutdown()
     }
 }

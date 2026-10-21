@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Darwin
 import Foundation
 import NIOCore
@@ -280,7 +281,7 @@ extension ContainerToolRoutes.Routes {
         if heldForStart {
             // An engine from before it could copy before a start reaches a container's
             // filesystem only while it runs.
-            guard await engine.supportsCopyBeforeStart() else {
+            guard streams.copies.queue != nil, await engine.supportsCopyBeforeStart() else {
                 throw DockerAPIError.conflict(
                     "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
             }
@@ -301,11 +302,11 @@ extension ContainerToolRoutes.Routes {
         }
         try Self.refuseCompressed(archive)
 
-        // What is held is kept where the held copies are, so that it outlasts this service.
-        let scratch = try (heldForStart ? streams.copies.makeUploadDirectory() : nil) ?? makeScratch()
+        // What is held is written where it is held, so that it outlasts this service.
+        let scratch = try heldForStart ? streams.copies.stage() : makeScratch()
         var keepScratch = false
         defer { if !keepScratch { try? FileManager.default.removeItem(at: scratch) } }
-        let root = scratch.appending(path: DockerPendingCopies.rootName, directoryHint: .isDirectory)
+        let root = PendingCopyQueue.root(of: scratch)
         guard mkdir(root.path(percentEncoded: false), 0o700) == 0 else {
             throw DockerAPIError.internalError("could not make a directory for the archive")
         }
@@ -318,8 +319,10 @@ extension ContainerToolRoutes.Routes {
         }
 
         if heldForStart {
-            let upload = DockerPendingCopies.Upload(scratch: scratch, root: root, entries: entries, destination: path, requester: request.peer?.requester)
-            if try await streams.copies.add(upload, engineID: container.engineID, observed: observed) {
+            let record = PendingCopyQueue.Record(
+                destination: path, entries: entries.map { PendingCopyQueue.Entry(name: $0.name, isDirectory: $0.isDirectory, mode: $0.mode) },
+                requester: request.peer?.requester)
+            if try await streams.copies.add(scratch, record: record, engineID: container.engineID, observed: observed) {
                 keepScratch = true
                 return .empty(.ok)
             }

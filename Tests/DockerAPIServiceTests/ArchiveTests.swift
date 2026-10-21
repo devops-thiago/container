@@ -541,8 +541,17 @@ struct ArchiveRouteTests {
         #expect(try await h.request("PUT", "/containers/box/archive?path=/", body: tar.archive).status == 200)
     }
 
+    /// What the routes left on disk: in the scratch directory, being written for a hold, and
+    /// held for a start.
     static func scratchEntries(_ h: ToolHarness) -> [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: h.tools.scratch.path)) ?? ["?"]
+        let scratch = (try? FileManager.default.contentsOfDirectory(atPath: h.tools.scratch.path)) ?? ["?"]
+        let queue = h.tools.queue.directory
+        let staging = (try? FileManager.default.contentsOfDirectory(atPath: queue.appending(path: "staging").path)) ?? []
+        let pending = queue.appending(path: "pending")
+        let held = ((try? FileManager.default.contentsOfDirectory(atPath: pending.path)) ?? []).flatMap { container in
+            (try? FileManager.default.contentsOfDirectory(atPath: pending.appending(path: container).path)) ?? []
+        }
+        return scratch + staging + held
     }
 
     @Test("an upload into a container that is not running is held, and copied in at its start before its process runs")

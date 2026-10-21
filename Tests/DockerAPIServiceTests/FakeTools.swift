@@ -39,6 +39,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     /// The container's `/`.
     let root: URL
     let scratch: URL
+    /// Where the uploads held for a start are kept, as the engine's application root has it.
+    let queue: PendingCopyQueue
     let logFile: URL
     private let lock = NSLock()
     /// Executables the container has; a start of anything else fails as the engine's does.
@@ -79,6 +81,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         let top = FileManager.default.temporaryDirectory.appending(path: "dapi-tools-\(UUID().uuidString.prefix(8))")
         root = top.appending(path: "root")
         scratch = top.appending(path: "scratch")
+        queue = PendingCopyQueue(directory: top.appending(path: "pending-copies", directoryHint: .isDirectory))
         logFile = top.appending(path: "log")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -315,9 +318,10 @@ struct ToolHarness {
     static func start(
         options: DockerToolOptions = DockerToolOptions(logPollInterval: .milliseconds(20), logStatusInterval: .milliseconds(50), statsInterval: .milliseconds(50)),
         execLimits: DockerExecLimits = .init(), limits: DockerHTTPLimits = .init(), tools: FakeTools? = nil,
-        copies: DockerPendingCopies = DockerPendingCopies()
+        copies: DockerPendingCopies? = nil
     ) async throws -> ToolHarness {
         let tools = try tools ?? FakeTools(snapshots: snapshots())
+        let copies = copies ?? DockerPendingCopies(queue: tools.queue)
         let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300), logOptions: options, copies: copies)
         let identities = DockerIdentityStore(persistence: nil)
         let server = try await DockerAPIServerTests.Harness.start(limits: limits) { router in
