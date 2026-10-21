@@ -585,7 +585,7 @@ struct ArchiveRouteTests {
         #expect(h.tools.copyCalls.isEmpty)
     }
 
-    @Test("a held upload that cannot be copied in fails the start and is dropped; a removed container's held upload is dropped")
+    @Test("a held upload that cannot be copied in fails the start and stays held for the next; a removed container's held upload is dropped")
     func heldUploadFailureAndRemoval() async throws {
         let h = try await ToolHarness.start()
         defer { Task { try? await h.stop() } }
@@ -599,10 +599,11 @@ struct ArchiveRouteTests {
         let failed = try await h.request("POST", "/containers/off/start")
         #expect(failed.status == 500)
         #expect((try failed.json()["message"] as? String)?.contains("could not copy hello.txt into /data before the start: disk full") == true)
-        #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
-        // Control: started again, nothing is left to copy.
+        #expect(Self.scratchEntries(h).count == 1)
+        // Started again, it goes in.
         #expect(try await h.request("POST", "/containers/off/start").status == 204)
-        #expect(h.tools.copyCalls == ["in hello.txt /data 644"])
+        #expect(h.tools.copyCalls == ["in hello.txt /data 644", "in hello.txt /data 644"])
+        #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
         _ = try await h.request("POST", "/containers/off/stop?t=0")
 
         #expect(try await h.request("PUT", "/containers/off/archive?path=/", body: tar.archive).status == 200)

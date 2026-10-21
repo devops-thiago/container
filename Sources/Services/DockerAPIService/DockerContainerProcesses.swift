@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Logging
 
 /// The processes this service started, and what their starts bound.
@@ -116,7 +117,7 @@ public actor DockerContainerProcesses {
             // Uploaded while it was not running: in place before anything runs in it.
             if let tools {
                 let snapshot = container.snapshot
-                try await copies.apply(engineID) { source, destination, mode, requester in
+                try await copies.apply(engineID, starting: true) { source, destination, mode, requester in
                     try await tools.copyIn(snapshot, source: source, destination: destination, mode: mode, requester: requester)
                 }
             }
@@ -125,6 +126,7 @@ public actor DockerContainerProcesses {
             }
             try await bootstrapped?.start()
         } catch {
+            await copies.finishedStart(engineID)
             await session?.close()
             if bootstrapped != nil {
                 // What a failed start leaves half-made would get in the way of the next one.
@@ -134,6 +136,8 @@ public actor DockerContainerProcesses {
             await attaches.complete(tickets, .released)
             throw error
         }
+        // Running now, as the engine reports it: an upload from here on finds it running.
+        await copies.finishedStart(engineID)
         guard let process = bootstrapped else { throw DockerAPIError.internalError("the container's process was not bootstrapped") }
 
         epoch += 1
@@ -202,10 +206,11 @@ public struct DockerContainerStreams: Sendable {
     /// - Parameter events: where the starts and exits of the processes this service starts are
     ///   reported; nil reports nothing.
     /// - Parameter logOptions: how an attach to a running container follows its log.
+    /// - Parameter copies: where uploads into containers that are not running are held.
     public init(
         engine: some EngineContainers, attachLimits: DockerAttachLimits = .init(), waitLimits: DockerWaitLimits = .init(),
         execLimits: DockerExecLimits = .init(), drain: Duration = .seconds(3), log: Logger = Logger(label: "DockerAPIService"),
-        events: DockerEventBus? = nil, logOptions: DockerToolOptions = .init()
+        events: DockerEventBus? = nil, logOptions: DockerToolOptions = .init(), copies: DockerPendingCopies = DockerPendingCopies()
     ) {
         let attaches = DockerAttachStore(limits: attachLimits)
         let waits = DockerWaitStore(limits: waitLimits) { engineID in
@@ -213,7 +218,6 @@ public struct DockerContainerStreams: Sendable {
         }
         self.attaches = attaches
         self.waits = waits
-        let copies = DockerPendingCopies()
         self.copies = copies
         // The engine's container tools, when it has them: the uploads held for a start are
         // copied in with them, and an attach to a running container reads its log with them.
@@ -232,6 +236,32 @@ public struct DockerContainerStreams: Sendable {
     let tools: (any EngineContainerTools)?
     /// How an attach to a running container follows its log.
     let logOptions: DockerToolOptions
+
+    /// Copies what is held for `container`, running now, into it, when its start was not this
+    /// service's to see (the app's, or `container start`'s): later than its process began,
+    /// which is as early as this service can. What cannot be copied stays held for the next
+    /// start.
+    func applyHeld(to container: ContainerSnapshot) async {
+        guard let tools, ContainerViewMapper.isRunning(container), await copies.holds(container.id) else { return }
+        try? await copies.apply(container.id, starting: false) { source, destination, mode, requester in
+            try await tools.copyIn(container, source: source, destination: destination, mode: mode, requester: requester)
+        }
+    }
+
+    /// Settles what was held across a restart of this service: what waits for a container
+    /// that is gone is dropped, and what waits for one that was started meanwhile is copied in.
+    public func reconcileHeldCopies(engine: some EngineContainers) async {
+        let held = await copies.heldContainers()
+        guard !held.isEmpty, let containers = try? await engine.list() else { return }
+        let byID = Dictionary(containers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for engineID in held {
+            guard let container = byID[engineID] else {
+                await copies.discard(engineID)
+                continue
+            }
+            await applyHeld(to: container)
+        }
+    }
 
     /// Lets go of everything waiting: attaches end, waits end with no answer, execs not running
     /// are forgotten.
