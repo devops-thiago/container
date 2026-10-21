@@ -266,8 +266,6 @@ public enum ContainerRoutes {
         func start(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
             let (container, _) = try await find(reference)
             if ContainerViewMapper.isRunning(container.snapshot) {
-                // Started where this service did not see it: what was held for it goes in now.
-                await streams.applyHeld(to: container.snapshot)
                 return .empty(.notModified)
             }
             return try await start(container, requester: request.peer?.requester) == .started ? .empty() : .empty(.notModified)
@@ -303,7 +301,6 @@ public enum ContainerRoutes {
             await streams.waits.removed(engineID, failure: failure)
             await streams.attaches.release(engineID: engineID)
             await streams.execs.release(engineID: engineID)
-            await streams.copies.discard(engineID)
             if let unsaved { throw unsaved }
         }
 

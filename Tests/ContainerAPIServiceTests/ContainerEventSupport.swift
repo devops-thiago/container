@@ -122,6 +122,8 @@ final class FakeRuntime: Sendable {
         var exitOnKill: Int32? = 137
         /// Health updates handed out in order to the service's health watch.
         var health: [HealthUpdate] = []
+        /// Copies in of a source with one of these names fail.
+        var copyInFailures: Set<String> = []
     }
 
     private struct State {
@@ -132,6 +134,8 @@ final class FakeRuntime: Sendable {
         var started = 0
         var signals: [String] = []
         var closed = false
+        /// Copies in and starts, in the order they came.
+        var calls: [String] = []
     }
 
     private final class Shared: Sendable {
@@ -153,7 +157,10 @@ final class FakeRuntime: Sendable {
         let routes: [String: XPCServer.RouteHandler] = [
             RuntimeRoutes.bootstrap.rawValue: XPCServer.route { $0.reply() },
             RuntimeRoutes.start.rawValue: XPCServer.route { message in
-                shared.state.withLock { $0.started += 1 }
+                shared.state.withLock {
+                    $0.started += 1
+                    $0.calls.append("start")
+                }
                 if let code = behavior.exitOnStart { Self.exit(shared, code) }
                 return message.reply()
             },
@@ -191,6 +198,16 @@ final class FakeRuntime: Sendable {
                 return message.reply()
             },
             RuntimeRoutes.shutdown.rawValue: XPCServer.route { $0.reply() },
+            RuntimeRoutes.copyIn.rawValue: XPCServer.route { message in
+                let source = URL(fileURLWithPath: message.string(key: RuntimeKeys.sourcePath.rawValue) ?? "")
+                let destination = message.string(key: RuntimeKeys.destinationPath.rawValue) ?? ""
+                let content = (try? String(contentsOf: source, encoding: .utf8)) ?? "?"
+                shared.state.withLock { $0.calls.append("copyIn \(source.lastPathComponent)=\(content) \(destination)") }
+                if behavior.copyInFailures.contains(source.lastPathComponent) {
+                    throw ContainerizationError(.internalError, message: "disk full")
+                }
+                return message.reply()
+            },
             RuntimeRoutes.waitHealth.rawValue: XPCServer.route { message in
                 let after = message.uint64(key: RuntimeKeys.healthGeneration.rawValue)
                 let update = await withCheckedContinuation { continuation in
@@ -224,6 +241,7 @@ final class FakeRuntime: Sendable {
     }
 
     var starts: Int { shared.state.withLock { $0.started } }
+    var calls: [String] { shared.state.withLock { $0.calls } }
     var signals: [String] { shared.state.withLock { $0.signals } }
 
     private static func exit(_ shared: Shared, _ code: Int32) {
