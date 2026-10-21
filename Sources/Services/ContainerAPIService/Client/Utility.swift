@@ -22,6 +22,7 @@ import ContainerizationExtras
 import ContainerizationOCI
 import Foundation
 import Logging
+import SystemPackage
 import TerminalProgress
 
 // MARK: - Collection capacity hints
@@ -187,8 +188,15 @@ public struct Utility {
         )
 
         let tmpfs = try Parser.tmpfsMounts(management.tmpFs)
-        let volumesOrFs = try Parser.volumes(management.volumes)
-        let mountsOrFs = try Parser.mounts(management.mounts)
+        // A bind of the host's Docker socket is of the engine's own, found from the engine's
+        // app root, which only a running engine reports.
+        var dockerSocket = DockerSocketBinding.engine()
+        if !(management.volumes + management.mounts).isEmpty {
+            let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
+            dockerSocket = .engine(appRoot: FilePath(health.appRoot.path(percentEncoded: false)))
+        }
+        let volumesOrFs = try Parser.volumes(management.volumes, dockerSocket: dockerSocket)
+        let mountsOrFs = try Parser.mounts(management.mounts, dockerSocket: dockerSocket)
 
         var resolvedMounts: [Filesystem] = []
         resolvedMounts.append(contentsOf: tmpfs)
