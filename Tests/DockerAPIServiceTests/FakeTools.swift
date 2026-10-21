@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import NIOCore
 import Testing
@@ -123,18 +124,40 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     func createDefaults() async throws -> DockerCreateDefaults { try await base.createDefaults() }
     func allocatePort() throws -> UInt16 { try base.allocatePort() }
     func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String { try await base.create(plan, requester: requester) }
+    /// Bootstraps as the engine does: the container booted, what is held for it copied in,
+    /// its process not started.
     func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess {
-        try await base.bootstrap(container, stdio: stdio, requester: requester)
+        let process = try await base.bootstrap(container, stdio: stdio, requester: requester)
+        do {
+            try queue.claim(container.id)
+            try await queue.apply(container.id) { [self] source, destination, mode, requester in
+                do {
+                    try await copyIn(container, source: source, destination: destination, mode: mode, requester: requester)
+                } catch {
+                    // In the engine's words, as its runtime client reports them.
+                    throw ContainerizationError(.internalError, message: DockerContainerProcesses.message(error))
+                }
+            }
+        } catch let failure as PendingCopyQueue.Failure {
+            queue.release(container.id)
+            throw DockerAPIError.internalError(failure.message)
+        }
+        return process
     }
     func get(_ engineID: String) async throws -> ContainerSnapshot? {
         lock.withLock { getCalls += 1 }
         return try await base.get(engineID)
     }
+    /// The run is over, and with it the start's hold on the queue, as the engine lets it go.
     func stop(_ container: ContainerSnapshot, timeout: Int32, signal: String?) async throws {
         try await base.stop(container, timeout: timeout, signal: signal)
+        queue.release(container.id)
     }
     func kill(_ container: ContainerSnapshot, signal: String) async throws { try await base.kill(container, signal: signal) }
-    func delete(_ container: ContainerSnapshot, force: Bool) async throws { try await base.delete(container, force: force) }
+    func delete(_ container: ContainerSnapshot, force: Bool) async throws {
+        try await base.delete(container, force: force)
+        queue.drop(container.id)
+    }
     func deleteVolume(_ name: String) async throws { try await base.deleteVolume(name) }
     func supportsRename() async -> Bool { await base.supportsRename() }
     func rename(_ container: ContainerSnapshot, to name: String) async throws { try await base.rename(container, to: name) }

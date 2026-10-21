@@ -14,7 +14,6 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerResource
 import Logging
 
 /// The processes this service started, and what their starts bound.
@@ -46,14 +45,9 @@ public actor DockerContainerProcesses {
     private let drain: Duration
     private let log: Logger
     private let events: DockerEventBus?
-    private let copies: DockerPendingCopies
-    /// The engine's copy into a container, for the uploads `copies` holds; nil when the engine
-    /// has none, and nothing is ever held then.
-    private let tools: (any EngineContainerTools)?
 
     init(
-        engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger, events: DockerEventBus? = nil,
-        copies: DockerPendingCopies = DockerPendingCopies(), tools: (any EngineContainerTools)? = nil
+        engine: any EngineContainers, attaches: DockerAttachStore, waits: DockerWaitStore, drain: Duration, log: Logger, events: DockerEventBus? = nil
     ) {
         self.engine = engine
         self.attaches = attaches
@@ -61,8 +55,6 @@ public actor DockerContainerProcesses {
         self.drain = drain
         self.log = log
         self.events = events
-        self.copies = copies
-        self.tools = tools
     }
 
     /// Whether a process this service started is running in `engineID`.
@@ -114,24 +106,11 @@ public actor DockerContainerProcesses {
                 pipes.forEach { $0.closeContainerEnd() }
             }
             bootstrapped = try await engine.bootstrap(container.snapshot, stdio: stdio, requester: requester)
-            // Uploaded while it was not running: in place before anything runs in it.
-            if let tools {
-                let snapshot = container.snapshot
-                do {
-                    try await copies.apply(engineID, starting: true) { source, destination, mode, requester in
-                        try await tools.copyIn(snapshot, source: source, destination: destination, mode: mode, requester: requester)
-                    }
-                } catch {
-                    log.error("could not copy in what was held for the start", metadata: ["container": "\(engineID)", "error": "\(Self.message(error))"])
-                    throw error
-                }
-            }
             if !claimed.isEmpty {
                 session = try await DockerStdioSession.connect(stdin: stdinPipe?.takeHost(), stdout: stdoutPipe?.takeHost(), stderr: stderrPipe?.takeHost())
             }
             try await bootstrapped?.start()
         } catch {
-            await copies.finishedStart(engineID)
             await session?.close()
             if bootstrapped != nil {
                 // What a failed start leaves half-made would get in the way of the next one.
@@ -141,8 +120,6 @@ public actor DockerContainerProcesses {
             await attaches.complete(tickets, .released)
             throw error
         }
-        // Running now, as the engine reports it: an upload from here on finds it running.
-        await copies.finishedStart(engineID)
         guard let process = bootstrapped else { throw DockerAPIError.internalError("the container's process was not bootstrapped") }
 
         epoch += 1
@@ -224,13 +201,13 @@ public struct DockerContainerStreams: Sendable {
         self.attaches = attaches
         self.waits = waits
         self.copies = copies
-        // The engine's container tools, when it has them: the uploads held for a start are
-        // copied in with them, and an attach to a running container reads its log with them.
+        // The engine's container tools, when it has them: an attach to a running container
+        // reads its log with them.
         let tools = engine as? any EngineContainerTools
         self.tools = tools
         self.logOptions = logOptions
         self.processes = DockerContainerProcesses(
-            engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events, copies: copies, tools: tools)
+            engine: engine, attaches: attaches, waits: waits, drain: drain, log: log, events: events)
         self.execs = DockerExecStore(limits: execLimits)
         self.drain = drain
     }
@@ -241,32 +218,6 @@ public struct DockerContainerStreams: Sendable {
     let tools: (any EngineContainerTools)?
     /// How an attach to a running container follows its log.
     let logOptions: DockerToolOptions
-
-    /// Copies what is held for `container`, running now, into it, when its start was not this
-    /// service's to see (the app's, or `container start`'s): later than its process began,
-    /// which is as early as this service can. What cannot be copied stays held for the next
-    /// start.
-    func applyHeld(to container: ContainerSnapshot) async {
-        guard let tools, ContainerViewMapper.isRunning(container), await copies.holds(container.id) else { return }
-        try? await copies.apply(container.id, starting: false) { source, destination, mode, requester in
-            try await tools.copyIn(container, source: source, destination: destination, mode: mode, requester: requester)
-        }
-    }
-
-    /// Settles what was held across a restart of this service: what waits for a container
-    /// that is gone is dropped, and what waits for one that was started meanwhile is copied in.
-    public func reconcileHeldCopies(engine: some EngineContainers) async {
-        let held = await copies.heldContainers()
-        guard !held.isEmpty, let containers = try? await engine.list() else { return }
-        let byID = Dictionary(containers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for engineID in held {
-            guard let container = byID[engineID] else {
-                await copies.discard(engineID)
-                continue
-            }
-            await applyHeld(to: container)
-        }
-    }
 
     /// Lets go of everything waiting: attaches end, waits end with no answer, execs not running
     /// are forgotten.

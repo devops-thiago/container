@@ -28,9 +28,12 @@ import Foundation
 /// is copied in, a container's queue when the container is deleted, and what is left under
 /// `staging/`, which nothing ever renamed into a queue.
 ///
-/// A start takes a container's queue by renaming `pending/<container>` to
-/// `applying/<container>`: whatever was renamed into the queue before that goes with it, and
-/// nothing after it does. The rename is the claim; there is no lock.
+/// The engine's start is the one thing that copies uploads in. It takes a container's queue by
+/// renaming `pending/<container>` to `applying/<container>`: whatever was renamed into the queue
+/// before that goes with it, and nothing after it does. The rename is the claim; there is no
+/// lock. The queue stays taken until the run ends (`release`), so an upload that finds it taken
+/// once it is in the queue knows a start has already looked: it renames itself back out, and
+/// when that fails the start took it.
 public struct PendingCopyQueue: Sendable {
     /// One name at the top of an upload, copied into `Record.destination`.
     public struct Entry: Codable, Sendable, Equatable {
@@ -161,12 +164,6 @@ public struct PendingCopyQueue: Sendable {
         for name in (try? FileManager.default.contentsOfDirectory(atPath: staging.path(percentEncoded: false))) ?? [] where name.hasSuffix(".tmp") {
             try? FileManager.default.removeItem(at: staging.appending(path: name))
         }
-    }
-
-    /// The containers anything waits for.
-    public func containersHolding() -> [String] {
-        let queues = directory.appending(path: "pending", directoryHint: .isDirectory)
-        return ((try? FileManager.default.contentsOfDirectory(atPath: queues.path(percentEncoded: false))) ?? []).filter(holds).sorted()
     }
 
     /// Drops everything held for `container`, which is gone.

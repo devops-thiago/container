@@ -16,18 +16,18 @@
 
 import ContainerResource
 import Foundation
+import Synchronization
 import Testing
 
 @testable import DockerAPIService
 
 /// Uploads into a container that is not running: a start that races them, an agent that
 /// restarts while they are held, an upload whose record cannot be read, an entry that cannot
-/// be copied in, and a start this service did not see.
+/// be copied in, a start this service did not see, and a removal.
 @Suite(.timeLimit(.minutes(1)))
 struct PendingCopiesTests {
     static let stopped = String(ToolHarness.stoppedID.prefix(12))
     static let otherID = Fixtures.id("0ff2")
-    static let other = String(otherID.prefix(12))
     static let upload = "/containers/off/archive?path=%2F&noOverwriteDirNonDir=false&copyUIDGID=false"
 
     static func tar(_ files: [(String, String)]) -> [UInt8] {
@@ -73,7 +73,7 @@ struct PendingCopiesTests {
         #expect(try await put.value.status == 200)
         #expect(Self.contents(h, "hello.txt") == "hello\n")
         #expect(h.tools.copyCalls == ["in hello.txt / 644"])
-        #expect(await !h.streams.copies.holds(Self.stopped))
+        #expect(!h.streams.copies.holds(Self.stopped))
         #expect(await StreamHarness.eventually { ArchiveRouteTests.scratchEntries(h).isEmpty })
     }
 
@@ -93,7 +93,7 @@ struct PendingCopiesTests {
         gate.open()
         #expect(try await start.value.status == 204)
         #expect(Self.contents(h, "first.txt") == "1")
-        #expect(await !h.streams.copies.holds(Self.stopped))
+        #expect(!h.streams.copies.holds(Self.stopped))
         #expect(await StreamHarness.eventually { ArchiveRouteTests.scratchEntries(h).isEmpty })
     }
 
@@ -116,14 +116,14 @@ struct PendingCopiesTests {
         try FileManager.default.createDirectory(at: stray, withIntermediateDirectories: true)
         let copies = DockerPendingCopies(queue: tools.queue)
         #expect(Self.names(in: staging).isEmpty)
-        #expect(await copies.holds(Self.stopped))
+        #expect(copies.holds(Self.stopped))
         let second = try await ToolHarness.start(tools: tools, copies: copies)
         defer { Task { try? await second.stop(keepEngine: true) } }
         #expect(try await second.request("POST", "/containers/off/start").status == 204)
         #expect(tools.copyCalls == ["in one.txt /data 644", "in two.txt /data 644"])
         #expect(Self.contents(second, "data/one.txt") == "1")
         #expect(tools.copyInStatusCalls == [.stopped, .stopped])
-        #expect(await !copies.holds(Self.stopped))
+        #expect(!copies.holds(Self.stopped))
         #expect(ArchiveRouteTests.scratchEntries(second).isEmpty)
     }
 
@@ -175,7 +175,7 @@ struct PendingCopiesTests {
         #expect(failed.status == 500)
         #expect((try failed.json()["message"] as? String)?.contains("could not copy b.txt into /data before the start: disk full") == true)
         #expect(tools.copyCalls == ["in a.txt /data 644", "in b.txt /data 644"])
-        #expect(await h.streams.copies.holds(Self.stopped))
+        #expect(h.streams.copies.holds(Self.stopped))
         // Kept on disk as it is now: what failed and what was never tried.
         #expect(try Self.held(tools.queue, Self.stopped) == [["b.txt"], ["c.txt"]])
 
@@ -184,47 +184,85 @@ struct PendingCopiesTests {
         // What went in the first time is not copied again.
         #expect(tools.copyCalls == ["in a.txt /data 644", "in b.txt /data 644", "in b.txt /data 644", "in c.txt /data 644"])
         #expect(["a.txt", "b.txt", "c.txt"].map { Self.contents(h, "data/\($0)") } == ["a", "b", "c"])
-        #expect(await !h.streams.copies.holds(Self.stopped))
+        #expect(!h.streams.copies.holds(Self.stopped))
         #expect(ArchiveRouteTests.scratchEntries(h).isEmpty)
     }
 
-    @Test("a container started where the service did not see it gets what was held at the next request that finds it running")
+    @Test("a container started without this service, as `container start` starts it, has what was held copied in before its process runs")
     func startedElsewhere() async throws {
         let h = try await ToolHarness.start()
         defer { Task { try? await h.stop() } }
         h.tools.with { $0.copyBeforeStart = true }
         #expect(try await h.request("PUT", Self.upload, body: Self.tar([("early.txt", "early")])).status == 200)
-        // `container start`, or the app.
-        h.tools.base.update(Self.stopped) { $0.status = .running }
-        #expect(try await h.request("POST", "/containers/off/start").status == 304)
+        // The engine's own start: bootstrap, then the process, with no request to this service.
+        let snapshot = try #require(try await h.tools.get(Self.stopped))
+        let process = try await h.tools.bootstrap(snapshot, stdio: DockerProcessStdio(), requester: nil)
         #expect(Self.contents(h, "early.txt") == "early")
-        #expect(await !h.streams.copies.holds(Self.stopped))
-        #expect(await StreamHarness.eventually { ArchiveRouteTests.scratchEntries(h).isEmpty })
+        try await process.start()
+        // Copied in while the container was booted and its process not yet started.
+        #expect(h.tools.copyInStatusCalls == [.stopped])
+        #expect(!h.streams.copies.holds(Self.stopped))
+        #expect(ArchiveRouteTests.scratchEntries(h).isEmpty)
     }
 
-    @Test("a restarted service copies in what is held for a container started meanwhile, and drops what is held for one that is gone")
-    func reconcileAfterRestart() async throws {
-        let tools = try FakeTools(snapshots: ToolHarness.snapshots())
-        defer { tools.cleanup() }
-        tools.with { $0.copyBeforeStart = true }
-        let first = try await ToolHarness.start(tools: tools)
-        #expect(try await first.request("PUT", Self.upload, body: Self.tar([("meanwhile.txt", "m")])).status == 200)
-        try await first.stop(keepEngine: true)
+    /// Whether a request has answered.
+    final class Answered: Sendable {
+        let value = Mutex(false)
+        var isSet: Bool { value.withLock { $0 } }
+    }
 
-        tools.base.update(Self.stopped) { $0.status = .running }
-        let copies = DockerPendingCopies(queue: tools.queue)
-        await DockerContainerStreams(engine: tools, copies: copies).reconcileHeldCopies(engine: tools)
-        #expect(try String(contentsOf: tools.root.appending(path: "meanwhile.txt"), encoding: .utf8) == "m")
-        #expect(await !copies.holds(Self.stopped))
+    @Test("an upload a start takes with the queue is answered once the start has copied it in, or once the start fails and it is held again")
+    func uploadTakenByStart() async throws {
+        for failing in [false, true] {
+            let tools = try FakeTools(snapshots: ToolHarness.snapshots())
+            defer { tools.cleanup() }
+            tools.with { $0.copyBeforeStart = true }
+            let committed = DockerLatch()
+            let copies = DockerPendingCopies(queue: tools.queue, startWait: .seconds(10), afterCommit: { await committed.wait() })
+            let h = try await ToolHarness.start(tools: tools, copies: copies)
+            defer { Task { try? await h.stop(keepEngine: true) } }
+            let answered = Answered()
+            let put = Task {
+                defer { answered.value.withLock { $0 = true } }
+                return try await h.request("PUT", Self.upload, body: Self.tar([("late.txt", "late")]))
+            }
+            // In the queue, not yet looked at it.
+            #expect(await StreamHarness.eventually { tools.queue.holds(Self.stopped) })
+            let copying = DockerLatch()
+            tools.with {
+                $0.copyInGate = copying
+                if failing { $0.copyInFailures["late.txt"] = DockerAPIError.internalError("disk full") }
+            }
+            let start = Task { try await h.request("POST", "/containers/off/start") }
+            // The start took it and is copying it in.
+            #expect(await StreamHarness.eventually { tools.copyCalls == ["in late.txt / 644"] })
+            committed.open()
+            // The upload finds the queue taken and itself gone with it: it waits for the start.
+            try await Task.sleep(for: .milliseconds(200))
+            #expect(!answered.isSet)
+            copying.open()
+            #expect(try await start.value.status == (failing ? 500 : 204))
+            #expect(try await put.value.status == 200)
+            if failing {
+                // Held again for the next start, which copies it in.
+                #expect(h.streams.copies.holds(Self.stopped))
+                tools.with { $0.copyInFailures = [:] }
+                #expect(try await h.request("POST", "/containers/off/start").status == 204)
+            }
+            #expect(Self.contents(h, "late.txt") == "late")
+            #expect(!h.streams.copies.holds(Self.stopped))
+        }
+    }
 
-        tools.base.update(Self.stopped) { $0.status = .stopped }
-        let third = try await ToolHarness.start(tools: tools, copies: copies)
-        #expect(try await third.request("PUT", Self.upload, body: Self.tar([("gone.txt", "g")])).status == 200)
-        try await third.stop(keepEngine: true)
-        let snapshot = try #require(try await tools.get(Self.stopped))
-        try await tools.delete(snapshot, force: true)
-        #expect(await copies.holds(Self.stopped))
-        await DockerContainerStreams(engine: tools, copies: copies).reconcileHeldCopies(engine: tools)
-        #expect(await !copies.holds(Self.stopped))
+    @Test("removing a container drops what was held for it")
+    func deleteDropsQueue() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        #expect(try await h.request("PUT", Self.upload, body: Self.tar([("x.txt", "x")])).status == 200)
+        #expect(h.streams.copies.holds(Self.stopped))
+        #expect(try await h.request("DELETE", "/containers/off").status == 204)
+        #expect(!FileManager.default.fileExists(atPath: h.tools.queue.directory.appending(path: "pending/\(Self.stopped)").path))
+        #expect(ArchiveRouteTests.scratchEntries(h).isEmpty)
     }
 }

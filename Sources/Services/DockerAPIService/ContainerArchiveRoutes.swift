@@ -265,17 +265,11 @@ extension ContainerToolRoutes.Routes {
     /// it is sent is unpacked and checked now, and copied in at its next start
     /// (`DockerPendingCopies`). Its paths cannot be looked at before then, so `path` is not
     /// checked to be a directory and `noOverwriteDirNonDir` is not applied; the copy makes a
-    /// missing `path`. A start that takes the queue while the upload is unpacked leaves it to be
-    /// copied in here, into the container it started, the same way.
-    ///
-    /// Into a running container that something is still held for (started where this service
-    /// did not see it), what is held goes in first, so the uploads land in the order they came.
+    /// missing `path`. An upload that finds a start has taken the queue before it is copied in
+    /// here, into the container that start is starting, the same way.
     func extract(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let path = try Self.archivePath(request)
         let noOverwriteDirNonDir = try request.bool("noOverwriteDirNonDir")
-        // Before the state is read: a start that takes the queue after this is one it cannot
-        // be held for.
-        let observed = await streams.copies.now()
         let container = try await find(reference)
         let heldForStart = !ContainerViewMapper.isRunning(container.snapshot)
         if heldForStart {
@@ -286,7 +280,6 @@ extension ContainerToolRoutes.Routes {
                     "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
             }
         } else {
-            await streams.applyHeld(to: container.snapshot)
             switch try await probe(container, path, follow: true) {
             case .notFound:
                 throw Self.fileNotFound(path, reference)
@@ -304,8 +297,7 @@ extension ContainerToolRoutes.Routes {
 
         // What is held is written where it is held, so that it outlasts this service.
         let scratch = try heldForStart ? streams.copies.stage() : makeScratch()
-        var keepScratch = false
-        defer { if !keepScratch { try? FileManager.default.removeItem(at: scratch) } }
+        defer { try? FileManager.default.removeItem(at: scratch) }
         let root = PendingCopyQueue.root(of: scratch)
         guard mkdir(root.path(percentEncoded: false), 0o700) == 0 else {
             throw DockerAPIError.internalError("could not make a directory for the archive")
@@ -322,13 +314,17 @@ extension ContainerToolRoutes.Routes {
             let record = PendingCopyQueue.Record(
                 destination: path, entries: entries.map { PendingCopyQueue.Entry(name: $0.name, isDirectory: $0.isDirectory, mode: $0.mode) },
                 requester: request.peer?.requester)
-            if try await streams.copies.add(scratch, record: record, engineID: container.engineID, observed: observed) {
-                keepScratch = true
+            // Once held, the staged directory is no longer where it was, and this removes nothing.
+            switch try await streams.copies.hold(scratch, record: record, engineID: container.engineID) {
+            case .held, .takenByStart:
+                return .empty(.ok)
+            case .takenBack(let upload):
+                // Started meanwhile, past the point of copying in what is held: into it now.
+                defer { try? FileManager.default.removeItem(at: upload) }
+                try await copyIn(
+                    entries, from: PendingCopyQueue.root(of: upload), into: path, of: container, reference: reference, requester: request.peer?.requester)
                 return .empty(.ok)
             }
-            // Started meanwhile, past the point of copying in what is held: into it now.
-            try await copyIn(entries, from: root, into: path, of: container, reference: reference, requester: request.peer?.requester)
-            return .empty(.ok)
         }
         if noOverwriteDirNonDir {
             for entry in entries {

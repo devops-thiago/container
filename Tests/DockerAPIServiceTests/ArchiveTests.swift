@@ -569,7 +569,7 @@ struct ArchiveRouteTests {
         // Nothing reaches the container yet: there is none to reach.
         #expect(h.tools.copyCalls.isEmpty)
         #expect(Self.scratchEntries(h).count == 1)
-        #expect(await h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
 
         #expect(try await h.request("POST", "/containers/off/start").status == 204)
         #expect(h.tools.copyCalls == ["in smoke / 755"])
@@ -577,7 +577,7 @@ struct ArchiveRouteTests {
         #expect(h.tools.copyInStatusCalls == [.stopped])
         #expect(try String(contentsOf: h.tools.root.appending(path: "smoke/hello.txt"), encoding: .utf8) == "hello from the host\n")
         #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
-        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(!h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
     }
 
     @Test("an engine that cannot copy before a start still refuses an upload into a container that is not running")
@@ -642,13 +642,13 @@ struct ArchiveRouteTests {
             #expect([400, 413].contains(answer.status), "\(name)")
         }
         // Nothing was held, and nothing is left in the scratch directory.
-        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(!h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
         #expect(Self.scratchEntries(h).isEmpty)
         // Control: a small upload of a plain file is held.
         var plain = TarBuilder()
         plain.file("ok.txt", "ok")
         #expect(try await h.request("PUT", "/containers/off/archive?path=/", body: plain.archive).status == 200)
-        #expect(await h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
     }
 
     @Test("an upload that tries to leave its directory is refused before anything is copied in")
@@ -699,7 +699,7 @@ struct ArchiveRouteTests {
             }
         }
         #expect(h.tools.copyCalls.isEmpty)
-        #expect(await !h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
+        #expect(!h.streams.copies.holds(String(ToolHarness.stoppedID.prefix(12))))
         #expect(await StreamHarness.eventually { Self.scratchEntries(h).isEmpty })
         // Control: the same service takes a well-formed upload after them.
         var tar = TarBuilder()
