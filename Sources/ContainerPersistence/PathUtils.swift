@@ -58,15 +58,22 @@ public enum PathUtils {
     /// its terminator, and refuses a longer one before connecting.
     public static let maxDialableSocketPathBytes = 103
 
-    /// Where ``runDirectory()`` is, without making it.
-    public static func runDirectoryPath() -> FilePath {
-        (BaseConfigPath.groupContainer() ?? BaseConfigPath.appRoot.basePath().removingLastComponent()).appending("run")
+    /// Where ``runDirectory(engineAppRoot:)`` is, without making it.
+    public static func runDirectoryPath(engineAppRoot: FilePath) -> FilePath {
+        (BaseConfigPath.groupContainer() ?? engineAppRoot.removingLastComponent()).appending("run")
     }
 
-    /// The Docker API socket the engine's Docker API agent serves, in the run directory: what
-    /// a container that binds the host's Docker socket gets.
+    /// The Docker API socket the Docker API agent of the engine whose app root is
+    /// `engineAppRoot` serves: what a container that binds the host's Docker socket gets. A
+    /// client gets the engine's app root from its health check, as the builder does.
+    public static func dockerSocketPath(engineAppRoot: FilePath) -> String {
+        runDirectoryPath(engineAppRoot: engineAppRoot).appending("docker.sock").string
+    }
+
+    /// ``dockerSocketPath(engineAppRoot:)`` for an engine process, whose own app root is the
+    /// engine's.
     public static func dockerSocketPath() -> String {
-        runDirectoryPath().appending("docker.sock").string
+        dockerSocketPath(engineAppRoot: BaseConfigPath.appRoot.basePath())
     }
 
     static func runDirectory(in base: FilePath) throws -> URL {

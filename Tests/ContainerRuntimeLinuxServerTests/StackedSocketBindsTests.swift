@@ -34,30 +34,31 @@ struct StackedSocketBindsTests {
     ]
 
     private static func isSocket(_ mount: Filesystem) -> Bool { mount.source.hasSuffix(".sock") }
+    private static let sockets: Set<Int> = [1, 2]
 
     @Test("a second bind of one socket onto the same file is left out; binds onto different files are kept")
     func redundant() {
         // Linked: both destinations are file 7.
-        let linked = StackedSocketBinds.redundant(in: Self.mounts, isSocket: Self.isSocket) { path in
+        let linked = StackedSocketBinds.redundant(in: Self.mounts, sockets: Self.sockets) { path in
             ["/var/run/docker.sock": 7, "/var/run/docker-host.sock": 7][path]
         }
         #expect(linked == [2])
         // Control: two files, as in an image without the feature, keep both.
-        let apart = StackedSocketBinds.redundant(in: Self.mounts, isSocket: Self.isSocket) { path in
+        let apart = StackedSocketBinds.redundant(in: Self.mounts, sockets: Self.sockets) { path in
             ["/var/run/docker.sock": 7, "/var/run/docker-host.sock": 8][path]
         }
         #expect(apart.isEmpty)
         // Nothing there yet: nothing to tell, so nothing is left out.
         let nowhere: (String) -> Int? = { _ in nil }
-        #expect(StackedSocketBinds.redundant(in: Self.mounts, isSocket: Self.isSocket, file: nowhere).isEmpty)
+        #expect(StackedSocketBinds.redundant(in: Self.mounts, sockets: Self.sockets, file: nowhere).isEmpty)
         // Different sockets onto one file are left as they are.
         var other = Self.mounts
         other[2].source = "/tmp/other.sock"
-        #expect(StackedSocketBinds.redundant(in: other, isSocket: Self.isSocket) { _ in 7 }.isEmpty)
+        #expect(StackedSocketBinds.redundant(in: other, sockets: Self.sockets) { _ in 7 }.isEmpty)
     }
 
     @Test("the files are read from the root filesystem image, through its symbolic links")
-    func readsTheImage() throws {
+    func readsTheImage() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "ssb-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -73,9 +74,9 @@ struct StackedSocketBindsTests {
             try formatter.close()
             return path
         }
-        let linked = StackedSocketBinds.removing(from: Self.mounts, rootfs: try image("linked.ext4", link: true), isSocket: Self.isSocket)
+        let linked = await StackedSocketBinds.removing(from: Self.mounts, rootfs: try image("linked.ext4", link: true), isSocket: Self.isSocket)
         #expect(linked.map(\.destination) == ["/workspaces", "/var/run/docker.sock"])
-        let plain = StackedSocketBinds.removing(from: Self.mounts, rootfs: try image("plain.ext4", link: false), isSocket: Self.isSocket)
+        let plain = await StackedSocketBinds.removing(from: Self.mounts, rootfs: try image("plain.ext4", link: false), isSocket: Self.isSocket)
         #expect(plain.map(\.destination) == Self.mounts.map(\.destination))
     }
 }
