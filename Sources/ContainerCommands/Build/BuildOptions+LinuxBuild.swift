@@ -116,15 +116,7 @@ extension BuildOptions {
 
             let imageNames = try Builder.normalizedTags(targetImageNames, containerSystemConfig: containerSystemConfig)
 
-            var terminal: Terminal?
-            switch self.progress {
-            case .tty:
-                terminal = try Terminal(descriptor: STDERR_FILENO)
-            case .auto:
-                terminal = try? Terminal(descriptor: STDERR_FILENO)
-            case .plain:
-                terminal = nil
-            }
+            let terminal = try Self.progressTerminal(self.progress, descriptor: STDERR_FILENO)
 
             defer { terminal?.tryReset() }
 

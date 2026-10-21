@@ -20,6 +20,7 @@ import ContainerBuild
 import ContainerLog
 import Containerization
 import ContainerizationOCI
+import ContainerizationOS
 import Foundation
 import Logging
 
@@ -31,6 +32,20 @@ public struct BuildOptions: ParsableArguments {
         case auto
         case plain
         case tty
+    }
+
+    /// The terminal BuildKit draws its progress on, or nil for plain lines. As Docker's
+    /// buildx: `auto` draws on standard error only when it is a terminal, so output that
+    /// is captured or piped gets plain lines; `tty` insists on one; `plain` never draws.
+    static func progressTerminal(_ progress: ProgressType, descriptor: Int32) throws -> Terminal? {
+        switch progress {
+        case .tty:
+            return try Terminal(descriptor: descriptor)
+        case .auto:
+            return isatty(descriptor) == 1 ? try? Terminal(descriptor: descriptor) : nil
+        case .plain:
+            return nil
+        }
     }
 
     public typealias SecretType = Builder.Secret
