@@ -379,10 +379,14 @@ struct UpTests {
         run.engine.addNetwork("proxy")
         #expect(
             await failure { try await run.project().up(try run.plan(yaml)) }
-                == "the volume shop_theirs is declared external and does not exist; create it with: container volume create shop_theirs")
-        run.engine.addVolume("shop_theirs")
+                == "the volume theirs is declared external and does not exist; create it with: container volume create theirs")
+        run.engine.addVolume("theirs")
         try await run.project().up(try run.plan(yaml))
         #expect(run.engine.calls == ["create shop-web-1", "start shop-web-1"], "what is someone else's is used, not made")
+        #expect(run.engine.arguments(of: "shop-web-1").contains("theirs:/data"))
+        try await run.project().down(removeVolumes: true)
+        #expect(run.engine.volumeNames == ["theirs"], "what is external is never the project's to remove")
+        #expect(run.engine.networkNames == ["proxy"])
     }
 
     @Test
