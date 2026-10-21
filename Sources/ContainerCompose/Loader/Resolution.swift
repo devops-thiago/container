@@ -37,8 +37,10 @@ struct Resolver {
         let networks = raw.networks.keys.sorted().map { key -> ComposeNetwork in
             let declared = raw.networks[key] ?? RawNetwork()
             var network = ComposeNetwork(key: key)
-            network.name = declared.name
             network.external = declared.external ?? false
+            // As Docker's compose: an external network is known by its own name, the key
+            // when it has no `name:`, never one made from the project's.
+            network.name = declared.name ?? (network.external ? key : nil)
             network.isInternal = declared.isInternal ?? false
             network.subnet = declared.subnet
             network.labels = declared.labels ?? [:]
@@ -47,8 +49,8 @@ struct Resolver {
         let volumes = raw.volumes.keys.sorted().map { key -> ComposeVolume in
             let declared = raw.volumes[key] ?? RawVolume()
             var volume = ComposeVolume(key: key)
-            volume.name = declared.name
             volume.external = declared.external ?? false
+            volume.name = declared.name ?? (volume.external ? key : nil)
             volume.labels = declared.labels ?? [:]
             return volume
         }

@@ -190,7 +190,7 @@ extension ProjectPlan {
         var networkNames: [String: String] = [:]
         for key in networkKeys.sorted() {
             let declared = file.networks.first { $0.key == key } ?? ComposeNetwork(key: key)
-            let name = declared.name ?? "\(definition.name)_\(key)"
+            let name = declared.name ?? (declared.external ? key : "\(definition.name)_\(key)")
             guard NetworkResource.nameValid(name) else {
                 diagnostics.error(
                     "networks.\(key)",
@@ -214,7 +214,7 @@ extension ProjectPlan {
         var volumeNames: [String: String] = [:]
         for key in volumeKeys.sorted() {
             let declared = file.volumes.first { $0.key == key } ?? ComposeVolume(key: key)
-            let name = declared.name ?? "\(definition.name)_\(key)"
+            let name = declared.name ?? (declared.external ? key : "\(definition.name)_\(key)")
             guard VolumeResource.nameValid(name) else {
                 diagnostics.error("volumes.\(key)", "'\(name)' is not a volume name: letters, digits, '.', '_' and '-', starting with a letter or digit")
                 continue

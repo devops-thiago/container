@@ -183,7 +183,7 @@ struct PlanTests {
                 NetworkPlan(
                     key: "edge", name: "edge-net", external: false, isInternal: false, subnet: "10.90.0.0/24",
                     labels: ["com.docker.compose.project": "shop", "com.docker.compose.network": "edge"]),
-                NetworkPlan(key: "shared", name: "shop_shared", external: true, isInternal: false, subnet: nil, labels: [:]),
+                NetworkPlan(key: "shared", name: "shared", external: true, isInternal: false, subnet: nil, labels: [:]),
             ], "only the networks a planned service uses")
         #expect(
             plan.volumes == [
@@ -193,8 +193,140 @@ struct PlanTests {
                 VolumePlan(
                     key: "renamed", name: "asset-archive", external: false,
                     labels: ["com.docker.compose.project": "shop", "com.docker.compose.volume": "renamed"]),
-                VolumePlan(key: "theirs", name: "shop_theirs", external: true, labels: [:]),
+                VolumePlan(key: "theirs", name: "theirs", external: true, labels: [:]),
             ])
+    }
+
+    /// Docker's compose names what is external by its own name: the `name:` when it has one,
+    /// else the key. Only what the project makes is named after the project.
+    @Test
+    func whatIsExternalKeepsItsOwnName() throws {
+        let plan = try plan(
+            """
+            services:
+              web:
+                image: web:1
+                volumes:
+                  - vscode:/vscode
+                  - archive:/srv/archive
+                  - legacy:/srv/legacy
+                  - data:/srv/data
+                networks: [proxy, edge, back]
+            networks:
+              proxy:
+                external: true
+              edge:
+                external: true
+                name: edge-net
+              back:
+            volumes:
+              vscode:
+                external: true
+              archive:
+                external: true
+                name: asset-archive
+              legacy:
+                external:
+                  name: old-archive
+              data:
+            """)
+        #expect(
+            plan.networks.map { "\($0.key) \($0.name) \($0.external)" } == [
+                "back shop_back false", "edge edge-net true", "proxy proxy true",
+            ])
+        #expect(
+            plan.volumes.map { "\($0.key) \($0.name) \($0.external)" } == [
+                "archive asset-archive true", "data shop_data false", "legacy old-archive true", "vscode vscode true",
+            ])
+        let web = try #require(plan.service("web"))
+        #expect(web.options.contains("vscode:/vscode"))
+        #expect(web.options.contains("shop_data:/srv/data"))
+        #expect(plan.volumes.filter(\.external).allSatisfy { $0.labels.isEmpty }, "nothing external is labelled as the project's")
+    }
+
+    /// VS Code Dev Containers runs `compose up` with the project's file and an override it
+    /// writes. This is that override as the extension wrote it, byte for byte.
+    @Test
+    func devContainersOverrideIsReadAsDockersComposeReadsIt() throws {
+        let override = """
+            services:
+              'app':
+                entrypoint: ["/bin/sh", "-c", "echo Container started\\n
+            trap \\"exit 0\\" 15\\n
+            /usr/local/share/docker-init.sh\\n
+            exec \\"$$@\\"\\n
+            while sleep 1 & wait $$!; do :; done", "-"]
+                environment:
+                  - 'JAVA_HOME=/usr/lib/jvm/msopenjdk-current'
+                security_opt:
+                  - label=disable
+                labels:
+                  - 'devcontainer.local_folder=/Users/me/6038_Desenvolvimento_Backend_com_IA_Essencial_Java'
+                  - 'devcontainer.config_file=/Users/me/6038_Desenvolvimento_Backend_com_IA_Essencial_Java/.devcontainer/devcontainer.json'
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker-host.sock
+                  - vscode:/vscode
+            volumes:
+              \("")
+              vscode:
+                external: true
+            """
+        let project = try TemporaryProject(
+            [
+                ".devcontainer/docker-compose.yml": """
+                services:
+                  app:
+                    image: mcr.microsoft.com/devcontainers/java:21
+                    command: sleep infinity
+                    volumes:
+                      - ..:/workspaces:cached
+                      - /var/run/docker.sock:/var/run/docker.sock
+                    depends_on:
+                      mysql:
+                        condition: service_healthy
+                    networks:
+                      - devcontainer-net
+
+                  mysql:
+                    image: mysql:8.0
+                    volumes:
+                      - mysql-data:/var/lib/mysql
+                    networks:
+                      - devcontainer-net
+
+                volumes:
+                  mysql-data:
+
+                networks:
+                  devcontainer-net:
+                    driver: bridge
+                """,
+                "override.yml": override,
+            ], named: "6038_Desenvolvimento_Backend_com_IA_Essencial_Java")
+        #expect(override.contains("volumes:\n  \n  vscode:"), "the blank line under volumes: carries two spaces, as the extension writes it")
+        let name = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer"
+        let plan = try ProjectPlan.make(
+            try project.load(files: [".devcontainer/docker-compose.yml", "override.yml"], name: name),
+            selection: .init(services: [], includesDependencies: true))
+        let app = try #require(plan.service("app"))
+        let script = [
+            "echo Container started", " trap \"exit 0\" 15", " /usr/local/share/docker-init.sh", " exec \"$@\"",
+            " while sleep 1 & wait $!; do :; done",
+        ].joined(separator: "\n")
+        #expect(app.options.contains("--entrypoint"))
+        #expect(app.options[try #require(app.options.firstIndex(of: "--entrypoint")) + 1] == "/bin/sh")
+        #expect(app.command == ["-c", script, "-", "sleep", "infinity"], "the project's command follows the override's entrypoint")
+        #expect(app.options.contains("JAVA_HOME=/usr/lib/jvm/msopenjdk-current"))
+        #expect(app.options.contains("devcontainer.local_folder=/Users/me/6038_Desenvolvimento_Backend_com_IA_Essencial_Java"))
+        #expect(app.options.contains("vscode:/vscode"))
+        #expect(app.options.contains("/var/run/docker.sock:/var/run/docker-host.sock"))
+        #expect(app.options.contains("/var/run/docker.sock:/var/run/docker.sock"))
+        #expect(
+            plan.volumes.map { "\($0.name) \($0.external)" } == [
+                "\(name)_mysql-data false", "vscode true",
+            ])
+        #expect(plan.networks.map(\.name) == ["\(name)_devcontainer-net"])
+        #expect(plan.warnings.map(\.message).contains { $0.hasPrefix("ignored: a container is confined") }, "security_opt is a warning")
     }
 
     @Test
