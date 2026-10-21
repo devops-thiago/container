@@ -139,6 +139,10 @@ public actor ContainersService {
     private var recentExits = RecentExits()
     /// Host directories a sandboxed embedder has granted, per container. Inert unsandboxed.
     private let hostDirectoryAccess: HostDirectoryAccess
+    /// Files uploaded into containers that are not running (the Docker API's `docker cp` and
+    /// Testcontainers' copy before a start), copied in by every start of the container,
+    /// whoever asks for it, before its init process runs.
+    private let pendingCopies: PendingCopyQueue
 
     // FIXME: Find a better mechanism for services running on the APIServer to work with each other
     private weak var networksService: NetworksService?
@@ -213,6 +217,10 @@ public actor ContainersService {
         self.labelPolicy = labelPolicy
         self.runtimePlugins = pluginLoader.findPlugins().filter { $0.hasType(.runtime) }
         self.hostDirectoryAccess = HostDirectoryAccess(log: log)
+        self.pendingCopies = PendingCopyQueue(appRoot: appRoot)
+        // No start is under way in an engine that is starting: what one took and never let go
+        // is put back for the next.
+        self.pendingCopies.releaseAll()
         self.containers = try Self.loadAtBoot(root: containerRoot, loader: pluginLoader, log: log)
     }
 
@@ -759,6 +767,8 @@ public actor ContainersService {
                 runtimeClient = try await RuntimeClient.create(id: id, runtime: runtime)
             }
             try await runtimeClient.bootstrap(stdio: stdio, networkBootstrapInfos: networkBootstrapInfos, dynamicEnv: dynamicEnv)
+            // Uploaded while it was not running: in place before anything runs in it.
+            try await self.copyInHeld(id: id, client: runtimeClient)
 
             let incarnation = state.snapshot.incarnation
             let run = UUID()
@@ -796,7 +806,31 @@ public actor ContainersService {
             if let label {
                 try? self.deregister(label)
             }
+            self.pendingCopies.release(id)
             throw error
+        }
+    }
+
+    /// Takes what is held for `id` and copies it in through its runtime, which has booted the
+    /// container and not started it. The queue stays taken until the run ends, so that an
+    /// upload after this is copied into the container rather than held for a start that has
+    /// already looked. The first upload that cannot be read, or entry that cannot be copied
+    /// in, fails the start naming it, and it and what follows stay held.
+    private func copyInHeld(id: String, client: RuntimeClient) async throws {
+        do {
+            try self.pendingCopies.claim(id)
+            try await self.pendingCopies.apply(id) { source, destination, mode, requester in
+                let path = source.path(percentEncoded: false)
+                let bookmark = try await Self.copyHostDirectoryBookmark(for: path, verb: "read") {
+                    await HostDirectoryGrants.shared.lend($0, requester: requester)
+                }
+                try await client.copyIn(source: path, destination: destination, mode: mode, createParents: true, hostDirectoryBookmark: bookmark)
+            }
+        } catch let failure as PendingCopyQueue.Failure {
+            self.log.error(
+                "could not copy in what was held for the start",
+                metadata: ["id": "\(id)", "upload": "\(failure.upload.path(percentEncoded: false))", "error": "\(failure.message)"])
+            throw ContainerizationError(.internalError, message: failure.message)
         }
     }
 
@@ -1788,6 +1822,8 @@ public actor ContainersService {
         state.client = nil
         state.run = nil
         state.endHealthWatch()
+        // The run is over: an upload from now on is held for the next start.
+        self.pendingCopies.release(id)
 
         // Decided before auto-remove, which applies only to a container that stays stopped.
         let end: ContainerRunEnd = waitFailed ? .lost : code.map { .exited($0.exitCode) } ?? .stopped
@@ -1993,6 +2029,7 @@ public actor ContainersService {
         state.run = nil
         state.exitRequested = false
         state.endHealthWatch()
+        self.pendingCopies.release(id)
         state.snapshot.status = .stopped
         state.snapshot.networks = []
         state.snapshot.restartError = String(describing: error)
@@ -2142,6 +2179,8 @@ public actor ContainersService {
         await self.hostDirectoryAccess.release(for: id)
         // And the addresses held for it since create: the container is going away.
         await self.networksService?.releaseAddresses(for: id)
+        // And whatever was uploaded into it for a start.
+        self.pendingCopies.drop(id)
 
         // Did the exit container handler win?
         if self.containers[id] == nil {
