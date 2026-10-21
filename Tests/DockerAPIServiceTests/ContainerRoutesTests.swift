@@ -273,11 +273,12 @@ struct ContainerRoutesTests {
     }
 
     let engine: FakeEngine
-    let identities = DockerIdentityStore(persistence: nil)
+    let identities: DockerIdentityStore
     let router: DockerRouter
 
-    init(snapshots: [ContainerSnapshot]) {
+    init(snapshots: [ContainerSnapshot], identities: DockerIdentityStore = DockerIdentityStore(persistence: nil)) {
         engine = FakeEngine(snapshots: snapshots)
+        self.identities = identities
         var router = DockerRouter()
         ContainerRoutes.register(
             on: &router, engine: engine, identities: identities, streams: DockerContainerStreams(engine: engine), now: { Fixtures.now })
