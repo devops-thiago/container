@@ -97,12 +97,23 @@ extension DockerAPIAgent {
             // Docker names and IDs outlive the agent here; the labels on the containers it made
             // bring them back should this go.
             let identities: DockerIdentityStore
+            let stateDirectory: URL
             do {
                 let stateRoot = try PluginStateRoot(plugin: Self.commandName).path
-                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: URL(fileURLWithPath: stateRoot.string, isDirectory: true)))
+                stateDirectory = URL(fileURLWithPath: stateRoot.string, isDirectory: true)
+                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: stateDirectory))
             } catch {
                 log.error("no state directory", metadata: ["error": "\(error)"])
                 DockerAPIAgent.exit(withError: error)
+            }
+            // Uploads into containers that are not running outlive the agent too, beside the
+            // identities, where the engine reads them when it copies them in.
+            let copies: DockerPendingCopies
+            do {
+                copies = try DockerPendingCopies(directory: stateDirectory.appending(path: "pending-copies", directoryHint: .isDirectory))
+            } catch {
+                log.error("could not keep uploads held for a start; holding them in memory", metadata: ["error": "\(error)"])
+                copies = DockerPendingCopies()
             }
             let engine = EngineContainersClient()
             // The engine's container events while anyone streams `/events`; for an engine
@@ -113,7 +124,8 @@ extension DockerAPIAgent {
             // it can, so that every client of it reads them.
             Task { await ContainerRoutes.moveLocalRenamesToEngine(engine: engine, identities: identities, log: log) }
             EventRoutes.register(on: &router, events: events)
-            let streams = DockerContainerStreams(engine: engine, log: log, events: events)
+            let streams = DockerContainerStreams(engine: engine, log: log, events: events, copies: copies)
+            Task { await streams.reconcileHeldCopies(engine: engine) }
             ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams, events: events)
             ContainerToolRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
             // The images service reads a loaded archive and writes a saved one itself, so both,
