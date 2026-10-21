@@ -2138,7 +2138,7 @@ public actor ContainersService {
                 return nil
             } catch let ungranted as HostDirectoryNotGranted where deferUngranted {
                 await self.engineStartFailed(id: id, error: ungranted, context: context)
-                return Set(state.snapshot.configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder))
+                return Set(Self.bindingEngineDockerSocket(state.snapshot.configuration).mounts.filter(\.isVirtiofs).map(\.sharedFolder))
             } catch {
                 await self.engineStartFailed(id: id, error: error, context: context)
                 return nil
@@ -2406,7 +2406,10 @@ public actor ContainersService {
     private func ensurePoolCoversBindMounts(
         of configuration: ContainerConfiguration, askEmbedder: Bool = true, requester: String? = nil
     ) async throws {
-        let sources = Set(configuration.mounts.filter(\.isVirtiofs).map(\.sharedFolder))
+        // A container created before binds of the host's Docker socket were the engine's still
+        // has the host's path: the runtime binds the engine's socket for it, so that is what
+        // needs no grant.
+        let sources = Set(Self.bindingEngineDockerSocket(configuration).mounts.filter(\.isVirtiofs).map(\.sharedFolder))
         for source in sources where !(await HostDirectoryGrants.shared.covers(source)) {
             guard askEmbedder else {
                 throw HostDirectoryNotGranted(source: source)

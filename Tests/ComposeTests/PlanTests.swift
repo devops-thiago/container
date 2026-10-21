@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 import Testing
 
@@ -421,6 +422,14 @@ struct LoweringTests {
         let plan = try ProjectPlan.make(try project.load())
         #expect(plan.services[0].options.contains("shop_default,alias=my.service"))
         #expect(plan.warnings.map(\.message) == ["'not valid!' cannot be a name on a network; the other services reach this one as shop-my.service-1"])
+
+        // A container named longer than a hostname is reached by its short ID, its hostname.
+        let longName = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer"
+        let long = try TemporaryProject(
+            ["compose.yaml": "services:\n  app:\n    image: a\n    networks:\n      default:\n        aliases: [\"not valid!\"]\n"], named: longName)
+        let longPlan = try ProjectPlan.make(try long.load())
+        let short = ContainerHostname.shortID(for: "\(longName)-app-1")
+        #expect(longPlan.warnings.map(\.message) == ["'not valid!' cannot be a name on a network; the other services reach this one as \(short)"])
     }
 
     @Test

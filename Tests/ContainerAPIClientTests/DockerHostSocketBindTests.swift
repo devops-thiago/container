@@ -14,7 +14,6 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import ContainerPersistence
 import ContainerResource
 import ContainerizationError
 import Foundation
@@ -22,86 +21,119 @@ import Testing
 
 @testable import ContainerAPIClient
 
-/// A bind of the host's Docker socket, as `container run -v` and `--mount`, and Compose through
-/// them, give it. Docker Desktop mounts its engine's socket for it; this engine mounts its own,
-/// and never what the host has at that path, which on a Mac with Docker Desktop is Docker
-/// Desktop's.
-struct DockerHostSocketBindTests {
-    /// A unix socket something listens on, in a folder of its own.
-    private final class ServedSocket {
-        let directory: URL
-        let path: String
-        private let descriptor: Int32
+/// A unix socket in a folder of its own: listening, or left behind by a server that stopped.
+final class TestSocket {
+    let directory: URL
+    let path: String
+    private var descriptor: Int32
 
-        init() throws {
-            directory = FileManager.default.temporaryDirectory.appending(path: "dhs-\(UUID().uuidString.prefix(8))")
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            path = directory.appending(path: "docker.sock").path
-            descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-            var address = sockaddr_un()
-            address.sun_family = sa_family_t(AF_UNIX)
-            let bytes = Array(path.utf8)
-            withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
-            let bound = withUnsafePointer(to: &address) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-            }
-            guard bound == 0, listen(descriptor, 1) == 0 else { throw POSIXError(.EADDRNOTAVAIL) }
+    init(listening: Bool = true) throws {
+        directory = FileManager.default.temporaryDirectory.appending(path: "dhs-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        path = directory.appending(path: "d.sock").path
+        descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-
-        deinit {
+        guard bound == 0 else { throw POSIXError(.EADDRNOTAVAIL) }
+        if listening {
+            guard listen(descriptor, 1) == 0 else { throw POSIXError(.EADDRNOTAVAIL) }
+        } else {
+            // The file stays; nothing answers on it.
             close(descriptor)
-            try? FileManager.default.removeItem(at: directory)
+            descriptor = -1
         }
     }
 
-    @Test("the host's Docker socket binds the engine's", arguments: ["/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock"])
-    func mapsTheHostSocket(path: String) throws {
-        let served = try ServedSocket()
-        #expect(try Parser.bindSource(path, enginePath: served.path) == served.path)
+    /// A symbolic link to this socket, beside it.
+    func link(named name: String) throws -> String {
+        let link = directory.appending(path: name).path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: path)
+        return link
     }
 
-    @Test("with nothing serving the engine's socket, the bind is refused, never made of the host's")
+    deinit {
+        if descriptor >= 0 { close(descriptor) }
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+/// A bind of the host's Docker socket, as `container run -v` and `--mount`, and Compose through
+/// them, give it, in any spelling or through any link: it mounts the engine's own socket, never
+/// the host's (Docker Desktop's on a Mac that has it). The host's sockets here are test sockets;
+/// nothing touches the real /var/run/docker.sock.
+struct DockerHostSocketBindTests {
+    /// The engine's socket, answering or not, and a stand-in for the host's Docker socket.
+    private static func binding(engine: TestSocket, host: TestSocket, answering: Bool = true) -> DockerSocketBinding {
+        let path = engine.path
+        return DockerSocketBinding(enginePath: { path }, home: "/Users/me", hostSockets: [host.path], answers: { _ in answering })
+    }
+
+    @Test(
+        "every spelling of the host's Docker socket binds the engine's",
+        arguments: [
+            "/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock", "/VAR/run/docker.sock", "/var/run/Docker.sock",
+            "/Private/Var/Run/Docker.Sock", "/var/run/../run/docker.sock", "/Users/me/.docker/run/docker.sock", "/users/ME/.Docker/run/docker.sock",
+        ])
+    func spellings(path: String) throws {
+        let engine = try TestSocket()
+        let host = try TestSocket()
+        #expect(try Self.binding(engine: engine, host: host).bindSource(path) == engine.path)
+    }
+
+    @Test("the host's socket by another path, or through a link to it, binds the engine's")
+    func sameFile() throws {
+        let engine = try TestSocket()
+        let host = try TestSocket()
+        let binding = Self.binding(engine: engine, host: host)
+        #expect(try binding.bindSource(host.path) == engine.path)
+        #expect(try binding.bindSource(try host.link(named: "my-docker.sock")) == engine.path)
+    }
+
+    @Test("other sockets and paths bind as they are")
+    func others() throws {
+        let engine = try TestSocket()
+        let host = try TestSocket()
+        let other = try TestSocket()
+        let binding = Self.binding(engine: engine, host: host)
+        for path in [other.path, try other.link(named: "other.sock"), "/var/run", "/var/run/docker.sock.d", "/tmp/docker.sock", "/Users/someone/.docker/run/docker.sock"] {
+            #expect(try binding.bindSource(path) == path)
+        }
+    }
+
+    @Test("with nothing answering on the engine's socket, the bind is refused, never made of the host's")
     func refusesWhenNotServed() throws {
-        let missing = FileManager.default.temporaryDirectory.appending(path: "dhs-none-\(UUID().uuidString.prefix(8))/docker.sock").path
+        let engine = try TestSocket()
+        let host = try TestSocket()
         #expect {
-            _ = try Parser.bindSource("/var/run/docker.sock", enginePath: missing)
+            _ = try Self.binding(engine: engine, host: host, answering: false).bindSource("/var/run/docker.sock")
         } throws: { error in
             (error as? ContainerizationError)?.message == DockerHostSocket.notServedMessage
         }
-        // A plain file where the socket would be is not a socket being served either.
-        let served = try ServedSocket()
-        let file = served.directory.appending(path: "plain").path
-        FileManager.default.createFile(atPath: file, contents: Data())
-        #expect(throws: ContainerizationError.self) { _ = try Parser.bindSource("/var/run/docker.sock", enginePath: file) }
     }
 
-    @Test("every other path binds as it is")
-    func leavesOtherPaths() throws {
-        for path in ["/Users/me/.docker/run/docker.sock", "/var/run", "/var/run/docker.sock.d", "/tmp/docker.sock"] {
-            #expect(try Parser.bindSource(path, enginePath: "/nowhere/docker.sock") == path)
-        }
-    }
-
-    /// The parsers as `run` calls them, with the engine's real socket path: they mount that, or
-    /// refuse, whatever the host has at /var/run/docker.sock.
-    @Test("-v and --mount of the host's Docker socket never mount the host's")
-    func parsersNeverMountTheHostSocket() throws {
-        let engine = PathUtils.dockerSocketPath()
-        let forms: [() throws -> VolumeOrFilesystem] = [
-            { try Parser.volume("/var/run/docker.sock:/var/run/docker.sock") },
-            { try Parser.volume("/var/run/docker.sock:/var/run/docker-host.sock:ro") },
-            { try Parser.mount("type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock") },
+    @Test("-v and --mount bind the engine's socket for the host's, and refuse when it does not answer")
+    func parsers() throws {
+        let engine = try TestSocket()
+        let host = try TestSocket()
+        let served = Self.binding(engine: engine, host: host)
+        let forms: [(DockerSocketBinding) throws -> VolumeOrFilesystem] = [
+            { try Parser.volume("/var/run/docker.sock:/var/run/docker.sock", dockerSocket: $0) },
+            { try Parser.volume("/VAR/run/docker.sock:/var/run/docker-host.sock:ro", dockerSocket: $0) },
+            { try Parser.mount("type=bind,source=/Users/me/.docker/run/docker.sock,target=/var/run/docker.sock", dockerSocket: $0) },
+            { try Parser.volume("\(host.path):/var/run/docker.sock", dockerSocket: $0) },
         ]
         for form in forms {
-            do {
-                guard case .filesystem(let filesystem) = try form() else {
-                    Issue.record("a bind became a volume")
-                    continue
-                }
-                #expect(filesystem.source == engine)
-            } catch let error as ContainerizationError {
-                #expect(error.message == DockerHostSocket.notServedMessage)
+            guard case .filesystem(let filesystem) = try form(served) else {
+                Issue.record("a bind became a volume")
+                continue
             }
+            #expect(filesystem.source == engine.path)
+            #expect(throws: ContainerizationError.self) { _ = try form(Self.binding(engine: engine, host: host, answering: false)) }
         }
     }
 }
