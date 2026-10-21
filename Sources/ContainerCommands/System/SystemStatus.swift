@@ -20,6 +20,8 @@ import ContainerPlugin
 import ContainerResource
 import ContainerVersion
 import ContainerizationError
+import DockerAPIEngine
+import DockerAPIService
 import Foundation
 import Logging
 
@@ -34,14 +36,26 @@ extension Application {
         var prefix: String = ServiceIdentity.machPrefix
 
         @Option(name: .long, help: "Format of the output")
-        var format: ListFormat = .table
+        var format: FormatOrTemplate = .format(.table)
 
         @OptionGroup
         public var logOptions: Flags.Logging
 
         public init() {}
 
+        public func validate() throws {
+            _ = try format.dockerTemplate()
+        }
+
         public func run() async throws {
+            if let template = try format.dockerTemplate() {
+                // `docker info --format`: the engine as the Docker API's `/info` reports it, for
+                // tools that read its CPUs and memory (Dev Containers' host requirements).
+                let summary = try await EngineSystemClient().summary()
+                print(try template.render(SystemRoutes.InfoBody(summary)))
+                return
+            }
+            guard case .format(let format) = format else { return }
             let domain = try ServiceManager.getDomainString()
             let isRegistered = (try? ServiceManager.isRegistered(fullServiceLabel: "\(domain)/\(prefix)apiserver")) ?? true
             if !isRegistered {

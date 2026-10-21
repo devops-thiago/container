@@ -156,6 +156,8 @@ let package = Package(
                 "ContainerVersion",
                 .product(name: "SystemPackage", package: "swift-system"),
                 "ContainerXPC",
+                "DockerAPIEngine",
+                "DockerAPIService",
                 "MachineAPIClient",
                 "RegistryTransport",
                 "TerminalProgress",
@@ -207,10 +209,12 @@ let package = Package(
             name: "ContainerCommandsTests",
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerAPIClient",
                 "ContainerCommands",
                 "ContainerResource",
+                "DockerAPIService",
             ]
         ),
         .testTarget(
@@ -706,6 +710,16 @@ let package = Package(
             ],
             path: "Sources/Services/DockerAPIService"
         ),
+        .target(
+            name: "DockerAPIEngine",
+            dependencies: [
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                "ContainerAPIClient",
+                "ContainerResource",
+                "DockerAPIService",
+            ],
+            path: "Sources/Services/DockerAPIEngine"
+        ),
         .executableTarget(
             name: "container-docker-api",
             dependencies: [
@@ -723,6 +737,7 @@ let package = Package(
                 "ContainerPersistence",
                 "ContainerPlugin",
                 "ContainerVersion",
+                "DockerAPIEngine",
                 "DockerAPIService",
                 "TerminalProgress",
             ],

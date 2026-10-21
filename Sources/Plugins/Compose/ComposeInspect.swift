@@ -271,7 +271,7 @@ struct ComposeVersion: ParsableCommand {
 
     @ParentCommand var compose: ComposeCommand
 
-    @Flag(name: .long, help: "Print the version number and nothing else")
+    @Flag(name: .long, help: "Print the Docker Compose version this compose answers as, and nothing else")
     var short = false
 
     @Option(name: .long, help: "How to print it: pretty or json (also -f, as other compose tools spell it)")

@@ -518,6 +518,11 @@ public struct Parser {
             case "readonly", "ro":
                 key = "ro"
                 skipValue = true
+            case "consistency":
+                // Docker Desktop's bind consistency (cached, delegated, consistent), which tools
+                // add on macOS: a virtiofs share has one behaviour, so it is accepted and means
+                // nothing, as on Linux.
+                continue
             default:
                 throw ContainerizationError(.invalidArgument, message: "unknown directive \(key) when parsing mount \(mount)")
             }

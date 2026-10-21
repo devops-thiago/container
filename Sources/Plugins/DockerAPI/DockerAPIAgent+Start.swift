@@ -18,6 +18,7 @@ import ArgumentParser
 import ContainerLog
 import ContainerPersistence
 import ContainerPlugin
+import DockerAPIEngine
 import DockerAPIService
 import Foundation
 import Logging
