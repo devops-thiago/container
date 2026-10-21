@@ -86,7 +86,12 @@ public struct ProcessIO: Sendable {
 
     /// - Parameter launcherSetsRaw: the SiliconShip launcher's terminal-mode probe answers raw
     ///   for this invocation, so a current launcher sets the terminal raw before the CLI starts.
-    public static func create(tty: Bool, interactive: Bool, detach: Bool, launcherSetsRaw: Bool = false) throws -> ProcessIO {
+    /// - Parameter streams: the only streams to attach (`run -a`); every one when empty.
+    public static func create(
+        tty: Bool, interactive: Bool, detach: Bool, launcherSetsRaw: Bool = false, streams: [Flags.Management.AttachStream] = []
+    ) throws -> ProcessIO {
+        let attached = { (stream: Flags.Management.AttachStream) in streams.isEmpty || streams.contains(stream) }
+        let interactive = interactive && attached(.stdin)
         var rawConsole = false
         let current: Terminal? = try {
             if detach || !tty || !interactive {
@@ -131,7 +136,7 @@ public struct ProcessIO: Sendable {
         }
 
         let stdout: Pipe? = {
-            if detach {
+            if detach || !attached(.stdout) {
                 return nil
             }
             return Pipe()
@@ -162,7 +167,7 @@ public struct ProcessIO: Sendable {
         }
 
         let stderr: Pipe? = {
-            if detach || tty {
+            if detach || tty || !attached(.stderr) {
                 return nil
             }
             return Pipe()
@@ -204,7 +209,13 @@ public struct ProcessIO: Sendable {
         )
     }
 
-    public func handleProcess(process: ClientProcess, log: Logger) async throws -> Int32 {
+    /// - Parameter proxySignals: forward the signals this process receives to the container's
+    ///   process. Without it (Docker's `--sig-proxy=false`) they act on this process alone, and a
+    ///   signal that ends it leaves the container running.
+    public func handleProcess(process: ClientProcess, log: Logger, proxySignals: Bool = true) async throws -> Int32 {
+        guard proxySignals else {
+            return try await handleProcess(process: process, log: log, signalStream: AsyncStream { $0.finish() })
+        }
         let signals = AsyncSignalHandler.create(notify: Self.signalSet)
         return try await handleProcess(process: process, log: log, signalStream: signals.signals)
     }

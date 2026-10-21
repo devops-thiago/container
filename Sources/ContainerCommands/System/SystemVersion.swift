@@ -17,6 +17,7 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerVersion
+import DockerAPIService
 import Foundation
 
 extension Application {
@@ -27,14 +28,23 @@ extension Application {
         )
 
         @Option(name: .long, help: "Format of the output")
-        var format: ListFormat = .table
+        var format: FormatOrTemplate = .format(.table)
 
         @OptionGroup
         public var logOptions: Flags.Logging
 
         public init() {}
 
+        public func validate() throws {
+            _ = try format.dockerTemplate()
+        }
+
         public func run() async throws {
+            if let template = try format.dockerTemplate() {
+                try await Self.printDockerVersion(template)
+                return
+            }
+            guard case .format(let format) = format else { return }
             let cliInfo = VersionInfo(
                 version: ReleaseVersion.version(),
                 buildType: ReleaseVersion.buildType(),
@@ -63,6 +73,17 @@ extension Application {
             }
         }
 
+        /// `docker version --format`: the client and the engine as Docker's CLI reports them, the
+        /// engine with the versions the Docker API reports (`GET /version`). Tools read the
+        /// engine's API version from it (`{{.Server.ApiVersion}}`) to tell what it speaks.
+        static func printDockerVersion(_ template: DockerTemplate) async throws {
+            let health = try await ClientHealthCheck.ping(timeout: .seconds(2))
+            let report = DockerVersionReport(
+                Client: .init(version: ReleaseVersion.version(), commit: ReleaseVersion.gitCommit() ?? ""),
+                Server: SystemRoutes.VersionBody(engineVersion: health.apiServerVersion, engineCommit: health.apiServerCommit))
+            print(try template.render(report))
+        }
+
         private static func versionTable(_ versions: [VersionInfo]) -> String {
             let header = ["COMPONENT", "VERSION", "BUILD", "COMMIT"]
             let rows = [header] + versions.map { [$0.appName, $0.version, $0.buildType, $0.commit] }
@@ -76,4 +97,34 @@ extension Application {
         let commit: String
         let appName: String
     }
+}
+
+/// What `docker version` reports, for its `--format` templates.
+struct DockerVersionReport: Encodable {
+    struct ClientBody: Encodable {
+        struct PlatformBody: Encodable { let Name: String }
+        let Platform: PlatformBody
+        let Version: String
+        let ApiVersion: String
+        let DefaultAPIVersion: String
+        let GitCommit: String
+        let GoVersion: String
+        let Os: String
+        let Arch: String
+
+        /// This CLI, at the API version the engine's Docker API speaks.
+        init(version: String, commit: String) {
+            Platform = PlatformBody(Name: "container")
+            Version = version
+            ApiVersion = DockerAPIVersion.current.description
+            DefaultAPIVersion = DockerAPIVersion.current.description
+            GitCommit = commit
+            GoVersion = ""
+            Os = "darwin"
+            Arch = "arm64"
+        }
+    }
+
+    let Client: ClientBody
+    let Server: SystemRoutes.VersionBody
 }

@@ -25,9 +25,21 @@ struct VersionReportTests {
     @Test
     func theVersionIsASentenceANumberOrJSON() {
         #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: false, format: .pretty) == line)
-        #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: true, format: .pretty) == "1.4.1")
+        #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: true, format: .pretty) == "2.8.0")
         #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: false, format: .json) == #"{"version":"1.4.1"}"#)
-        #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: true, format: .json) == "1.4.1", "short is the number, whatever the format")
+        #expect(ComposeVersionReport.render(line: line, version: "1.4.1", short: true, format: .json) == "2.8.0", "short is the number, whatever the format")
+    }
+
+    /// Dev Containers reads `compose version --short` as a Docker Compose release: below 2 it
+    /// drops `--profile *`, below 1.21 it strips `-` and `_` from project names, below 2.8 it
+    /// names a built image `project_service`, and from 2.17 it sends `additional_contexts`.
+    @Test
+    func shortIsADockerComposeReleaseInTheWindowThisComposeMatches() throws {
+        let short = ComposeVersionReport.render(line: line, version: "1.5.0-172-g45bb8248", short: true, format: .pretty)
+        let parts = try short.split(separator: ".").map { try #require(Int($0)) }
+        #expect(parts.count == 3)
+        #expect(parts.lexicographicallyPrecedes([2, 8, 0]) == false, "image names use a dash")
+        #expect(parts.lexicographicallyPrecedes([2, 17, 0]), "additional_contexts are refused here")
     }
 
     @Test

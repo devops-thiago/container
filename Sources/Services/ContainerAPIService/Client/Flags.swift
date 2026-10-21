@@ -330,7 +330,7 @@ public struct Flags {
             health: Flags.Health = .none
         ) {
             self.addHosts = addHosts
-            self.arch = arch
+            self.archOrStreams = [arch]
             self.capAdd = capAdd
             self.capDrop = capDrop
             self.cidfile = cidfile
@@ -377,8 +377,42 @@ public struct Flags {
         )
         public var addHosts: [String] = []
 
-        @Option(name: .shortAndLong, help: "Set arch if image can target multiple architectures")
-        public var arch: String = Arch.hostArchitecture().rawValue
+        /// `-a` and `--arch`, which also take Docker's `-a` (`--attach`): a stream name is that,
+        /// any other value the arch. No arch is named after a stream.
+        @Option(
+            name: [.customShort("a"), .customLong("arch")],
+            help: .init("Set arch if image can target multiple architectures", valueName: "arch"))
+        public var archOrStreams: [String] = [Arch.hostArchitecture().rawValue]
+
+        /// The arch asked for, the last one given; the host's when none was.
+        public var arch: String {
+            archOrStreams.last { AttachStream(rawValue: $0.lowercased()) == nil } ?? Arch.hostArchitecture().rawValue
+        }
+
+        /// Docker's `--attach`: the streams to attach to, rather than all of them.
+        @Option(name: .customLong("attach"), help: .hidden)
+        public var attach: [String] = []
+
+        /// The streams `-a` and `--attach` name. Empty when neither did: all are attached then.
+        public var attachStreams: [AttachStream] {
+            get throws {
+                let named = archOrStreams.compactMap { AttachStream(rawValue: $0.lowercased()) }
+                return try named
+                    + attach.map { value in
+                        guard let stream = AttachStream(rawValue: value.lowercased()) else {
+                            throw ValidationError("invalid argument \"\(value)\" for \"-a, --attach\" flag: valid streams are STDIN, STDOUT and STDERR")
+                        }
+                        return stream
+                    }
+            }
+        }
+
+        /// A stream Docker's `--attach` names, in any case.
+        public enum AttachStream: String, Sendable, CaseIterable {
+            case stdin
+            case stdout
+            case stderr
+        }
 
         @Option(
             name: .customLong("cap-add"),
@@ -667,8 +701,6 @@ public struct Flags {
         public var deviceWriteBps: [String] = []
         @Option(name: .customLong("device-write-iops"), help: .hidden)
         public var deviceWriteIops: [String] = []
-        @Option(name: .customLong("attach"), help: .hidden)
-        public var attach: [String] = []
         @Option(name: .customLong("annotation"), help: .hidden)
         public var annotation: [String] = []
         @Option(name: .customLong("label-file"), help: .hidden)
@@ -724,7 +756,6 @@ public struct Flags {
             if !deviceReadIops.isEmpty { names.append("--device-read-iops") }
             if !deviceWriteBps.isEmpty { names.append("--device-write-bps") }
             if !deviceWriteIops.isEmpty { names.append("--device-write-iops") }
-            if !attach.isEmpty { names.append("--attach") }
             if !annotation.isEmpty { names.append("--annotation") }
             if !labelFile.isEmpty { names.append("--label-file") }
             if !volumesFrom.isEmpty { names.append("--volumes-from") }

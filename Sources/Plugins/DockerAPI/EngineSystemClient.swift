@@ -28,10 +28,9 @@ struct EngineSystemClient: EngineSystem {
         return EngineSummary(
             engineVersion: health.apiServerVersion,
             engineCommit: health.apiServerCommit,
-            // Each container boots its own VM; there is no one kernel to name.
-            kernelVersion: "",
+            kernelVersion: EngineSummary.kernelVersion,
             operatingSystem: "SiliconShip",
-            architecture: "aarch64",
+            architecture: EngineSummary.architecture,
             cpus: ProcessInfo.processInfo.activeProcessorCount,
             memoryBytes: Int64(clamping: ProcessInfo.processInfo.physicalMemory),
             containers: containers.count,

@@ -18,6 +18,11 @@ import NIOHTTP1
 
 /// What `/version` and `/info` report about the engine behind the API.
 public struct EngineSummary: Sendable, Equatable {
+    /// The architecture reported: every container runs in an arm64 VM.
+    public static let architecture = "aarch64"
+    /// Each container boots its own VM; there is no one kernel to name.
+    public static let kernelVersion = ""
+
     public var engineVersion: String
     public var engineCommit: String
     public var kernelVersion: String
@@ -83,28 +88,41 @@ public enum SystemRoutes {
         return .data(status: .ok, contentType: "text/plain; charset=utf-8", body: .init(string: "OK"), headers: headers)
     }
 
-    struct VersionBody: Encodable {
+    /// `/version`'s body, which `container version --format` also prints as `Server`.
+    public struct VersionBody: Encodable, Sendable {
         /// The component that carries the engine's own version.
         static let engineComponent = "SiliconShip Engine"
 
-        struct PlatformBody: Encodable { let Name: String }
-        struct ComponentBody: Encodable {
-            let Name: String
-            let Version: String
-            let Details: [String: String]
+        public struct PlatformBody: Encodable, Sendable { public let Name: String }
+        public struct ComponentBody: Encodable, Sendable {
+            public let Name: String
+            public let Version: String
+            public let Details: [String: String]
         }
-        let Platform: PlatformBody
-        let Components: [ComponentBody]
-        let Version: String
-        let ApiVersion: String
-        let MinAPIVersion: String
-        let GitCommit: String
-        let GoVersion: String
-        let Os: String
-        let Arch: String
-        let KernelVersion: String
+        public let Platform: PlatformBody
+        public let Components: [ComponentBody]
+        public let Version: String
+        public let ApiVersion: String
+        public let MinAPIVersion: String
+        public let GitCommit: String
+        public let GoVersion: String
+        public let Os: String
+        public let Arch: String
+        public let KernelVersion: String
 
         init(_ engine: EngineSummary) {
+            self.init(
+                engineVersion: engine.engineVersion, engineCommit: engine.engineCommit, architecture: engine.architecture,
+                kernelVersion: engine.kernelVersion)
+        }
+
+        /// What `/version` reports for an engine at `engineVersion`: only the versions, not
+        /// the counts `/info` needs.
+        public init(
+            engineVersion: String, engineCommit: String, architecture: String = EngineSummary.architecture,
+            kernelVersion: String = EngineSummary.kernelVersion
+        ) {
+            let engine = (engineVersion: engineVersion, engineCommit: engineCommit, architecture: architecture, kernelVersion: kernelVersion)
             Platform = PlatformBody(Name: "SiliconShip")
             // `Engine` is dockerd's component, at the server's Version as dockerd has it; the
             // engine's own version is a component of its own, which Docker clients list as

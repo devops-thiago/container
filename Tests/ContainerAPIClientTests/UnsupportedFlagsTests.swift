@@ -59,7 +59,7 @@ struct UnsupportedFlagsTests {
             "cpuset-cpus", "cpuset-mems", "blkio-weight", "pids-limit", "detach-keys", "volume-driver", "device",
             "device-cgroup-rule", "security-opt", "log-opt", "storage-opt", "link", "expose", "group-add",
             "blkio-weight-device", "device-read-bps", "device-read-iops", "device-write-bps",
-            "device-write-iops", "attach", "annotation", "label-file", "volumes-from",
+            "device-write-iops", "annotation", "label-file", "volumes-from",
         ]
         for flag in valued { arguments += ["--\(flag)", "x"] }
         let parsed = try Flags.Unsupported.parse(arguments)
@@ -67,6 +67,14 @@ struct UnsupportedFlagsTests {
         let management = try Flags.Management.parse(["--name", "n", "--hostname", "h", "--health-cmd", "true", "--health-retries", "2"])
         #expect(management.name == "n")
         #expect(management.health.command == "true")
+    }
+
+    @Test("--attach is honoured now (run -a STDOUT), so it is not among these")
+    func attachIsNotUnsupported() throws {
+        #expect(throws: (any Error).self) { try Flags.Unsupported.parse(["--attach", "stdout"]) }
+        let management = try Flags.Management.parse(["--attach", "STDOUT", "-a", "stderr", "-a", "amd64"])
+        #expect(try management.attachStreams == [.stderr, .stdout])
+        #expect(management.arch == "amd64")
     }
 
     @Test("the health flags are honoured now, so they are not among these")

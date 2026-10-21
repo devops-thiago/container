@@ -120,9 +120,10 @@ merge keys (`<<`) work.
 `container compose config --commands` prints the `container` commands that would make it
 by hand.
 
-`container compose version` prints the version, as `--version` does. `--short` prints the
-number alone and `--format json` prints it as JSON, for a script that checks for compose
-before it uses it.
+`container compose version` prints the version, as `--version` does, and `--format json`
+prints it as JSON, for a script that checks for compose before it uses it. `--short` prints
+the Docker Compose release this compose answers as (2.8.0), the number tools that drive
+`docker compose` read to decide what to ask for.
 
 ## What this engine does differently
 

@@ -13,6 +13,8 @@ Command availability may vary depending on your macOS version.
 
 Runs a container from an image. If a command is provided, it will execute inside the container; otherwise the image's default command runs. By default the container runs in the foreground and stdin remains closed unless `-i`/`--interactive` is specified.
 
+Docker's spellings of two run options are taken as well, for tools that drive the Docker CLI. `-a` with a stream name (`STDIN`, `STDOUT` or `STDERR`, in any case) is Docker's `--attach`: only the streams named are attached. With any other value `-a` is `--arch`. `--sig-proxy=false` keeps the signals this command receives to itself, so stopping it leaves the container running. Docker Desktop's `consistency=` on a `--mount` is accepted and means nothing here.
+
 **Usage**
 
 ```bash
@@ -558,10 +560,12 @@ container logs [--boot] [--follow] [-n <n>] [--debug] <container-id>
 
 Displays detailed container information in JSON. Pass one or more container IDs to inspect multiple containers.
 
+With `--type` or `--format`, it prints Docker's view of each object instead, the one the Docker API shows (`Id`, `State`, `Config`, `Mounts`, `NetworkSettings` for a container), for tools that drive the Docker CLI. A container's `Id` there is its ID here. Without `--type` a name is looked up as a container, then an image, then a volume. Objects that are found are printed before the command fails for the names that are not.
+
 **Usage**
 
 ```bash
-container inspect [--debug] <container-ids> ...
+container inspect [--debug] [--type <type>] [--format <format>] <container-ids> ...
 ```
 
 **Arguments**
@@ -570,7 +574,10 @@ container inspect [--debug] <container-ids> ...
 
 **Options**
 
-No options.
+*   `--type <type>`: Print Docker's view of each: container, image or volume
+*   `-f, --format <format>`: Print Docker's view of each through a Go template, such as `{{json .}}` or `{{.State.Status}}`, one line each; `json` prints the JSON array
+
+The templates take fields (`{{.Config.Image}}`), `json` of a field or of the whole object, and `{{-`/`-}}` trimming. Other template actions are refused.
 
 ### `container stats`
 
@@ -1491,6 +1498,8 @@ container system status [--prefix <prefix>] [--format <format>] [--debug]
 
 Shows version information for the CLI and, if available, the API server. The table format is consistent with other list outputs and includes a header. If the API server responds to a health check, a second row for the server is added.
 
+`--format` also takes a Go template, as `docker version --format` does: the template sees `Client` and `Server`, with `Server` the versions the Docker API reports (`{{.Server.Version}}` is the Docker release whose API the engine serves, `{{.Server.ApiVersion}}` that API's version). This form needs the API server. `container -v` prints the line `container --version` prints.
+
 **Usage**
 
 ```bash
@@ -1569,6 +1578,27 @@ appName = "container-apiserver"
 buildType = "release"
 commit = "1234abcdef"
 version = "container-apiserver version 1.2.3 (build: release, commit: 1234abc)"
+```
+
+### `container events`
+
+Prints the engine's container events as they happen, until stopped, as `docker events` prints them: the action (`create`, `start`, `die`, `destroy` and the others the Docker API reports), the container's ID here, and its labels, image and name as attributes.
+
+**Usage**
+
+```bash
+container events [--filter <filter> ...] [--format <format>] [--debug]
+```
+
+**Options**
+
+*   `-f, --filter <filter>`: Filter events (format: key=value, such as `event=start`, `type=container`, `container=<id>` or `label=key=value`), matched as `docker events` matches them
+*   `--format <format>`: Print each event as `json`, or through a Go template, such as `{{json .}}`
+
+**Example**
+
+```bash
+container events --format '{{json .}}' --filter event=start --filter label=app=web
 ```
 
 ### `container system logs`

@@ -109,6 +109,11 @@ public struct Application: AsyncLoggableCommand {
         let fullArgs = CommandLine.arguments
         let args = Array(fullArgs.dropFirst())
 
+        if let version = Self.dockerVersionFlag(args) {
+            print(version)
+            return
+        }
+
         do {
             var command = try Application.parseAsRoot(args)
             if var asyncCommand = command as? AsyncParsableCommand {
@@ -133,6 +138,13 @@ public struct Application: AsyncLoggableCommand {
                 Application.exit(withError: error)
             }
         }
+    }
+
+    /// What `container -v` prints: `-v` alone is Docker's `--version`, which tools that drive
+    /// the Docker CLI run first. Anywhere else `-v` belongs to the command it follows
+    /// (`run -v` is a volume), and nil is returned.
+    static func dockerVersionFlag(_ arguments: [String]) -> String? {
+        arguments == ["-v"] ? configuration.version : nil
     }
 
     /// Load the system configuration using `appRoot` / `installRoot` reported by the
@@ -171,12 +183,14 @@ public struct Application: AsyncLoggableCommand {
         guard #available(macOS 26, *) else {
             return [
                 BuilderCommand.self,
+                ContainerEvents.self,
                 SystemCommand.self,
             ] + Application.systemRootSpellings
         }
 
         return [
             BuilderCommand.self,
+            ContainerEvents.self,
             NetworkCommand.self,
             SystemCommand.self,
         ] + Application.systemRootSpellings

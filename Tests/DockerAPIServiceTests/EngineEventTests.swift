@@ -179,6 +179,28 @@ struct EngineEventTests {
         #expect(DockerEventBus.dockerEvent(forged)?.actorID == DockerIdentityTable.foreignID(engineID: "my-app"))
     }
 
+    @Test("a bus asked to name containers by their engine ID does, for the engine's events and its readings alike")
+    func engineIDs() async throws {
+        let feed = Feed()
+        let bus = DockerEventBus(limits: .init(engineRecheck: .milliseconds(50)), feed: feed, eventID: { $0.id })
+        let collector = try await EventTests.subscribe(bus)
+        #expect(await Self.waitFor { await bus.followingEngine })
+        feed.send(.start)
+        let events = await collector.take(1)
+        #expect(events.map(\.actorID) == ["abc123def456"])
+        #expect(events.first?.message.id == "abc123def456")
+        #expect(events.first?.attributes["com.docker.compose.service"] == "web")
+        // The translation itself, for an event of a container no Docker client made.
+        let foreign = ContainerEvent(
+            sequence: 5, timeNano: 1, id: "my-app", incarnation: "i", action: .start, name: "my-app", image: "docker.io/library/alpine:3",
+            labels: ["devcontainer.local_folder": "/a"])
+        let shown = try #require(DockerEventBus.dockerEvent(foreign, actorID: foreign.id))
+        #expect(shown.actorID == "my-app")
+        #expect(shown.message.status == "start")
+        #expect(shown.attributes == ["devcontainer.local_folder": "/a", "name": "my-app", "image": "alpine:3"])
+        await bus.shutdown()
+    }
+
     @Test("compose's filters take the events of its project's containers, and only those")
     func composeFilters() throws {
         let filter = try DockerEventFilter([
