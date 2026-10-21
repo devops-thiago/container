@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
-import ContainerizationEXT4
 import Foundation
 import SystemPackage
 
@@ -28,16 +27,14 @@ import SystemPackage
 /// it opens its target and fails, and the container does not start. Both binds would put the
 /// same socket there, so the first is kept and the rest are left out.
 enum StackedSocketBinds {
-    /// The indices of the binds in `mounts` to leave out: a socket bind whose host socket an
-    /// earlier socket bind already puts on the same file. `isSocket` tells a socket bind;
-    /// `file` names the file a destination is in the image, following its symbolic links, or
-    /// nil when there is none yet.
-    static func redundant<File: Hashable>(
-        in mounts: [Filesystem], isSocket: (Filesystem) -> Bool, file: (String) -> File?
-    ) -> Set<Int> {
+    /// The indices of the binds in `mounts` to leave out: a socket bind (one of `sockets`)
+    /// whose host socket an earlier socket bind already puts on the same file. `file` names
+    /// the file a destination is in the image, following its symbolic links, or nil when there
+    /// is none yet.
+    static func redundant<File: Hashable>(in mounts: [Filesystem], sockets: Set<Int>, file: (String) -> File?) -> Set<Int> {
         var bound: [File: String] = [:]
         var redundant: Set<Int> = []
-        for (index, mount) in mounts.enumerated() where isSocket(mount) {
+        for (index, mount) in mounts.enumerated() where sockets.contains(index) {
             guard let target = file(mount.destination) else { continue }
             if let source = bound[target] {
                 if source == mount.source { redundant.insert(index) }
@@ -48,17 +45,25 @@ enum StackedSocketBinds {
         return redundant
     }
 
-    /// `mounts` without the binds ``redundant(in:isSocket:file:)`` finds, reading the image's
-    /// files from the root filesystem at `rootfs`. Only read when one host socket is bound
-    /// more than once.
-    static func removing(from mounts: [Filesystem], rootfs: String, isSocket: (Filesystem) -> Bool) -> [Filesystem] {
-        let sockets = mounts.filter(isSocket).map(\.source)
-        guard Set(sockets).count < sockets.count, let reader = try? EXT4.EXT4Reader(blockDevice: FilePath(rootfs)) else {
-            return mounts
-        }
-        let drop = redundant(in: mounts, isSocket: isSocket) { destination in
-            try? reader.stat(FilePath(destination), followSymlinks: true).inodeNumber
+    /// `mounts` without the binds ``redundant(in:sockets:file:)`` finds, reading the files
+    /// of the root filesystem image at `rootfs` lazily. Only read when one host socket is bound
+    /// more than once, and then on a thread of its own, never one of Swift's cooperative pool.
+    static func removing(from mounts: [Filesystem], rootfs: String, isSocket: (Filesystem) -> Bool) async -> [Filesystem] {
+        let sockets = Set(mounts.indices.filter { isSocket(mounts[$0]) })
+        let sources = sockets.map { mounts[$0].source }
+        guard Set(sources).count < sources.count else { return mounts }
+        let drop: Set<Int> = await withCheckedContinuation { continuation in
+            reading.async {
+                guard let files = try? RootfsFiles(image: rootfs) else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                continuation.resume(returning: redundant(in: mounts, sockets: sockets) { try? files.file($0) })
+            }
         }
         return mounts.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
     }
+
+    /// Where the image is read: blocking file reads stay off the cooperative pool.
+    private static let reading = DispatchQueue(label: "com.apple.container.runtime.stacked-socket-binds")
 }

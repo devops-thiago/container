@@ -441,19 +441,23 @@ public struct Parser {
         return result
     }
 
-    public static func mounts(_ rawMounts: [String], relativeTo basePath: URL? = nil) throws -> [VolumeOrFilesystem] {
+    public static func mounts(
+        _ rawMounts: [String], relativeTo basePath: URL? = nil, dockerSocket: DockerSocketBinding = .engine()
+    ) throws -> [VolumeOrFilesystem] {
         let rawMounts = rawMounts.dedupe()
         var mounts: [VolumeOrFilesystem] = []
         mounts.reserveCapacity(rawMounts.count)
         for mount in rawMounts {
-            let m = try Parser.mount(mount, relativeTo: basePath)
+            let m = try Parser.mount(mount, relativeTo: basePath, dockerSocket: dockerSocket)
             try validateMount(m)
             mounts.append(m)
         }
         return mounts
     }
 
-    public static func mount(_ mount: String, relativeTo basePath: URL? = nil) throws -> VolumeOrFilesystem {
+    public static func mount(
+        _ mount: String, relativeTo basePath: URL? = nil, dockerSocket: DockerSocketBinding = .engine()
+    ) throws -> VolumeOrFilesystem {
         let parts = mount.split(separator: ",")
         if parts.count == 0 {
             throw ContainerizationError(.invalidArgument, message: "invalid mount format: \(mount)")
@@ -540,7 +544,7 @@ public struct Parser {
                 case "virtiofs", "bind":
                     // For bind mounts, resolve both absolute and relative paths
                     let url = basePath?.appending(path: val).standardizedFileURL ?? URL(filePath: val)
-                    let absolutePath = try bindSource(url.absoluteURL.path)
+                    let absolutePath = try dockerSocket.bindSource(url.absoluteURL.path)
 
                     // A folder or a single file, as with Docker; the runtime shares a file's
                     // folder with the VM and binds only the file into the container.
@@ -588,18 +592,22 @@ public struct Parser {
             ))
     }
 
-    public static func volumes(_ rawVolumes: [String], relativeTo basePath: URL? = nil) throws -> [VolumeOrFilesystem] {
+    public static func volumes(
+        _ rawVolumes: [String], relativeTo basePath: URL? = nil, dockerSocket: DockerSocketBinding = .engine()
+    ) throws -> [VolumeOrFilesystem] {
         var mounts: [VolumeOrFilesystem] = []
         mounts.reserveCapacity(rawVolumes.count)
         for volume in rawVolumes {
-            let m = try Parser.volume(volume, relativeTo: basePath)
+            let m = try Parser.volume(volume, relativeTo: basePath, dockerSocket: dockerSocket)
             try Parser.validateMount(m)
             mounts.append(m)
         }
         return mounts
     }
 
-    public static func volume(_ volume: String, relativeTo basePath: URL? = nil) throws -> VolumeOrFilesystem {
+    public static func volume(
+        _ volume: String, relativeTo basePath: URL? = nil, dockerSocket: DockerSocketBinding = .engine()
+    ) throws -> VolumeOrFilesystem {
         var vol = volume
         vol.trimLeft(char: ":")
 
@@ -640,7 +648,7 @@ public struct Parser {
                     ))
             }
             let url = basePath?.appending(path: src).standardizedFileURL ?? URL(filePath: src)
-            let absolutePath = try bindSource(url.absoluteURL.path)
+            let absolutePath = try dockerSocket.bindSource(url.absoluteURL.path)
 
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: absolutePath, isDirectory: &isDirectory) else {
@@ -660,17 +668,6 @@ public struct Parser {
         default:
             throw ContainerizationError(.invalidArgument, message: "invalid volume format \(volume)")
         }
-    }
-
-    /// The host path a bind of `path` shares: the engine's own Docker API socket for the host's
-    /// Docker socket, as Docker Desktop does, and `path` itself otherwise.
-    static func bindSource(_ path: String, enginePath: @autoclosure () -> String = PathUtils.dockerSocketPath()) throws -> String {
-        guard DockerHostSocket.names(path) else { return path }
-        let socket = enginePath()
-        guard DockerHostSocket.isServed(at: socket) else {
-            throw ContainerizationError(.invalidArgument, message: DockerHostSocket.notServedMessage)
-        }
-        return socket
     }
 
     public static func validMountType(_ type: String) -> Bool {
@@ -1239,5 +1236,46 @@ public struct Parser {
 
     public static func parseBool(string: String) -> Bool? {
         Parsers.parseBool(string: string)
+    }
+}
+
+/// What a bind of the host's Docker socket mounts, for the parsers: the engine's own Docker API
+/// socket, as Docker Desktop mounts its engine's.
+public struct DockerSocketBinding: Sendable {
+    /// The engine's socket.
+    public var enginePath: @Sendable () -> String
+    /// The user's home, where Docker Desktop keeps its socket.
+    public var home: String
+    /// The host sockets a link may reach; nil for the real ones.
+    public var hostSockets: [String]?
+    /// Whether something answers on a socket.
+    public var answers: @Sendable (String) -> Bool
+
+    public init(
+        enginePath: @escaping @Sendable () -> String, home: String = DockerHostSocket.userHome, hostSockets: [String]? = nil,
+        answers: @escaping @Sendable (String) -> Bool = DockerHostSocket.answers(at:)
+    ) {
+        self.enginePath = enginePath
+        self.home = home
+        self.hostSockets = hostSockets
+        self.answers = answers
+    }
+
+    /// The socket of the engine whose app root is `engineAppRoot`, or this process's app root.
+    public static func engine(appRoot: FilePath? = nil) -> DockerSocketBinding {
+        DockerSocketBinding(enginePath: {
+            appRoot.map { PathUtils.dockerSocketPath(engineAppRoot: $0) } ?? PathUtils.dockerSocketPath()
+        })
+    }
+
+    /// The host path a bind of `path` shares: the engine's socket for the host's Docker socket,
+    /// refused when nothing answers on it, and `path` itself otherwise.
+    public func bindSource(_ path: String) throws -> String {
+        guard DockerHostSocket.names(path, home: home, hostSockets: hostSockets) else { return path }
+        let socket = enginePath()
+        guard answers(socket) else {
+            throw ContainerizationError(.invalidArgument, message: DockerHostSocket.notServedMessage)
+        }
+        return socket
     }
 }

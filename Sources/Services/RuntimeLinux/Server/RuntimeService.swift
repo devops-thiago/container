@@ -199,6 +199,42 @@ public actor RuntimeService {
         }
     }
 
+    /// The mounts a start binds. A bind of the host's Docker socket, however a container made
+    /// before this recorded it, is of the engine's own, and a start refuses it when nothing
+    /// answers there (the Docker API is off, or its agent went away), naming the setting. One
+    /// host socket bound twice onto one file (through a symbolic link in the image) is bound
+    /// once: the guest cannot mount a socket onto a socket.
+    static func mountsToBind(
+        _ mounts: [Filesystem], rootfs: String, enginePath: String = PathUtils.dockerSocketPath(),
+        answers: (String) -> Bool = DockerHostSocket.answers(at:),
+        isSocket: @escaping (Filesystem) -> Bool = { (try? $0.isSocket()) ?? false }
+    ) async throws -> [Filesystem] {
+        var mapped = mounts
+        for index in mapped.indices where mapped[index].isVirtiofs {
+            mapped[index].source = DockerHostSocket.bindSource(for: mapped[index].source, enginePath: enginePath)
+        }
+        if mapped.contains(where: { $0.isVirtiofs && $0.source == enginePath }), !answers(enginePath) {
+            throw ContainerizationError(.invalidArgument, message: DockerHostSocket.notServedMessage)
+        }
+        return await StackedSocketBinds.removing(from: mapped, rootfs: rootfs, isSocket: isSocket)
+    }
+
+    /// The statistics the guest reports, under the container's ID: the guest knows a container
+    /// with a long name by its Docker ID, and nothing outside the VM does.
+    static func containerStats(_ stats: ContainerStatistics, id: String) -> ContainerStats {
+        ContainerStats(
+            id: id,
+            memoryUsageBytes: stats.memory?.usageBytes,
+            memoryLimitBytes: stats.memory?.limitBytes,
+            cpuUsageUsec: stats.cpu?.usageUsec,
+            networkRxBytes: stats.networks?.reduce(0) { $0 + $1.receivedBytes },
+            networkTxBytes: stats.networks?.reduce(0) { $0 + $1.transmittedBytes },
+            blockReadBytes: stats.blockIO?.devices.reduce(0) { $0 + $1.readBytes },
+            blockWriteBytes: stats.blockIO?.devices.reduce(0) { $0 + $1.writeBytes },
+            numProcesses: stats.process?.current
+        )
+    }
+
     /// The ID the guest knows the container by. The VM takes one of at most 64 characters, and
     /// a container's name may be longer: such a one is known inside by the SHA-256 of its name,
     /// its Docker ID. Everything outside the VM keeps the name.
@@ -408,11 +444,8 @@ public actor RuntimeService {
             let guestID = Self.guestContainerID(for: config.id)
             let rootfsFilesystem = try bundle.containerRootfs
             let rootfs = rootfsFilesystem.asMount
-            // One host socket bound twice onto one file (through a symbolic link in the image)
-            // is bound once: the guest cannot mount a socket onto a socket.
             var mounted = config
-            mounted.mounts = StackedSocketBinds.removing(
-                from: config.mounts, rootfs: rootfsFilesystem.source, isSocket: { (try? $0.isSocket()) ?? false })
+            mounted.mounts = try await Self.mountsToBind(config.mounts, rootfs: rootfsFilesystem.source)
             // Give the VM headroom beyond the container's cgroup limits for the guest kernel,
             // vminitd, and the overhead configured via `config.resources.cpuOverhead`.
             let vmResources = VMResources(
@@ -518,18 +551,7 @@ public actor RuntimeService {
         return try await self.lock.withLock { lock in
             let containerInfo = try await self.getContainer()
             let stats = try await containerInfo.container.statistics()
-
-            let containerStats = ContainerStats(
-                id: stats.id,
-                memoryUsageBytes: stats.memory?.usageBytes,
-                memoryLimitBytes: stats.memory?.limitBytes,
-                cpuUsageUsec: stats.cpu?.usageUsec,
-                networkRxBytes: stats.networks?.reduce(0) { $0 + $1.receivedBytes },
-                networkTxBytes: stats.networks?.reduce(0) { $0 + $1.transmittedBytes },
-                blockReadBytes: stats.blockIO?.devices.reduce(0) { $0 + $1.readBytes },
-                blockWriteBytes: stats.blockIO?.devices.reduce(0) { $0 + $1.writeBytes },
-                numProcesses: stats.process?.current
-            )
+            let containerStats = Self.containerStats(stats, id: containerInfo.config.id)
 
             let reply = message.reply()
             let data = try JSONEncoder().encode(containerStats)
