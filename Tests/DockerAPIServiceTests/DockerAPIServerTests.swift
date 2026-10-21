@@ -165,6 +165,11 @@ struct DockerAPIServerTests {
             #expect(components.map { $0["Version"] as? String } == ["28.0.0", "1.1.0-252-g2b1a137"])
             #expect((components[1]["Details"] as? [String: String])?["GitCommit"] == "abc123")
             #expect((json["Platform"] as? [String: Any])?["Name"] as? String == "SiliconShip")
+            // `container version --format` reports the same body, made from the versions alone.
+            let versions = SystemRoutes.VersionBody(
+                engineVersion: "1.1.0-252-g2b1a137", engineCommit: "abc123", architecture: "aarch64", kernelVersion: "6.12.28")
+            let cli = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(versions)) as? [String: Any])
+            #expect(NSDictionary(dictionary: cli) == NSDictionary(dictionary: json))
         }
         try await harness.withClient { second in
             try await second.send("GET /v1.44/info HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")

@@ -31,10 +31,37 @@ extension Application {
         @OptionGroup
         public var logOptions: Flags.Logging
 
+        @Option(name: .long, help: "Print Docker's view of each: container, image or volume")
+        var type: DockerObjectType?
+
+        @Option(name: [.customShort("f"), .long], help: "Print Docker's view of each through a Go template, such as {{json .}}")
+        var format: String?
+
         @Argument(help: "Container IDs to inspect")
         var containerIds: [String]
 
+        public func validate() throws {
+            _ = try dockerTemplate()
+        }
+
+        /// The template `--format` gives; none for `json`, which is the array printed without one.
+        func dockerTemplate() throws -> DockerTemplate? {
+            guard let format, format != "json" else { return nil }
+            guard DockerTemplate.isTemplate(format) else {
+                throw ValidationError("--format takes json or a template, such as {{json .}}")
+            }
+            do {
+                return try DockerTemplate(format)
+            } catch {
+                throw ValidationError(error.description)
+            }
+        }
+
         public func run() async throws {
+            guard type == nil && format == nil else {
+                try await runDocker()
+                return
+            }
             let client = ContainerClient()
             let uniqueIds = Set(containerIds)
             let containers = try await client.list().filter {
@@ -51,6 +78,22 @@ extension Application {
             }
 
             try Output.emit(Output.renderJSON(containers.map { ManagedContainer($0) }, options: .pretty))
+        }
+    }
+}
+
+extension Application.ContainerInspect {
+    /// `docker inspect`: each object as the Docker API shows it, found ones printed before the
+    /// names that found nothing fail the command, as dockerd's CLI does.
+    func runDocker() async throws {
+        let template = try dockerTemplate()
+        let result = try await DockerInspection.lookup(containerIds, type: type)
+        if template == nil || !result.found.isEmpty {
+            print(try DockerInspection.render(result.found, template: template))
+        }
+        guard result.missing.isEmpty else {
+            throw ContainerizationError(
+                .notFound, message: result.missing.map { DockerInspection.notFound($0, type: type) }.joined(separator: "\n"))
         }
     }
 }

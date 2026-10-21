@@ -34,12 +34,19 @@ public enum ComposeVersionReport {
         named ?? files.last.flatMap(Format.init(rawValue:)) ?? .pretty
     }
 
+    /// What `--short` prints: the Docker Compose release whose behaviour this compose has, not
+    /// this engine's version. Tools that drive `docker compose` read it to decide what to ask
+    /// for: Dev Containers names a built image `project-service` from 2.8 on, as this compose
+    /// does, and from 2.17 sends `additional_contexts`, which this compose refuses.
+    public static let dockerComposeVersion = "2.8.0"
+
     /// - Parameters:
     ///   - line: the version as a sentence, with the build beside it.
     ///   - version: the number alone.
-    ///   - short: print the number and nothing else, whatever the format.
+    ///   - short: print the Docker Compose release this compose answers as, and nothing else,
+    ///     whatever the format.
     public static func render(line: String, version: String, short: Bool, format: Format) -> String {
-        if short { return version }
+        if short { return dockerComposeVersion }
         switch format {
         case .pretty:
             return line

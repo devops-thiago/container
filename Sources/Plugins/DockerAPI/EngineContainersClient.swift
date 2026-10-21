@@ -241,18 +241,3 @@ struct EngineProcessClient: EngineProcess {
         try await process.resize(Terminal.Size(width: width, height: height))
     }
 }
-
-/// The engine's container events, through the client the `container` commands use. An engine
-/// that does not say it has them is not asked: it would not answer the route.
-struct EngineEventFeedClient: DockerEngineEventFeed {
-    func available() async -> Bool? {
-        guard let health = try? await ClientHealthCheck.ping(timeout: .seconds(5)) else { return nil }
-        return health.supports(.containerEvents)
-    }
-
-    func subscribe(since: ContainerEventCursor?) async throws -> DockerEngineEvents {
-        let subscription = try await ContainerClient().events(since: since)
-        return DockerEngineEvents(
-            processNonce: subscription.processNonce, cursor: subscription.cursor, gap: subscription.gap, events: subscription.events)
-    }
-}
