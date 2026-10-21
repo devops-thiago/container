@@ -406,7 +406,13 @@ public actor RuntimeService {
             }()
 
             let guestID = Self.guestContainerID(for: config.id)
-            let rootfs = try bundle.containerRootfs.asMount
+            let rootfsFilesystem = try bundle.containerRootfs
+            let rootfs = rootfsFilesystem.asMount
+            // One host socket bound twice onto one file (through a symbolic link in the image)
+            // is bound once: the guest cannot mount a socket onto a socket.
+            var mounted = config
+            mounted.mounts = StackedSocketBinds.removing(
+                from: config.mounts, rootfs: rootfsFilesystem.source, isSocket: { (try? $0.isSocket()) ?? false })
             // Give the VM headroom beyond the container's cgroup limits for the guest kernel,
             // vminitd, and the overhead configured via `config.resources.cpuOverhead`.
             let vmResources = VMResources(
@@ -420,7 +426,7 @@ public actor RuntimeService {
                 extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description)
             var guestTmpfs: [Filesystem] = []
             let container = try LinuxContainer(guestID, rootfs: rootfs, vmm: vmm, vm: vmResources, logger: self.log) { czConfig in
-                guestTmpfs = try Self.configureContainer(czConfig: &czConfig, config: config, dynamicEnv: dynamicEnv, log: self.log)
+                guestTmpfs = try Self.configureContainer(czConfig: &czConfig, config: mounted, dynamicEnv: dynamicEnv, log: self.log)
                 czConfig.interfaces = interfaces
                 czConfig.process.stdout = stdout
                 czConfig.process.stderr = stderr
