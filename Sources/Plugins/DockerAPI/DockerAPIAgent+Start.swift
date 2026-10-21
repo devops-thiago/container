@@ -18,6 +18,7 @@ import ArgumentParser
 import ContainerLog
 import ContainerPersistence
 import ContainerPlugin
+import ContainerResource
 import DockerAPIEngine
 import DockerAPIService
 import Foundation
@@ -94,24 +95,17 @@ extension DockerAPIAgent {
             // Docker names and IDs outlive the agent here; the labels on the containers it made
             // bring them back should this go.
             let identities: DockerIdentityStore
-            let stateDirectory: URL
             do {
                 let stateRoot = try PluginStateRoot(plugin: Self.commandName).path
-                stateDirectory = URL(fileURLWithPath: stateRoot.string, isDirectory: true)
-                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: stateDirectory), log: log)
+                identities = DockerIdentityStore(
+                    persistence: DockerIdentityFile(directory: URL(fileURLWithPath: stateRoot.string, isDirectory: true)), log: log)
             } catch {
                 log.error("no state directory", metadata: ["error": "\(error)"])
                 DockerAPIAgent.exit(withError: error)
             }
-            // Uploads into containers that are not running outlive the agent too, beside the
-            // identities, where the engine reads them when it copies them in.
-            let copies: DockerPendingCopies
-            do {
-                copies = try DockerPendingCopies(directory: stateDirectory.appending(path: "pending-copies", directoryHint: .isDirectory))
-            } catch {
-                log.error("could not keep uploads held for a start; holding them in memory", metadata: ["error": "\(error)"])
-                copies = DockerPendingCopies()
-            }
+            // Uploads into containers that are not running are held beside the identities, where
+            // the engine finds them when it starts the container, whoever starts it.
+            let copies = DockerPendingCopies(queue: PendingCopyQueue(appRoot: URL(fileURLWithPath: ApplicationRoot.path.string, isDirectory: true)))
             let engine = EngineContainersClient()
             // The engine's container events while anyone streams `/events`; for an engine
             // without them, what this service does as it does it, and the engine's containers
@@ -122,7 +116,6 @@ extension DockerAPIAgent {
             Task { await ContainerRoutes.moveLocalRenamesToEngine(engine: engine, identities: identities, log: log) }
             EventRoutes.register(on: &router, events: events)
             let streams = DockerContainerStreams(engine: engine, log: log, events: events, copies: copies)
-            Task { await streams.reconcileHeldCopies(engine: engine) }
             ContainerRoutes.register(on: &router, engine: engine, identities: identities, streams: streams, events: events)
             ContainerToolRoutes.register(on: &router, engine: engine, identities: identities, streams: streams)
             // The images service reads a loaded archive and writes a saved one itself, so both,

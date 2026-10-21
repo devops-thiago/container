@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import NIOCore
 import Testing
@@ -39,6 +40,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     /// The container's `/`.
     let root: URL
     let scratch: URL
+    /// Where the uploads held for a start are kept, as the engine's application root has it.
+    let queue: PendingCopyQueue
     let logFile: URL
     private let lock = NSLock()
     /// Executables the container has; a start of anything else fails as the engine's does.
@@ -79,6 +82,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         let top = FileManager.default.temporaryDirectory.appending(path: "dapi-tools-\(UUID().uuidString.prefix(8))")
         root = top.appending(path: "root")
         scratch = top.appending(path: "scratch")
+        queue = PendingCopyQueue(directory: top.appending(path: "pending-copies", directoryHint: .isDirectory))
         logFile = top.appending(path: "log")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
@@ -120,18 +124,40 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     func createDefaults() async throws -> DockerCreateDefaults { try await base.createDefaults() }
     func allocatePort() throws -> UInt16 { try base.allocatePort() }
     func create(_ plan: DockerCreatePlan, requester: String?) async throws -> String { try await base.create(plan, requester: requester) }
+    /// Bootstraps as the engine does: the container booted, what is held for it copied in,
+    /// its process not started.
     func bootstrap(_ container: ContainerSnapshot, stdio: DockerProcessStdio, requester: String?) async throws -> any EngineProcess {
-        try await base.bootstrap(container, stdio: stdio, requester: requester)
+        let process = try await base.bootstrap(container, stdio: stdio, requester: requester)
+        do {
+            try queue.claim(container.id)
+            try await queue.apply(container.id) { [self] source, destination, mode, requester in
+                do {
+                    try await copyIn(container, source: source, destination: destination, mode: mode, requester: requester)
+                } catch {
+                    // In the engine's words, as its runtime client reports them.
+                    throw ContainerizationError(.internalError, message: DockerContainerProcesses.message(error))
+                }
+            }
+        } catch let failure as PendingCopyQueue.Failure {
+            queue.release(container.id)
+            throw DockerAPIError.internalError(failure.message)
+        }
+        return process
     }
     func get(_ engineID: String) async throws -> ContainerSnapshot? {
         lock.withLock { getCalls += 1 }
         return try await base.get(engineID)
     }
+    /// The run is over, and with it the start's hold on the queue, as the engine lets it go.
     func stop(_ container: ContainerSnapshot, timeout: Int32, signal: String?) async throws {
         try await base.stop(container, timeout: timeout, signal: signal)
+        queue.release(container.id)
     }
     func kill(_ container: ContainerSnapshot, signal: String) async throws { try await base.kill(container, signal: signal) }
-    func delete(_ container: ContainerSnapshot, force: Bool) async throws { try await base.delete(container, force: force) }
+    func delete(_ container: ContainerSnapshot, force: Bool) async throws {
+        try await base.delete(container, force: force)
+        queue.drop(container.id)
+    }
     func deleteVolume(_ name: String) async throws { try await base.deleteVolume(name) }
     func supportsRename() async -> Bool { await base.supportsRename() }
     func rename(_ container: ContainerSnapshot, to name: String) async throws { try await base.rename(container, to: name) }
@@ -315,9 +341,10 @@ struct ToolHarness {
     static func start(
         options: DockerToolOptions = DockerToolOptions(logPollInterval: .milliseconds(20), logStatusInterval: .milliseconds(50), statsInterval: .milliseconds(50)),
         execLimits: DockerExecLimits = .init(), limits: DockerHTTPLimits = .init(), tools: FakeTools? = nil,
-        copies: DockerPendingCopies = DockerPendingCopies()
+        copies: DockerPendingCopies? = nil
     ) async throws -> ToolHarness {
         let tools = try tools ?? FakeTools(snapshots: snapshots())
+        let copies = copies ?? DockerPendingCopies(queue: tools.queue)
         let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300), logOptions: options, copies: copies)
         let identities = DockerIdentityStore(persistence: nil)
         let server = try await DockerAPIServerTests.Harness.start(limits: limits) { router in
