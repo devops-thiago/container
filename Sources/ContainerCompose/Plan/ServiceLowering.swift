@@ -117,7 +117,8 @@ enum ServiceLowering {
                     aliases.append(alias)
                 } else {
                     diagnostics.warn(
-                        path, "'\(alias)' cannot be a name on a network; the other services reach this one as \(containerName)",
+                        path,
+                        "'\(alias)' cannot be a name on a network; the other services reach this one as \(ContainerHostname.default(for: containerName))",
                         at: service.location)
                 }
             }

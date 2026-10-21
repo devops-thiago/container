@@ -339,11 +339,19 @@ struct ContainerCreateMapperTests {
         #expect(mounted.configuration.mounts.map(\.options) == [["ro"]])
     }
 
-    @Test("other sockets and paths named docker.sock bind as they are")
+    @Test("Docker Desktop's own socket path, in any case, binds the socket this service serves too")
+    func desktopSocketPath() throws {
+        let desktop = DockerHostSocket.desktopSocket(home: DockerHostSocket.userHome)
+        let plan = try Fixtures.plan(
+            #"{"Image":"alpine","HostConfig":{"Binds":["\#(desktop):/a","\#(desktop.uppercased()):/b"]}}"#)
+        #expect(plan.configuration.mounts.map(\.source) == [Fixtures.dockerSocket, Fixtures.dockerSocket])
+    }
+
+    @Test("other paths named like docker.sock bind as they are")
     func otherDockerSockets() throws {
         let plan = try Fixtures.plan(
-            #"{"Image":"alpine","HostConfig":{"Binds":["/Users/me/.docker/run/docker.sock:/a","/var/run/docker.sock.d:/b","/var/run:/c"]}}"#)
-        #expect(plan.configuration.mounts.map(\.source) == ["/Users/me/.docker/run/docker.sock", "/var/run/docker.sock.d", "/var/run"])
+            #"{"Image":"alpine","HostConfig":{"Binds":["/Users/nobody-here/.docker/run/docker.sock:/a","/var/run/docker.sock.d:/b","/var/run:/c"]}}"#)
+        #expect(plan.configuration.mounts.map(\.source) == ["/Users/nobody-here/.docker/run/docker.sock", "/var/run/docker.sock.d", "/var/run"])
     }
 
     @Test("binds map a host path to a shared folder and a name to a volume")

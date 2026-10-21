@@ -16,10 +16,12 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerResource
 import ContainerizationError
 import ContainerizationOS
 import Foundation
+import SystemPackage
 import TerminalProgress
 
 extension Application {
@@ -85,6 +87,12 @@ extension Application {
 
             for mount in container.configuration.mounts where mount.isVirtiofs {
                 if !FileManager.default.fileExists(atPath: mount.source) {
+                    // The engine's Docker API socket is there only while its agent serves it;
+                    // the engine binds it for the host's, and refuses the start, naming the
+                    // setting, when nothing answers.
+                    if try await Self.isDockerSocket(mount.source) {
+                        throw ContainerizationError(.invalidArgument, message: DockerHostSocket.notServedMessage)
+                    }
                     throw ContainerizationError(.invalidState, message: "mount source path '\(mount.source)' does not exist")
                 }
             }
@@ -126,5 +134,16 @@ extension Application {
             }
             throw ArgumentParser.ExitCode(exitCode)
         }
+    }
+
+}
+
+extension Application.ContainerStart {
+    /// Whether `source` is the host's Docker socket or the engine's own, which a start binds
+    /// for it.
+    static func isDockerSocket(_ source: String) async throws -> Bool {
+        if DockerHostSocket.names(source) { return true }
+        let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
+        return source == PathUtils.dockerSocketPath(engineAppRoot: FilePath(health.appRoot.path(percentEncoded: false)))
     }
 }
