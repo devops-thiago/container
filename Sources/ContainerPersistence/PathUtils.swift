@@ -58,6 +58,17 @@ public enum PathUtils {
     /// its terminator, and refuses a longer one before connecting.
     public static let maxDialableSocketPathBytes = 103
 
+    /// Where ``runDirectory()`` is, without making it.
+    public static func runDirectoryPath() -> FilePath {
+        (BaseConfigPath.groupContainer() ?? BaseConfigPath.appRoot.basePath().removingLastComponent()).appending("run")
+    }
+
+    /// The Docker API socket the engine's Docker API agent serves, in the run directory: what
+    /// a container that binds the host's Docker socket gets.
+    public static func dockerSocketPath() -> String {
+        runDirectoryPath().appending("docker.sock").string
+    }
+
     static func runDirectory(in base: FilePath) throws -> URL {
         let path = base.appending("run").string
         if mkdir(path, 0o700) != 0 && errno != EEXIST {

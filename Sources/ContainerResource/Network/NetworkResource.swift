@@ -50,12 +50,18 @@ public struct NetworkResource: ManagedResource {
     /// Returns `true` for a system-managed network that cannot be deleted by the user.
     public var isBuiltin: Bool { labels.isBuiltin }
 
+    /// The longest network name. Docker sets no limit; here a network's helper logs to
+    /// `container-network-vmnet-<name>.log`, and a file name has at most 255 bytes.
+    public static let maxNameLength = 227
+
     /// Returns `true` if `name` is a syntactically valid network identifier.
     ///
-    /// Valid network names are lowercase alphanumeric strings of up to 63
-    /// characters, allowing dots, hyphens, and underscores in interior positions.
+    /// Valid network names are lowercase alphanumeric strings of up to
+    /// ``maxNameLength`` characters, allowing dots, hyphens, and underscores in
+    /// interior positions.
     public static func nameValid(_ name: String) -> Bool {
-        let pattern = #"^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$"#
+        guard name.utf8.count <= maxNameLength else { return false }
+        let pattern = #"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"#
         return name.range(of: pattern, options: .regularExpression) != nil
     }
 

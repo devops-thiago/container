@@ -60,8 +60,10 @@ public enum K8sClusters {
         public let creationDate: Date
     }
 
+    /// A cluster's name is its control plane's container ID and hostname, and Kubernetes takes
+    /// a node's hostname as its name, so it stays within a DNS label.
     public static func nameValid(_ name: String) -> Bool {
-        ManagedContainer.nameValid(name)
+        name.utf8.count <= ContainerHostname.maxLabelLength && ManagedContainer.nameValid(name)
     }
 
     public static func list() async throws -> [Node] {

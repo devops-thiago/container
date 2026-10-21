@@ -415,6 +415,18 @@ public actor ContainersService {
         }
     }
 
+    /// `configuration` with every bind of the host's Docker socket made one of the socket the
+    /// engine's Docker API agent serves, as Docker Desktop binds its engine's.
+    static func bindingEngineDockerSocket(
+        _ configuration: ContainerConfiguration, enginePath: String = PathUtils.dockerSocketPath()
+    ) -> ContainerConfiguration {
+        var configuration = configuration
+        for index in configuration.mounts.indices where configuration.mounts[index].isVirtiofs {
+            configuration.mounts[index].source = DockerHostSocket.bindSource(for: configuration.mounts[index].source, enginePath: enginePath)
+        }
+        return configuration
+    }
+
     /// Create a new container from the provided id and configuration.
     /// - Parameter hostDirectoryBookmarks: grants for host directories this container
     ///   bind-mounts, made by a sandboxed embedder. Persisted with the container and resolved
@@ -442,6 +454,10 @@ public actor ContainersService {
                 ]
             )
         }
+
+        // A bind of the host's Docker socket is of this engine's, whichever client asked: the
+        // host's may be another engine's.
+        let configuration = Self.bindingEngineDockerSocket(configuration)
 
         // Validate before allocating snapshots, starting a runtime, or persisting a
         // stopped container that can never boot. This also covers non-CLI clients.

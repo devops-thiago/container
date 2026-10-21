@@ -199,14 +199,25 @@ public actor RuntimeService {
         }
     }
 
+    /// The ID the guest knows the container by. The VM takes one of at most 64 characters, and
+    /// a container's name may be longer: such a one is known inside by the SHA-256 of its name,
+    /// its Docker ID. Everything outside the VM keeps the name.
+    static func guestContainerID(for id: String) -> String {
+        id.count <= LinuxContainer.maxIDLength ? id : ContainerHostname.dockerID(for: id)
+    }
+
     /// The name the guest calls itself. A hostname of the container's own beats the one its
     /// attachment carries: the guest sees the name asked for, while the network keeps
     /// resolving the container's name.
     static func guestHostname(for config: ContainerConfiguration) -> String {
-        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
-        return hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
+        // A name too long to be a hostname gives the container its short ID instead.
+        let fallback = ContainerHostname.default(for: config.id)
+        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? fallback
+        let label =
+            hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
             .first
-            .map { String($0) } ?? config.id
+            .map { String($0) } ?? fallback
+        return ContainerHostname.fits(label) ? label : ContainerHostname.shortID(for: config.id)
     }
 
     @Sendable
@@ -394,8 +405,14 @@ public actor RuntimeService {
                 stdio[0] ?? nil
             }()
 
-            let id = config.id
-            let rootfs = try bundle.containerRootfs.asMount
+            let guestID = Self.guestContainerID(for: config.id)
+            let rootfsFilesystem = try bundle.containerRootfs
+            let rootfs = rootfsFilesystem.asMount
+            // One host socket bound twice onto one file (through a symbolic link in the image)
+            // is bound once: the guest cannot mount a socket onto a socket.
+            var mounted = config
+            mounted.mounts = StackedSocketBinds.removing(
+                from: config.mounts, rootfs: rootfsFilesystem.source, isSocket: { (try? $0.isSocket()) ?? false })
             // Give the VM headroom beyond the container's cgroup limits for the guest kernel,
             // vminitd, and the overhead configured via `config.resources.cpuOverhead`.
             let vmResources = VMResources(
@@ -408,8 +425,8 @@ public actor RuntimeService {
                 searchDomain: config.dns?.searchDomains.first ?? Self.defaultSearchDomain,
                 extraHosts: config.extraHosts, gateway: attachments.first?.ipv4Gateway.description)
             var guestTmpfs: [Filesystem] = []
-            let container = try LinuxContainer(id, rootfs: rootfs, vmm: vmm, vm: vmResources, logger: self.log) { czConfig in
-                guestTmpfs = try Self.configureContainer(czConfig: &czConfig, config: config, dynamicEnv: dynamicEnv, log: self.log)
+            let container = try LinuxContainer(guestID, rootfs: rootfs, vmm: vmm, vm: vmResources, logger: self.log) { czConfig in
+                guestTmpfs = try Self.configureContainer(czConfig: &czConfig, config: mounted, dynamicEnv: dynamicEnv, log: self.log)
                 czConfig.interfaces = interfaces
                 czConfig.process.stdout = stdout
                 czConfig.process.stderr = stderr
@@ -437,7 +454,7 @@ public actor RuntimeService {
                     try socket.applyHostPermissions()
                 }
 
-                try await self.initializeWaiters(for: id)
+                try await self.initializeWaiters(for: config.id)
                 try await self.monitor.registerProcess(id: config.id, onExit: self.onContainerExit)
                 if !container.interfaces.isEmpty {
                     try await self.startSocketForwarders(attachment: attachments[0], publishedPorts: config.publishedPorts)
@@ -472,7 +489,7 @@ public actor RuntimeService {
         return try await self.lock.withLock { lock in
             let id = try message.id()
             let containerInfo = try await self.getContainer()
-            let containerId = containerInfo.container.id
+            let containerId = containerInfo.config.id
             if id == containerId {
                 try await self.startInitProcess(lock: lock)
                 await self.setState(.running)
@@ -719,7 +736,7 @@ public actor RuntimeService {
             switch await self.state {
             case .running:
                 let ctr = try await getContainer()
-                if id != ctr.container.id {
+                if id != ctr.config.id {
                     guard let processInfo = await self.processes[id] else {
                         throw ContainerizationError(.invalidState, message: "process \(id) does not exist")
                     }
@@ -772,7 +789,7 @@ public actor RuntimeService {
             let width = message.uint64(key: RuntimeKeys.width.rawValue)
             let height = message.uint64(key: RuntimeKeys.height.rawValue)
 
-            if id != ctr.container.id {
+            if id != ctr.config.id {
                 guard let processInfo = self.processes[id] else {
                     throw ContainerizationError(
                         .invalidState,
@@ -1264,7 +1281,7 @@ public actor RuntimeService {
     private func startInitProcess(lock: AsyncLock.Context) async throws {
         let info = try self.getContainer()
         let container = info.container
-        let id = container.id
+        let id = info.config.id
 
         guard self.state == .booted else {
             throw ContainerizationError(
@@ -1791,7 +1808,7 @@ public actor RuntimeService {
 
     private func cleanUpContainer(containerInfo: ContainerInfo, exitStatus: ExitStatus? = nil) async throws {
         let container = containerInfo.container
-        let id = container.id
+        let id = containerInfo.config.id
 
         // Every way a run ends comes through here: a stop, the process exiting, a failed start.
         await self.stopHealthMonitor()

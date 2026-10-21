@@ -221,12 +221,74 @@ struct PlanTests {
             ])
     }
 
+    /// The compose file of a Java dev container as Dev Containers runs it: the project is named
+    /// after the workspace folder, `<folder>_devcontainer`, which makes its container and network
+    /// names longer than a hostname. Docker Compose takes them.
+    static let devContainer = """
+        services:
+          app:
+            image: mcr.microsoft.com/devcontainers/java:21
+            command: sleep infinity
+            volumes:
+              - ..:/workspaces:cached
+              - /var/run/docker.sock:/var/run/docker.sock
+            depends_on:
+              mysql:
+                condition: service_healthy
+            networks:
+              - devcontainer-net
+          mysql:
+            image: mysql:8.0
+            environment:
+              MYSQL_ROOT_PASSWORD: root
+            volumes:
+              - mysql-data:/var/lib/mysql
+            healthcheck:
+              test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+              interval: 10s
+              timeout: 5s
+              retries: 5
+              start_period: 30s
+            networks:
+              - devcontainer-net
+        volumes:
+          mysql-data:
+        networks:
+          devcontainer-net:
+            driver: bridge
+        """
+
+    @Test
+    func longProjectNamesNameLongContainersAndNetworks() throws {
+        let project = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer"
+        let plan = try plan(Self.devContainer, named: project)
+        #expect(plan.name == project)
+        #expect(plan.services.map(\.service) == ["mysql", "app"])
+        #expect(plan.services.map(\.containerName) == ["\(project)-mysql-1", "\(project)-app-1"])
+        #expect(plan.networks.map(\.name) == ["\(project)_devcontainer-net"])
+        #expect(plan.volumes.map(\.name) == ["\(project)_mysql-data"])
+        let app = try #require(plan.service("app"))
+        let mysql = try #require(plan.service("mysql"))
+        #expect(app.dependencies == [ComposeDependency(service: "mysql", condition: .healthy)])
+        #expect(mysql.healthcheck?.engineCheck.startPeriod == 30_000_000_000)
+        #expect(ArgumentList.values(of: "--network", in: app.options) == ["\(project)_devcontainer-net,alias=app"])
+        // The Docker socket is the engine's, which `container run` binds; it is never a folder
+        // to make.
+        #expect(ArgumentList.values(of: "--volume", in: app.options).contains("/var/run/docker.sock:/var/run/docker.sock"))
+        #expect(!app.bindSources.contains("/var/run/docker.sock"))
+        #expect(app.bindSources.count == 1)
+        #expect(plan.warnings.isEmpty)
+    }
+
     @Test
     func namesTheEngineCannotTakeAreRefused() {
-        let long = String(repeating: "x", count: 50)
+        let long = String(repeating: "x", count: 220)
         #expect(
             failure("services:\n  \(long):\n    image: a\n", named: "a-long-project-name").first?
-                .contains("is longer than the 63 characters a container name can have") == true)
+                .contains("is longer than the 227 characters a container name can have") == true)
+        #expect(
+            failure("services:\n  a:\n    image: a\n    networks: [n]\nnetworks:\n  n:\n    name: \(String(repeating: "n", count: 228))\n").first?
+                .contains("is not a network name: up to 227 lowercase letters") == true)
         #expect(
             failure("services:\n  a:\n    image: a\n    container_name: same\n  b:\n    image: b\n    container_name: same\n")
                 == ["the services a and b would both be the container 'same'"])

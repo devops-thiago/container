@@ -268,7 +268,7 @@ public enum NetworkMapper {
         }
         guard NetworkResource.nameValid(name) else {
             throw .badRequest(
-                "invalid network name \"\(name)\": SiliconShip's networks take lowercase letters, digits, '.', '_' and '-', up to 63 characters")
+                "invalid network name \"\(name)\": SiliconShip's networks take lowercase letters, digits, '.', '_' and '-', up to \(NetworkResource.maxNameLength) characters")
         }
         switch body.Driver ?? "" {
         case "", "bridge":
