@@ -60,11 +60,13 @@ struct ManagedContainerTests {
         #expect(!ManagedContainer.nameValid("a b"))
     }
 
-    @Test func nameValidRejectsNamesLongerThan63Characters() {
-        let maxValidName = String(repeating: "a", count: 63)
-        let tooLongName = String(repeating: "a", count: 64)
-        #expect(ManagedContainer.nameValid(maxValidName))
-        #expect(!ManagedContainer.nameValid(tooLongName))
+    @Test func nameValidTakesNamesLongerThanAHostname() {
+        // What Docker Compose names a service's container in a project named after a long
+        // folder, as Dev Containers does.
+        #expect(ManagedContainer.nameValid("6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer-mysql-1"))
+        #expect(ManagedContainer.nameValid(String(repeating: "a", count: 64)))
+        #expect(ManagedContainer.nameValid(String(repeating: "a", count: ManagedContainer.maxNameLength)))
+        #expect(!ManagedContainer.nameValid(String(repeating: "a", count: ManagedContainer.maxNameLength + 1)))
     }
 
     @Test func generateIdIsLowercasedUUID() {

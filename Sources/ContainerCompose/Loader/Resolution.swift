@@ -117,7 +117,7 @@ struct Resolver {
             } else {
                 diagnostics.error(
                     "\(path).container_name",
-                    "'\(containerName)' is not a container name: 2 to 63 letters, digits, '.', '_' and '-', starting with a letter or digit",
+                    "'\(containerName)' is not a container name: 2 to \(ManagedContainer.maxNameLength) letters, digits, '.', '_' and '-', starting with a letter or digit",
                     at: location(of: "container_name"))
             }
         }

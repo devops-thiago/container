@@ -194,7 +194,8 @@ extension ProjectPlan {
             guard NetworkResource.nameValid(name) else {
                 diagnostics.error(
                     "networks.\(key)",
-                    "'\(name)' is not a network name: up to 63 lowercase letters, digits, '.', '_' and '-', starting and ending with a letter or digit")
+                    "'\(name)' is not a network name: up to \(NetworkResource.maxNameLength) lowercase letters, digits, '.', '_' and '-', starting and ending with a letter or digit"
+                )
                 continue
             }
             var labels = declared.labels

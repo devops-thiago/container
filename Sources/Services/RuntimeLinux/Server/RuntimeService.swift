@@ -203,10 +203,14 @@ public actor RuntimeService {
     /// attachment carries: the guest sees the name asked for, while the network keeps
     /// resolving the container's name.
     static func guestHostname(for config: ContainerConfiguration) -> String {
-        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? config.id
-        return hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
+        // A name too long to be a hostname gives the container its short ID instead.
+        let fallback = ContainerHostname.default(for: config.id)
+        let hostnameSource = config.hostname ?? config.networks.first?.options.hostname ?? fallback
+        let label =
+            hostnameSource.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: true)
             .first
-            .map { String($0) } ?? config.id
+            .map { String($0) } ?? fallback
+        return ContainerHostname.fits(label) ? label : ContainerHostname.shortID(for: config.id)
     }
 
     @Sendable

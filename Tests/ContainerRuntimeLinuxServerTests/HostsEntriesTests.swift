@@ -138,4 +138,25 @@ struct HostsEntriesTests {
         config.hostname = "web"
         #expect(RuntimeService.guestHostname(for: config) == "web")
     }
+
+    @Test func aNameTooLongForAHostnameGivesTheGuestItsShortID() {
+        let name = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer-app-1"
+        var config = ContainerConfiguration(
+            id: name,
+            image: .init(
+                reference: "fixture:latest",
+                descriptor: .init(mediaType: "application/vnd.oci.image.manifest.v1+json", digest: "sha256:" + String(repeating: "0", count: 64), size: 0)),
+            process: .init(executable: "/bin/true", arguments: [], environment: []))
+        let short = ContainerHostname.shortID(for: name)
+        #expect(short.count == 12)
+        // No network, a network whose attachment carries the short ID, and one stored with the
+        // long name: the guest takes a hostname Linux accepts each time.
+        #expect(RuntimeService.guestHostname(for: config) == short)
+        config.networks = [.init(network: "default", options: .init(hostname: "\(short).example.test."))]
+        #expect(RuntimeService.guestHostname(for: config) == short)
+        config.networks = [.init(network: "default", options: .init(hostname: "\(name).example.test."))]
+        #expect(RuntimeService.guestHostname(for: config) == short)
+        config.hostname = "app"
+        #expect(RuntimeService.guestHostname(for: config) == "app")
+    }
 }

@@ -74,6 +74,23 @@ struct NetworkAliasTests {
         #expect(plain[0].options.aliases.isEmpty)
     }
 
+    @Test("a container named longer than a hostname is on its networks by its short ID, and by its aliases")
+    func longNamedAttachments() throws {
+        let name = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer-mysql-1"
+        let short = ContainerHostname.shortID(for: name)
+        let attachments = try Utility.getAttachmentConfigurations(
+            containerId: name, builtinNetworkId: "default",
+            networks: [try Parser.network("devcontainer-net,alias=mysql"), try Parser.network("other")],
+            dnsDomain: "test")
+        #expect(attachments.map(\.options.hostname) == ["\(short).test.", short])
+        #expect(attachments[0].options.aliases == ["mysql"])
+        let builtin = try Utility.getAttachmentConfigurations(containerId: name, builtinNetworkId: "default", networks: [], dnsDomain: nil)
+        #expect(builtin.map(\.options.hostname) == [short])
+        // A name that fits is its own hostname, as before.
+        let fits = try Utility.getAttachmentConfigurations(containerId: "shop-db-1", builtinNetworkId: "default", networks: [], dnsDomain: "test")
+        #expect(fits.map(\.options.hostname) == ["shop-db-1.test."])
+    }
+
     @Test("configurations and attachments stored before aliases decode with none, and encode none when empty")
     func compatibility() throws {
         let options = try JSONDecoder().decode(AttachmentOptions.self, from: Data(#"{"hostname":"web","mtu":1280}"#.utf8))

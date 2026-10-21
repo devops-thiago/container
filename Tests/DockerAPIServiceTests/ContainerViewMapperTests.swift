@@ -96,6 +96,18 @@ struct ContainerViewMapperTests {
         #expect(foreign.ImageID == Fixtures.imageDescription().digest)
     }
 
+    @Test("a container named longer than a hostname shows its short ID as hostname and DNS name, as Docker's does")
+    func longNamedContainer() throws {
+        let name = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer-mysql-1"
+        let snapshot = Fixtures.snapshot(Fixtures.configuration(id: name), networks: [try Fixtures.attachment()])
+        let dockerID = DockerIdentityTable.foreignID(engineID: name)
+        let native = DockerContainer(snapshot: snapshot, dockerID: dockerID, name: name)
+        let inspect = ContainerViewMapper.inspect(native, context: context)
+        #expect(inspect.Config.Hostname == String(dockerID.prefix(12)))
+        #expect(inspect.Name == "/\(name)")
+        #expect(inspect.NetworkSettings.Networks.values.first?.DNSNames == [name, String(dockerID.prefix(12))])
+    }
+
     @Test("inspect carries state, times, config and the bridge network's address at the top")
     func inspect() throws {
         var configuration = Fixtures.configuration(id: "abc000000000", labels: [DockerLabels.name: "web", "app": "shop"])
