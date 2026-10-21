@@ -73,18 +73,14 @@ extension DockerAPIAgent {
                 Foundation.exit(0)
             }
 
-            switch DockerSocketPlacement.inspect(socket) {
-            case .nothing:
-                break
-            case .staleSocket:
-                log.info("removing a stale socket", metadata: ["path": "\(socket)"])
-                unlink(socket)
-            case .liveSocket:
-                log.error("another agent is serving the socket", metadata: ["path": "\(socket)"])
-                DockerAPIAgent.exit(withError: ValidationError("\(socket) is already being served"))
-            case .notASocket:
-                log.error("something other than a socket is at the socket path", metadata: ["path": "\(socket)"])
-                DockerAPIAgent.exit(withError: ValidationError("\(socket) exists and is not a socket"))
+            // Held until this exits: a second agent stops here, before it touches the socket or
+            // the status file the first one serves.
+            let claim: DockerSocketClaim
+            do {
+                claim = try DockerSocketClaim.claim(socket)
+            } catch {
+                log.error("cannot serve the socket", metadata: ["path": "\(socket)", "reason": "\(error)"])
+                DockerAPIAgent.exit(withError: ValidationError(error.description))
             }
 
             let watchdog = OwnerWatchdog(log: log)
@@ -101,7 +97,7 @@ extension DockerAPIAgent {
             do {
                 let stateRoot = try PluginStateRoot(plugin: Self.commandName).path
                 stateDirectory = URL(fileURLWithPath: stateRoot.string, isDirectory: true)
-                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: stateDirectory))
+                identities = DockerIdentityStore(persistence: DockerIdentityFile(directory: stateDirectory), log: log)
             } catch {
                 log.error("no state directory", metadata: ["error": "\(error)"])
                 DockerAPIAgent.exit(withError: error)
@@ -156,22 +152,23 @@ extension DockerAPIAgent {
                     .childChannelInitializer { service.initialize($0, allowedUID: uid) }
                     .bind(unixDomainSocketPath: socket)
                     .get()
+                try claim.bound()
                 // Only this user: the directory is 0700 already, this holds even if it is not.
                 guard chmod(socket, 0o600) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                try DockerAPIStatus(state: .listening, socketPath: socket).write(to: statusFile)
+                try claim.publish(DockerAPIStatus(state: .listening, socketPath: socket), to: statusFile)
             } catch {
                 log.error("could not serve the socket", metadata: ["path": "\(socket)", "error": "\(error)"])
-                unlink(socket)
-                try? FileManager.default.removeItem(at: statusFile)
+                // Only what this agent made: a bind that failed made nothing.
+                claim.release()
                 DockerAPIAgent.exit(withError: error)
             }
             log.info("serving the Docker Engine API", metadata: ["path": "\(socket)"])
 
             // Every way of stopping on purpose leaves nothing behind: the socket and the status
-            // file go, so a client sees "no such file" rather than a socket nobody answers.
+            // file go, so a client sees "no such file" rather than a socket nobody answers. Ones
+            // another agent put there since stay.
             let cleanup: @Sendable () -> Void = {
-                unlink(socket)
-                try? FileManager.default.removeItem(at: statusFile)
+                claim.release()
             }
             signal(SIGTERM, SIG_IGN)
             signal(SIGINT, SIG_IGN)
