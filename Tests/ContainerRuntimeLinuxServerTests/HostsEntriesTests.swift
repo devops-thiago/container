@@ -159,4 +159,13 @@ struct HostsEntriesTests {
         config.hostname = "app"
         #expect(RuntimeService.guestHostname(for: config) == "app")
     }
+
+    @Test func aNameLongerThanTheVMTakesIsKnownInsideByItsDockerID() {
+        let name = "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer-app-1"
+        #expect(RuntimeService.guestContainerID(for: name) == ContainerHostname.dockerID(for: name))
+        #expect(RuntimeService.guestContainerID(for: name).count == 64)
+        for fits in ["web", String(repeating: "a", count: 64)] {
+            #expect(RuntimeService.guestContainerID(for: fits) == fits)
+        }
+    }
 }

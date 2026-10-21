@@ -282,10 +282,10 @@ struct PlanTests {
 
     @Test
     func namesTheEngineCannotTakeAreRefused() {
-        let long = String(repeating: "x", count: 250)
+        let long = String(repeating: "x", count: 220)
         #expect(
             failure("services:\n  \(long):\n    image: a\n", named: "a-long-project-name").first?
-                .contains("is longer than the 255 characters a container name can have") == true)
+                .contains("is longer than the 227 characters a container name can have") == true)
         #expect(
             failure("services:\n  a:\n    image: a\n    networks: [n]\nnetworks:\n  n:\n    name: \(String(repeating: "n", count: 228))\n").first?
                 .contains("is not a network name: up to 227 lowercase letters") == true)

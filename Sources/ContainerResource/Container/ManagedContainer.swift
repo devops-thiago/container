@@ -41,10 +41,11 @@ public struct ManagedContainer: ManagedResource {
     /// not the protocol's 64-hex default.
     public static func generateId() -> String { UUID().uuidString.lowercased() }
 
-    /// The longest container name: the bundle directory is named after it, and a file name
-    /// has at most 255 bytes. Docker sets no limit of its own; a name longer than a hostname
-    /// can be gives the container its short ID as hostname (``ContainerHostname``).
-    public static let maxNameLength = 255
+    /// The longest container name. Docker sets no limit; here the container's runtime logs to
+    /// `container-runtime-linux-<name>.log`, and a file name has at most 255 bytes. A name
+    /// longer than a hostname can be gives the container its short ID as hostname
+    /// (``ContainerHostname``).
+    public static let maxNameLength = 227
 
     /// Container name rule
     public static func nameValid(_ name: String) -> Bool {
