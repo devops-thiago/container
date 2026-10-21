@@ -30,6 +30,9 @@ import SystemPackage
 /// here: unpack the image, find the kernel, fetch and unpack the init image, create. It never
 /// pulls the image itself; a missing one is the client's to pull.
 struct EngineContainersClient: EngineContainers {
+    /// The socket this agent serves: what a container binding the host's Docker socket gets.
+    let dockerSocket: String
+
     /// The engine's configuration, from the roots the running engine reports.
     static func systemConfig() async throws -> ContainerSystemConfig {
         let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
@@ -86,7 +89,7 @@ struct EngineContainersClient: EngineContainers {
         let resources = try Parser.resources(cpus: nil, memory: nil, defaultCPUs: system.container.cpus, defaultMemory: system.container.memory)
         return DockerCreateDefaults(
             cpus: resources.cpus, memoryInBytes: resources.memoryInBytes, dnsDomain: system.dns.domain, builtinNetwork: try await builtinNetwork(),
-            hostArchitecture: Platform.current.architecture)
+            hostArchitecture: Platform.current.architecture, dockerSocket: dockerSocket)
     }
 
     func allocatePort() throws -> UInt16 {

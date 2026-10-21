@@ -64,13 +64,19 @@ public struct DockerCreateDefaults: Sendable {
     /// The host's architecture as OCI names it; an `amd64` image on an `arm64` host runs
     /// under Rosetta.
     public var hostArchitecture: String
+    /// The socket this service serves, which a bind of the host's Docker socket mounts.
+    public var dockerSocket: String
 
-    public init(cpus: Int, memoryInBytes: UInt64, dnsDomain: String? = nil, builtinNetwork: String?, hostArchitecture: String = "arm64") {
+    public init(
+        cpus: Int, memoryInBytes: UInt64, dnsDomain: String? = nil, builtinNetwork: String?, hostArchitecture: String = "arm64",
+        dockerSocket: String
+    ) {
         self.cpus = cpus
         self.memoryInBytes = memoryInBytes
         self.dnsDomain = dnsDomain
         self.builtinNetwork = builtinNetwork
         self.hostArchitecture = hostArchitecture
+        self.dockerSocket = dockerSocket
     }
 }
 
@@ -174,7 +180,7 @@ public enum ContainerCreateMapper {
         configuration.resources = try resources(host, defaults: defaults)
 
         // Mounts.
-        var mounts = Mounts()
+        var mounts = Mounts(dockerSocket: defaults.dockerSocket)
         for bind in host.Binds ?? [] {
             try mounts.addBind(bind)
         }
@@ -326,9 +332,16 @@ public enum ContainerCreateMapper {
 
     /// The mounts of a create, in the order given, refusing a destination given twice.
     struct Mounts {
+        /// What a bind of the host's Docker socket mounts: this service's own, as Docker
+        /// Desktop mounts its engine's. Never the host's, which may be another engine's.
+        var dockerSocket: String
         var filesystems: [Filesystem] = []
         var volumes: [DockerVolumeRequest] = []
         var destinations: Set<String> = []
+
+        func bindSource(_ source: String) -> String {
+            DockerHostSocket.bindSource(for: source, enginePath: dockerSocket)
+        }
 
         mutating func claim(_ destination: String) throws(DockerAPIError) {
             guard destination.hasPrefix("/") else {
@@ -362,7 +375,7 @@ public enum ContainerCreateMapper {
             let (source, destination) = (parts[0], parts[1])
             if source.hasPrefix("/") {
                 try claim(destination)
-                filesystems.append(.virtiofs(source: source, destination: destination, options: readOnly ? ["ro"] : []))
+                filesystems.append(.virtiofs(source: bindSource(source), destination: destination, options: readOnly ? ["ro"] : []))
             } else {
                 try addVolume(DockerVolumeRequest(name: source, destination: destination, readOnly: readOnly))
             }
@@ -377,7 +390,7 @@ public enum ContainerCreateMapper {
                     throw .badRequest("invalid mount config for type \"bind\": invalid mount path: '\(mount.Source ?? "")' mount path must be absolute")
                 }
                 try claim(destination)
-                filesystems.append(.virtiofs(source: source, destination: destination, options: readOnly ? ["ro"] : []))
+                filesystems.append(.virtiofs(source: bindSource(source), destination: destination, options: readOnly ? ["ro"] : []))
             case "volume":
                 if let source = mount.Source, !source.isEmpty {
                     try addVolume(DockerVolumeRequest(name: source, destination: destination, readOnly: readOnly))

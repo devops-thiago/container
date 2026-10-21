@@ -106,7 +106,7 @@ extension DockerAPIAgent {
             // Uploads into containers that are not running are held beside the identities, where
             // the engine finds them when it starts the container, whoever starts it.
             let copies = DockerPendingCopies(queue: PendingCopyQueue(appRoot: URL(fileURLWithPath: ApplicationRoot.path.string, isDirectory: true)))
-            let engine = EngineContainersClient()
+            let engine = EngineContainersClient(dockerSocket: socket)
             // The engine's container events while anyone streams `/events`; for an engine
             // without them, what this service does as it does it, and the engine's containers
             // read once a second.

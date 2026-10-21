@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
-import CryptoKit
 import Foundation
 import Logging
 
@@ -154,8 +153,9 @@ public struct DockerIdentityTable: Sendable, Equatable {
     }
 
     /// The Docker ID of a container this service did not create.
+    /// Its short form is the container's hostname when its name is too long to be one.
     public static func foreignID(engineID: String) -> String {
-        SHA256.hash(data: Data(engineID.utf8)).map { String(format: "%02x", $0) }.joined()
+        ContainerHostname.dockerID(for: engineID)
     }
 
     static func isDockerID(_ text: String) -> Bool {

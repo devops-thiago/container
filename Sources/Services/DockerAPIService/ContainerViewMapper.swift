@@ -241,7 +241,7 @@ public enum ContainerViewMapper {
             GlobalIPv6Address: attachment.ipv6Address?.address.description ?? "",
             GlobalIPv6PrefixLen: attachment.ipv6Address.map { Int($0.prefix.length) } ?? 0,
             MacAddress: attachment.macAddress?.description ?? "",
-            DNSNames: [container.name, container.engineID])
+            DNSNames: [container.name, ContainerHostname.default(for: container.engineID)])
     }
 
     static func networks(_ container: DockerContainer, context: DockerViewContext) -> [String: DockerEndpoint] {
@@ -383,7 +383,7 @@ public enum ContainerViewMapper {
                 LogConfig: DockerLogConfig(type: "json-file")),
             Mounts: mounts(configuration),
             Config: DockerContainerConfigView(
-                Hostname: configuration.hostname ?? container.engineID,
+                Hostname: configuration.hostname ?? ContainerHostname.default(for: container.engineID),
                 Domainname: extras?.domainname ?? "",
                 User: user(process.user),
                 AttachStdin: extras?.attachStdin ?? false,
