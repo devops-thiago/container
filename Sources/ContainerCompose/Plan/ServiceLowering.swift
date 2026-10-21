@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerResource
 import CryptoKit
 import Foundation
@@ -94,7 +95,7 @@ enum ServiceLowering {
         if !ManagedContainer.nameValid(containerName) {
             diagnostics.error(
                 path,
-                "its container would be named '\(containerName)', which is longer than the 63 characters a container name can have; give the project a shorter name with -p, or the service a container_name",
+                "its container would be named '\(containerName)', which is longer than the \(ManagedContainer.maxNameLength) characters a container name can have; give the project a shorter name with -p, or the service a container_name",
                 at: service.location)
         }
         let image = service.image ?? "\(context.project)-\(service.name)"
@@ -139,7 +140,9 @@ enum ServiceLowering {
             let suffix = mount.readOnly ? ":ro" : ""
             switch mount.kind {
             case .bind(let source):
-                bindSources.append(source)
+                // The host's Docker socket is the engine's own (`container run` maps it), and
+                // never a folder to make.
+                if !DockerHostSocket.names(source) { bindSources.append(source) }
                 options.option("--volume", "\(source):\(mount.target)\(suffix)")
             case .volume(let key):
                 guard let volume = context.volumeNames[key] else { continue }

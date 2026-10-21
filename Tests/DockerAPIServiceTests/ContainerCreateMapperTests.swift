@@ -322,6 +322,30 @@ struct ContainerCreateMapperTests {
         #expect(filePlan.configuration.mounts.first?.sharedFolder == directory.resolvingSymlinksInPath().path)
     }
 
+    @Test(
+        "a bind of the host's Docker socket mounts the socket this service serves, never the host's",
+        arguments: [
+            "/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock", "/var/run/../run/docker.sock",
+        ])
+    func hostDockerSocket(source: String) throws {
+        // As -v, as dev containers and Ryuk send it.
+        let bound = try Fixtures.plan(Self.ryukCreate(socket: source), reference: "testcontainers/ryuk:0.14.0")
+        #expect(bound.configuration.mounts.map(\.source) == [Fixtures.dockerSocket])
+        #expect(bound.configuration.mounts.map(\.destination) == ["/var/run/docker.sock"])
+        // As --mount type=bind.
+        let mounted = try Fixtures.plan(
+            #"{"Image":"alpine","HostConfig":{"Mounts":[{"Type":"bind","Source":"\#(source)","Target":"/var/run/docker-host.sock","ReadOnly":true}]}}"#)
+        #expect(mounted.configuration.mounts.map(\.source) == [Fixtures.dockerSocket])
+        #expect(mounted.configuration.mounts.map(\.options) == [["ro"]])
+    }
+
+    @Test("other sockets and paths named docker.sock bind as they are")
+    func otherDockerSockets() throws {
+        let plan = try Fixtures.plan(
+            #"{"Image":"alpine","HostConfig":{"Binds":["/Users/me/.docker/run/docker.sock:/a","/var/run/docker.sock.d:/b","/var/run:/c"]}}"#)
+        #expect(plan.configuration.mounts.map(\.source) == ["/Users/me/.docker/run/docker.sock", "/var/run/docker.sock.d", "/var/run"])
+    }
+
     @Test("binds map a host path to a shared folder and a name to a volume")
     func binds() throws {
         let plan = try Fixtures.plan(#"{"Image":"alpine","HostConfig":{"Binds":["/Users/me/src:/src:ro","data:/data","/tmp/x:/x:rw,z"]}}"#)

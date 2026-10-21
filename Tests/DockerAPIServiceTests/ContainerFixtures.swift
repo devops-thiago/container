@@ -43,7 +43,8 @@ enum Fixtures {
             entrypoint: entrypoint, cmd: cmd, workingDir: workingDir, labels: labels, stopSignal: stopSignal, healthCheck: healthCheck)
     }
 
-    static let defaults = DockerCreateDefaults(cpus: 4, memoryInBytes: 1 << 30, dnsDomain: nil, builtinNetwork: builtin)
+    static let dockerSocket = "/Users/me/Library/Group Containers/group.example/run/docker.sock"
+    static let defaults = DockerCreateDefaults(cpus: 4, memoryInBytes: 1 << 30, dnsDomain: nil, builtinNetwork: builtin, dockerSocket: dockerSocket)
 
     static let reservation = DockerIdentityReservation(name: "web", dockerID: "abcdef012345" + String(repeating: "0", count: 52))
 

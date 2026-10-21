@@ -33,6 +33,9 @@ struct NetworkConfigurationTest {
     @Test func testValidationGoodId() throws {
         let ids = [
             String(repeating: "0", count: 63),
+            // A Compose network named after a long project folder, as Docker takes it.
+            "6038_desenvolvimento_backend_com_ia_essencial_java_devcontainer_devcontainer-net",
+            String(repeating: "0", count: NetworkResource.maxNameLength),
             "0",
             "0-_.1",
         ]
@@ -54,7 +57,7 @@ struct NetworkConfigurationTest {
 
     @Test func testValidationBadId() throws {
         let ids = [
-            String(repeating: "0", count: 64),
+            String(repeating: "0", count: NetworkResource.maxNameLength + 1),
             "-foo",
             "foo_",
             "Foo",

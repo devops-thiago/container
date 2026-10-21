@@ -585,7 +585,7 @@ public struct Parser {
                 case "virtiofs", "bind":
                     // For bind mounts, resolve both absolute and relative paths
                     let url = basePath?.appending(path: val).standardizedFileURL ?? URL(filePath: val)
-                    let absolutePath = url.absoluteURL.path
+                    let absolutePath = try bindSource(url.absoluteURL.path)
 
                     // A folder or a single file, as with Docker; the runtime shares a file's
                     // folder with the VM and binds only the file into the container.
@@ -685,7 +685,7 @@ public struct Parser {
                     ))
             }
             let url = basePath?.appending(path: src).standardizedFileURL ?? URL(filePath: src)
-            let absolutePath = url.absoluteURL.path
+            let absolutePath = try bindSource(url.absoluteURL.path)
 
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: absolutePath, isDirectory: &isDirectory) else {
@@ -705,6 +705,17 @@ public struct Parser {
         default:
             throw ContainerizationError(.invalidArgument, message: "invalid volume format \(volume)")
         }
+    }
+
+    /// The host path a bind of `path` shares: the engine's own Docker API socket for the host's
+    /// Docker socket, as Docker Desktop does, and `path` itself otherwise.
+    static func bindSource(_ path: String, enginePath: @autoclosure () -> String = PathUtils.dockerSocketPath()) throws -> String {
+        guard DockerHostSocket.names(path) else { return path }
+        let socket = enginePath()
+        guard DockerHostSocket.isServed(at: socket) else {
+            throw ContainerizationError(.invalidArgument, message: DockerHostSocket.notServedMessage)
+        }
+        return socket
     }
 
     public static func validMountType(_ type: String) -> Bool {

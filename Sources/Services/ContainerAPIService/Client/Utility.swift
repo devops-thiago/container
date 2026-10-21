@@ -326,18 +326,22 @@ public struct Utility {
             }
         }
 
+        // The name the container answers to: its ID, or its short ID when the ID is too long
+        // to be a hostname.
+        let hostname = ContainerHostname.default(for: containerId)
+
         // make an FQDN for the first interface
         let fqdn: String?
-        if !containerId.contains(".") {
+        if !hostname.contains(".") {
             // add default domain if it exists, and container ID is unqualified
             if let dnsDomain {
-                fqdn = "\(containerId).\(dnsDomain)."
+                fqdn = "\(hostname).\(dnsDomain)."
             } else {
                 fqdn = nil
             }
         } else {
             // use container ID directly if fully qualified
-            fqdn = "\(containerId)."
+            fqdn = "\(hostname)."
         }
 
         guard networks.isEmpty else {
@@ -359,12 +363,12 @@ public struct Utility {
                 guard item.offset == 0 else {
                     return AttachmentConfiguration(
                         network: item.element.name,
-                        options: AttachmentOptions(hostname: containerId, macAddress: macAddress, mtu: mtu, aliases: aliases)
+                        options: AttachmentOptions(hostname: hostname, macAddress: macAddress, mtu: mtu, aliases: aliases)
                     )
                 }
                 return AttachmentConfiguration(
                     network: item.element.name,
-                    options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: macAddress, mtu: mtu, aliases: aliases)
+                    options: AttachmentOptions(hostname: fqdn ?? hostname, macAddress: macAddress, mtu: mtu, aliases: aliases)
                 )
             }
         }
@@ -375,7 +379,7 @@ public struct Utility {
         }
         return [
             AttachmentConfiguration(
-                network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? containerId, macAddress: nil, mtu: 1280, aliases: try qualifyAliases(combined([]), dnsDomain: dnsDomain)))
+                network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? hostname, macAddress: nil, mtu: 1280, aliases: try qualifyAliases(combined([]), dnsDomain: dnsDomain)))
         ]
     }
 
