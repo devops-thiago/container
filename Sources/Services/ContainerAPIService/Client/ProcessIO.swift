@@ -84,14 +84,25 @@ public struct ProcessIO: Sendable {
             + "Update the container command in SiliconShip Settings for interactive terminal input.\n"
     }
 
+    /// Which of the process's streams this command attaches to. Standard input is attached with
+    /// `-i`, whatever `-a` names, as the Docker CLI does (`opts.go` sets `attachStdin` for `-i`);
+    /// `-a` chooses among the outputs, both when it names none. A terminal has no stderr of its
+    /// own, and a detached process none at all.
+    static func attachedStreams(
+        tty: Bool, interactive: Bool, detach: Bool, streams: [Flags.Management.AttachStream]
+    ) -> (stdin: Bool, stdout: Bool, stderr: Bool) {
+        let named = { (stream: Flags.Management.AttachStream) in streams.isEmpty || streams.contains(stream) }
+        return (stdin: interactive, stdout: !detach && named(.stdout), stderr: !detach && !tty && named(.stderr))
+    }
+
     /// - Parameter launcherSetsRaw: the SiliconShip launcher's terminal-mode probe answers raw
     ///   for this invocation, so a current launcher sets the terminal raw before the CLI starts.
-    /// - Parameter streams: the only streams to attach (`run -a`); every one when empty.
+    /// - Parameter streams: the output streams to attach (`run -a`); both when empty. Standard
+    ///   input follows `interactive` alone, as Docker attaches it whenever `-i` is given.
     public static func create(
         tty: Bool, interactive: Bool, detach: Bool, launcherSetsRaw: Bool = false, streams: [Flags.Management.AttachStream] = []
     ) throws -> ProcessIO {
-        let attached = { (stream: Flags.Management.AttachStream) in streams.isEmpty || streams.contains(stream) }
-        let interactive = interactive && attached(.stdin)
+        let attached = attachedStreams(tty: tty, interactive: interactive, detach: detach, streams: streams)
         var rawConsole = false
         let current: Terminal? = try {
             if detach || !tty || !interactive {
@@ -108,7 +119,7 @@ public struct ProcessIO: Sendable {
         var stdio = [FileHandle?](repeating: nil, count: 3)
 
         let stdin: Pipe? = {
-            if !interactive {
+            if !attached.stdin {
                 return nil
             }
             return Pipe()
@@ -136,7 +147,7 @@ public struct ProcessIO: Sendable {
         }
 
         let stdout: Pipe? = {
-            if detach || !attached(.stdout) {
+            if !attached.stdout {
                 return nil
             }
             return Pipe()
@@ -167,7 +178,7 @@ public struct ProcessIO: Sendable {
         }
 
         let stderr: Pipe? = {
-            if detach || tty || !attached(.stderr) {
+            if !attached.stderr {
                 return nil
             }
             return Pipe()

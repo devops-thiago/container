@@ -115,7 +115,7 @@ public struct Application: AsyncLoggableCommand {
         }
 
         do {
-            var command = try Application.parseAsRoot(args)
+            var command = try Application.parseDockerSpellings(args)
             if var asyncCommand = command as? AsyncParsableCommand {
                 try await asyncCommand.run()
             } else {

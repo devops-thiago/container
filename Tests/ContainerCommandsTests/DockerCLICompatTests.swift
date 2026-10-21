@@ -29,7 +29,7 @@ import Testing
 /// `container` (#619), each piece where `container`'s own syntax does not have it.
 struct DockerCLICompatTests {
     private func parse<Command: ParsableCommand>(_ arguments: [String], as type: Command.Type = Command.self) throws -> Command {
-        try #require(try Application.parseAsRoot(arguments) as? Command, "\(arguments) did not parse as \(Command.self)")
+        try #require(try Application.parseDockerSpellings(arguments) as? Command, "\(arguments) did not parse as \(Command.self)")
     }
 
     // MARK: -v
@@ -191,13 +191,21 @@ struct DockerCLICompatTests {
         #expect(try DockerInspection.render([.init(value: view), .init(value: view)], template: DockerTemplate("{{.State.Status}}")) == "running\nrunning")
     }
 
-    @Test("a container is found by ID, by name, then by a prefix of one ID only")
+    @Test("a container is found by ID, by name, then by a prefix of one hex ID only")
     func containerLookup() throws {
-        let snapshots = [try Self.snapshot(id: "web-1"), try Self.snapshot(id: "web-2"), try Self.snapshot(id: "db", labels: ["com.siliconship.docker.name": "store"])]
+        let snapshots = [
+            try Self.snapshot(id: "web-1"), try Self.snapshot(id: "alpine-dev"), try Self.snapshot(id: "abc123def456"),
+            try Self.snapshot(id: "abd000000000"),
+        ]
         let views = DockerInspection.views(snapshots, context: DockerViewContext(now: Self.now, builtinNetwork: nil))
         #expect(DockerInspection.container("web-1", in: views)?.Id == "web-1")
-        #expect(DockerInspection.container("d", in: views)?.Id == "db")
-        #expect(DockerInspection.container("web", in: views) == nil, "two IDs begin with it")
+        #expect(DockerInspection.container("/web-1", in: views)?.Id == "web-1")
+        // A name is not a prefix: `inspect alpine` goes on to the image `alpine`.
+        #expect(DockerInspection.container("alpine", in: views) == nil)
+        #expect(DockerInspection.container("web", in: views) == nil)
+        // Hex is a Docker ID's prefix, when one ID begins with it.
+        #expect(DockerInspection.container("abc1", in: views)?.Id == "abc123def456")
+        #expect(DockerInspection.container("ab", in: views) == nil, "two IDs begin with it")
         #expect(DockerInspection.container("nothing", in: views) == nil)
         #expect(DockerInspection.notFound("x", type: .image) == "No such image: x")
         #expect(DockerInspection.notFound("x", type: nil) == "No such object: x")
@@ -214,7 +222,7 @@ struct DockerCLICompatTests {
             "-c", "echo Container started\ntrap \"exit 0\" 15\nexec \"$@\"\nwhile sleep 1 & wait $!; do :; done", "-",
         ]
         let run: Application.ContainerRun = try parse(arguments)
-        #expect(run.sigProxy == DockerBool(false))
+        #expect(!run.proxySignals)
         #expect(try run.managementFlags.attachStreams == [.stdout, .stderr])
         // Neither stream is an arch: the host's stays.
         #expect(run.managementFlags.arch == Arch.hostArchitecture().rawValue)
@@ -246,16 +254,61 @@ struct DockerCLICompatTests {
         #expect(throws: (any Error).self) { try Application.parseAsRoot(["run", "-d", "-a", "stdout", "alpine"]) }
     }
 
-    @Test("--sig-proxy is a flag, or takes a value after =; the image after it stays the image")
+    @Test("--sig-proxy is a bool flag as Docker's: alone it is true, a value only follows =, and a bad one is refused")
     func sigProxy() throws {
         let bare: Application.ContainerRun = try parse(["run", "--sig-proxy", "alpine", "sh"])
-        #expect(bare.sigProxy == DockerBool(true))
+        #expect(bare.proxySignals)
         #expect(bare.image == "alpine")
         #expect(bare.arguments == ["sh"])
-        let off: Application.ContainerRun = try parse(["run", "--sig-proxy=0", "alpine"])
-        #expect(off.sigProxy == DockerBool(false))
+        for value in ["false", "0", "f", "F", "FALSE", "False"] {
+            let off: Application.ContainerRun = try parse(["run", "--sig-proxy=\(value)", "alpine"])
+            #expect(!off.proxySignals, "\(value)")
+        }
+        let on: Application.ContainerRun = try parse(["run", "--sig-proxy=true", "alpine"])
+        #expect(on.proxySignals)
         let unset: Application.ContainerRun = try parse(["run", "alpine"])
-        #expect(unset.sigProxy == nil)
+        #expect(unset.proxySignals)
+        // A separate value is not the flag's: Docker runs the image `false` here.
+        let separate: Application.ContainerRun = try parse(["run", "--sig-proxy", "false", "alpine"])
+        #expect(separate.proxySignals)
+        #expect(separate.image == "false")
+        #expect(separate.arguments == ["alpine"])
+        for bad in ["no", "fasle", "yes", ""] {
+            #expect(throws: (any Error).self, "\(bad)") { try Application.parseDockerSpellings(["run", "--sig-proxy=\(bad)", "alpine"]) }
+        }
+        // The container's own arguments keep the spelling, wherever the flag is.
+        let passed: Application.ContainerRun = try parse(["run", "--sig-proxy=false", "alpine", "tool", "--sig-proxy=yes"])
+        #expect(!passed.proxySignals)
+        #expect(passed.arguments == ["tool", "--sig-proxy=yes"])
+        let noun: Application.ContainerRun = try parse(["--debug", "container", "run", "--sig-proxy=false", "alpine"])
+        #expect(!noun.proxySignals)
+        // Another command's arguments are not touched.
+        let exec: Application.ContainerExec = try parse(["exec", "web", "tool", "--sig-proxy=false"])
+        #expect(exec.arguments == ["tool", "--sig-proxy=false"])
+    }
+
+    @Test("create refuses an --attach that names no stream, as run does")
+    func createAttach() throws {
+        #expect(throws: (any Error).self) { try Application.parseDockerSpellings(["create", "--attach", "bogus", "alpine"]) }
+        let created: Application.ContainerCreate = try parse(["create", "--attach", "STDERR", "alpine"])
+        #expect(try created.managementFlags.attachStreams == [.stderr])
+    }
+
+    @Test("info --format takes a Docker template over /info's body, with the CPUs and memory Dev Containers reads")
+    func infoFormat() throws {
+        let info: Application.Info = try parse(["info", "--format", "{{json .}}"])
+        #expect(try info.command.format.dockerTemplate() != nil)
+        let summary = EngineSummary(
+            engineVersion: "1.6.0", engineCommit: "abc", kernelVersion: "", operatingSystem: "SiliconShip", architecture: "aarch64", cpus: 8,
+            memoryBytes: 16 << 30, containers: 2, containersRunning: 1, containersStopped: 1, images: 3, name: "mac", rootDirectory: "/r")
+        let json = try DockerTemplate("{{json .}}").render(SystemRoutes.InfoBody(summary))
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        #expect(object["NCPU"] as? Int == 8)
+        #expect(object["MemTotal"] as? Int64 == 16 << 30)
+        #expect(object["ServerVersion"] as? String == DockerAPIVersion.dockerRelease)
+        #expect(try DockerTemplate("{{.NCPU}}").render(SystemRoutes.InfoBody(summary)) == "8")
+        let own: Application.SystemStatus = try parse(["system", "status", "--format", "json"])
+        #expect(own.format == .format(.json))
     }
 
     @Test("the launcher's terminal probe parses Dev Containers' run and exec argv")

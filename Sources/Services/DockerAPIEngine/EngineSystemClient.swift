@@ -18,9 +18,12 @@ import ContainerAPIClient
 import DockerAPIService
 import Foundation
 
-/// The engine summary `/version` and `/info` report, read from the API server.
-struct EngineSystemClient: EngineSystem {
-    func summary() async throws -> EngineSummary {
+/// The engine summary `/version` and `/info` report, read from the API server: what the
+/// Docker API agent serves and `container info --format` prints.
+public struct EngineSystemClient: EngineSystem {
+    public init() {}
+
+    public func summary() async throws -> EngineSummary {
         let health = try await ClientHealthCheck.ping()
         let containers = try await ContainerClient().list()
         let images = try await ClientImage.list()

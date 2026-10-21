@@ -201,6 +201,43 @@ struct EngineEventTests {
         await bus.shutdown()
     }
 
+    @Test("a bus reporting since a moment says what the first reading shows was made or started since, once, and nothing older")
+    func reportsSinceBegan() async throws {
+        let feed = Feed()
+        let engine = EventTests.Engine()
+        // `container events` began; `run` made and started a container before the bus was
+        // following the engine, so only the first reading shows it.
+        let began = Date().addingTimeInterval(-30)
+        let fresh = DockerContainer(
+            snapshot: Fixtures.snapshot(
+                Fixtures.configuration(id: "devc", labels: ["devcontainer.local_folder": "/a"], created: began.addingTimeInterval(10)),
+                status: .running, started: began.addingTimeInterval(20)),
+            dockerID: "devc", name: "devc")
+        let old = DockerContainer(
+            snapshot: Fixtures.snapshot(
+                Fixtures.configuration(id: "older", created: began.addingTimeInterval(-600)), status: .running, started: began.addingTimeInterval(-300)),
+            dockerID: "older", name: "older")
+        engine.set([fresh, old])
+        let bus = DockerEventBus(
+            limits: .init(engineRecheck: .milliseconds(50)), source: engine.source, feed: feed, eventID: { $0.id }, reportSince: began)
+        let collector = try await EventTests.subscribe(bus)
+        let reported = await collector.take(2)
+        #expect(reported.map(\.action) == ["create", "start"])
+        #expect(reported.allSatisfy { $0.actorID == "devc" && $0.attributes["devcontainer.local_folder"] == "/a" })
+        #expect(await Self.waitFor { await bus.followingEngine })
+        // The engine's own start for it, from before the reading, is not said again.
+        let engineStart = ContainerEvent(
+            sequence: 1, timeNano: Int64(began.addingTimeInterval(20).timeIntervalSince1970 * 1_000_000_000), id: "devc", incarnation: "inc-1",
+            action: .start, name: "devc", image: "docker.io/library/alpine:latest", labels: [:])
+        await bus.apply(engineStart)
+        // A start after the reading is.
+        feed.send(.start, id: "later")
+        let after = await collector.take(1)
+        #expect(after.map(\.actorID) == ["later"])
+        #expect(await collector.settle().isEmpty, "nothing for the container from before the command began")
+        await bus.shutdown()
+    }
+
     @Test("compose's filters take the events of its project's containers, and only those")
     func composeFilters() throws {
         let filter = try DockerEventFilter([

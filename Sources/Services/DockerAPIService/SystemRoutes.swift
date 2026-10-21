@@ -151,7 +151,8 @@ public enum SystemRoutes {
         }
     }
 
-    struct InfoBody: Encodable {
+    /// `/info`'s body, which `container info --format` also prints.
+    public struct InfoBody: Encodable, Sendable {
         let ID: String
         let Containers: Int
         let ContainersRunning: Int
@@ -172,7 +173,7 @@ public enum SystemRoutes {
         let ExperimentalBuild: Bool
         let Warnings: [String]
 
-        init(_ engine: EngineSummary) {
+        public init(_ engine: EngineSummary) {
             ID = engine.name
             Containers = engine.containers
             ContainersRunning = engine.containersRunning

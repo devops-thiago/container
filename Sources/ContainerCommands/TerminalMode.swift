@@ -29,7 +29,7 @@ extension Application {
         arguments: [String],
         container: (String) async -> ContainerSnapshot? = { try? await ContainerClient().get(id: $0) }
     ) async -> String {
-        guard let command = try? parseAsRoot(arguments) else { return "none" }
+        guard let command = try? parseDockerSpellings(arguments) else { return "none" }
         switch command {
         case let command as ContainerExec:
             return command.processFlags.tty && command.processFlags.interactive && !command.detach ? "raw" : "none"

@@ -327,10 +327,12 @@ public struct Flags {
             virtualization: Bool,
             volumes: [String],
             networkAliases: [String] = [],
-            health: Flags.Health = .none
+            health: Flags.Health = .none,
+            attach: [String] = []
         ) {
             self.addHosts = addHosts
             self.archOrStreams = [arch]
+            self.attach = attach
             self.capAdd = capAdd
             self.capDrop = capDrop
             self.cidfile = cidfile

@@ -183,9 +183,9 @@ struct PrestartCopyTests {
     func successfulCopyTasks() async throws {
         let calls = Mutex(Set<String>())
         try await VminitdCopyAgent.runCopyTasks(
-            rpc: { calls.withLock { $0.insert("rpc") } },
-            transfer: { calls.withLock { $0.insert("transfer") } },
-            closeListener: { calls.withLock { $0.insert("close") } })
+            rpc: { _ = calls.withLock { $0.insert("rpc") } },
+            transfer: { _ = calls.withLock { $0.insert("transfer") } },
+            closeListener: { _ = calls.withLock { $0.insert("close") } })
         #expect(calls.withLock { $0 } == ["rpc", "transfer", "close"])
     }
     @Test("a failed transfer cancels the outstanding RPC", .timeLimit(.minutes(1)))

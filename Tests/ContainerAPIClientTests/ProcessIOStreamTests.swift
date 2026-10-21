@@ -18,21 +18,37 @@ import Testing
 
 @testable import ContainerAPIClient
 
-/// `run -a`: only the streams named are attached, as Docker's `--attach`.
+/// `run -a`: the streams attached, as the Docker CLI attaches them.
 struct ProcessIOStreamTests {
-    private func attached(_ streams: [Flags.Management.AttachStream], interactive: Bool = false) throws -> [Bool] {
-        let io = try ProcessIO.create(tty: false, interactive: interactive, detach: false, streams: streams)
-        defer { try? io.close() }
-        return io.stdio.map { $0 != nil }
+    private func attached(
+        _ streams: [Flags.Management.AttachStream], interactive: Bool = false, tty: Bool = false, detach: Bool = false
+    ) -> [Bool] {
+        let chosen = ProcessIO.attachedStreams(tty: tty, interactive: interactive, detach: detach, streams: streams)
+        return [chosen.stdin, chosen.stdout, chosen.stderr]
     }
 
-    @Test("without -a every stream is attached; with it, only the ones named")
-    func onlyNamedStreams() throws {
-        #expect(try attached([]) == [false, true, true])
-        #expect(try attached([.stdout, .stderr]) == [false, true, true])
-        #expect(try attached([.stdout]) == [false, true, false])
-        #expect(try attached([.stderr]) == [false, false, true])
-        // -i without -a stdin leaves stdin alone, as dockerd's attach does.
-        #expect(try attached([.stdout], interactive: true) == [false, true, false])
+    @Test("without -a both outputs are attached; with it, only the ones named")
+    func onlyNamedStreams() {
+        #expect(attached([]) == [false, true, true])
+        #expect(attached([.stdout, .stderr]) == [false, true, true])
+        #expect(attached([.stdout]) == [false, true, false])
+        #expect(attached([.stderr]) == [false, false, true])
+        #expect(attached([.stdout], tty: true) == [false, true, false])
+        #expect(attached([], detach: true) == [false, false, false])
+    }
+
+    @Test("-i attaches stdin whatever -a names, and -a stdin alone does not open it")
+    func stdinFollowsInteractive() {
+        // The Docker CLI sets attachStdin for -i (cli/command/container/opts.go).
+        #expect(attached([.stdout], interactive: true) == [true, true, false])
+        #expect(attached([], interactive: true) == [true, true, true])
+        #expect(attached([.stdin]) == [false, false, false])
+    }
+
+    @Test("the pipes made are the streams chosen")
+    func pipesFollowTheChoice() throws {
+        let io = try ProcessIO.create(tty: false, interactive: false, detach: false, streams: [.stdout])
+        defer { try? io.close() }
+        #expect(io.stdio.map { $0 != nil } == [false, true, false])
     }
 }

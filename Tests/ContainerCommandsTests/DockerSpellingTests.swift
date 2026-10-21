@@ -181,7 +181,7 @@ struct DockerSpellingTests {
         #expect(version.command.format == .format(.json))
         _ = try parse(["version"], as: Application.Version.self)
         let info: Application.Info = try parse(["info", "--format", "json"])
-        #expect(info.command.format == .json)
+        #expect(info.command.format == .format(.json))
         _ = try parse(["system", "version"], as: Application.SystemVersion.self)
         _ = try parse(["system", "status"], as: Application.SystemStatus.self)
         for spelling in Application.systemRootSpellings {

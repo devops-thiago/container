@@ -17,6 +17,7 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerResource
+import ContainerizationError
 import DockerAPIEngine
 import DockerAPIService
 import Foundation
@@ -76,23 +77,35 @@ extension Application {
         }
 
         public func run() async throws {
+            // Changes from here on are printed, the ones made while this attaches to the engine
+            // included: a tool runs `events` and at once the command whose start it waits for.
+            let began = Date()
             let filter = try eventFilter()
             let template = try template()
-            // An engine that does not answer is said now, rather than streamed silently.
-            _ = try await ClientHealthCheck.ping(timeout: .seconds(10))
             let bus = DockerEventBus(
                 log: log,
                 source: {
                     try await ContainerClient().list(filters: ContainerListFilters.all.withoutInfrastructure()).map(DockerInspection.dockerContainer)
                 },
                 feed: EngineEventFeedClient(),
-                eventID: { $0.id })
+                eventID: { $0.id },
+                reportSince: began)
             let events = try await bus.subscribe(filter).events
+            // An engine that does not answer is said, rather than streamed silently.
+            _ = try await ClientHealthCheck.ping(timeout: .seconds(10))
+            // A reader that went away ends this quietly, as it would end `docker events`.
+            signal(SIGPIPE, SIG_IGN)
             for await event in events {
                 let line = try template.map { try $0.render(event.message) } ?? Self.text(event)
                 // Each line as it happens: a reader waits on it, and stdout to a pipe is buffered.
-                FileHandle.standardOutput.write(Data((line + "\n").utf8))
+                do {
+                    try FileHandle.standardOutput.write(contentsOf: Data((line + "\n").utf8))
+                } catch {
+                    return
+                }
             }
+            // The stream ends only when this reader fell behind and was dropped.
+            throw ContainerizationError(.internalError, message: "events stopped: this reader fell behind")
         }
 
         /// Docker's line for an event without a template: its time, type, action and actor,

@@ -95,12 +95,15 @@ enum DockerInspection {
         DockerContainer(snapshot: snapshot, dockerID: snapshot.id, name: DockerIdentityTable.engineName(snapshot))
     }
 
-    /// The container `name` names, as dockerd finds one: by ID, by name, then by a prefix of
-    /// one ID only.
+    /// The container `name` names, as dockerd finds one: by ID, by name, then, for hex that
+    /// begins one ID only, by that prefix. IDs here are mostly names, and dockerd's prefix
+    /// lookup is of hex IDs: `inspect alpine` must not find a container `alpine-dev` before
+    /// the image `alpine`.
     static func container(_ name: String, in containers: [String: DockerContainerInspect]) -> DockerContainerInspect? {
         if let exact = containers[name] { return exact }
         let bare = name.hasPrefix("/") ? String(name.dropFirst()) : name
         if let named = containers.values.first(where: { $0.Name == "/" + bare }) { return named }
+        guard !name.isEmpty, name.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return nil }
         let prefixed = containers.filter { $0.key.hasPrefix(name) }
         return prefixed.count == 1 ? prefixed.first?.value : nil
     }

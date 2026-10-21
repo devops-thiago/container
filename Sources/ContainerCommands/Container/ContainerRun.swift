@@ -65,9 +65,19 @@ extension Application {
         public var logOptions: Flags.Logging
 
         /// Docker's `--sig-proxy`, which tools that drive the Docker CLI pass as
-        /// `--sig-proxy=false` to keep a container running when they stop this command.
-        @Option(name: .customLong("sig-proxy"), defaultAsFlag: DockerBool(true), parsing: .next, help: .hidden)
-        var sigProxy: DockerBool?
+        /// `--sig-proxy=false` to keep a container running when they stop this command. A bool
+        /// flag as Docker's: alone it is true, and a value only follows `=`
+        /// (`Application.parseDockerSpellings` hands that form to `sigProxyValue`).
+        @Flag(name: .customLong("sig-proxy"), help: .hidden)
+        var sigProxyFlag = false
+
+        @Option(name: .customLong(DockerSpellings.sigProxyValue), help: .hidden)
+        var sigProxyValue: String?
+
+        /// Whether the signals this command receives go to the container.
+        var proxySignals: Bool {
+            sigProxyValue.flatMap(DockerBool.init(argument:))?.value ?? true
+        }
 
         @Argument(help: "Image name")
         var image: String
@@ -76,6 +86,9 @@ extension Application {
         var arguments: [String] = []
 
         public func validate() throws {
+            if let value = sigProxyValue, DockerBool(argument: value) == nil {
+                throw ValidationError(DockerSpellings.invalidBool(value, flag: "--sig-proxy"))
+            }
             if try !managementFlags.attachStreams.isEmpty && managementFlags.detach {
                 throw ValidationError("conflicting options: cannot specify both --attach and --detach")
             }
@@ -83,7 +96,6 @@ extension Application {
 
         public func run() async throws {
             unsupportedFlags.warnAboutGivenFlags()
-            let proxySignals = sigProxy?.value ?? true
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()
             var exitCode: Int32 = 127
             let id = Utility.createContainerID(name: self.managementFlags.name)

@@ -167,6 +167,12 @@ public actor DockerEventBus {
     private let now: @Sendable () -> Date
     /// The ID an engine event's container is reported by.
     private let eventID: @Sendable (ContainerEvent) -> String
+    /// Changes from this moment on are reported, the ones before the first reading included;
+    /// nil reports only what happens after it.
+    private var reportSince: Date?
+    /// Containers whose create or start the first reading reported, with when it was taken: the
+    /// engine's own event for that change, older than the reading, is not said again.
+    private var reportedByReading: [String: Date] = [:]
     private var subscribers: [UInt64: Subscriber] = [:]
     private var nextID: UInt64 = 0
     private var poller: Task<Void, Never>?
@@ -206,8 +212,10 @@ public actor DockerEventBus {
     public init(
         limits: DockerEventLimits = .init(), log: Logger = Logger(label: "DockerAPIService"), now: @escaping @Sendable () -> Date = { Date() },
         source: ContainerSource? = nil, feed: (any DockerEngineEventFeed)? = nil,
-        eventID: @escaping @Sendable (ContainerEvent) -> String = { DockerEventBus.dockerID($0) }
+        eventID: @escaping @Sendable (ContainerEvent) -> String = { DockerEventBus.dockerID($0) },
+        reportSince: Date? = nil
     ) {
+        self.reportSince = reportSince
         self.limits = limits
         self.source = source
         self.feed = feed
@@ -438,6 +446,9 @@ public actor DockerEventBus {
                 break
             }
         }
+        if let reading = reportedByReading[engineID], event.action == .create || event.action == .start, event.time <= reading {
+            return
+        }
         guard let message = Self.dockerEvent(event, actorID: eventID(event)) else { return }
         switch event.action {
         case .create, .start:
@@ -552,6 +563,10 @@ public actor DockerEventBus {
     func apply(_ containers: [DockerContainer], readingBegan began: UInt64) {
         guard var previous = baseline else {
             baseline = Dictionary(containers.map { ($0.engineID, Self.observe($0)) }, uniquingKeysWith: { first, _ in first })
+            if let since = reportSince {
+                reportSince = nil
+                reportChanges(since: since, in: containers)
+            }
             return
         }
         var seen = Set<String>()
@@ -599,6 +614,26 @@ public actor DockerEventBus {
         // What this service changed before the reading began is in the reading now.
         touched = touched.filter { $0.value > began }
         baseline = previous
+    }
+
+    /// What the first reading shows was made or started since `since`, which the engine's events
+    /// may have said before anyone followed them.
+    private func reportChanges(since: Date, in containers: [DockerContainer]) {
+        let reading = now()
+        for container in containers {
+            let snapshot = container.snapshot
+            let observed = Self.observe(container)
+            var reported = false
+            if snapshot.configuration.creationDate >= since {
+                report("create", observed)
+                reported = true
+            }
+            if observed.state == .running, let started = snapshot.startedDate, started >= since {
+                report("start", observed)
+                reported = true
+            }
+            if reported { reportedByReading[container.engineID] = reading }
+        }
     }
 
     private func report(_ action: String, _ observed: Observed, exitCode: Int32? = nil) {

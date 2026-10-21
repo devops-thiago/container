@@ -63,6 +63,11 @@ extension Application {
         @Argument(parsing: .captureForPassthrough, help: "Container init process arguments")
         var arguments: [String] = []
 
+        public func validate() throws {
+            // Docker's create takes the streams too; a name that is no stream is refused as there.
+            _ = try managementFlags.attachStreams
+        }
+
         public func run() async throws {
             unsupportedFlags.warnAboutGivenFlags()
             let containerSystemConfig: ContainerSystemConfig = try await Application.loadContainerSystemConfig()

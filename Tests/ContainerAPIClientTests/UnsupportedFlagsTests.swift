@@ -77,6 +77,25 @@ struct UnsupportedFlagsTests {
         #expect(management.arch == "amd64")
     }
 
+    @Test("Management made in code, as the app and the k8s plugin make it, reads its streams and arch")
+    func managementMadeInCode() throws {
+        let made = Flags.Management(
+            addHosts: [], arch: "amd64", capAdd: [], capDrop: [], cidfile: "", detach: true,
+            dns: .init(domain: nil, nameservers: [], options: [], searchDomains: []), dnsDisabled: false, entrypoint: nil, hostname: nil,
+            initImage: nil, kernel: nil, kernelArgs: [], labels: [], maskedPaths: [], mounts: [], name: "n", networks: [], os: "linux",
+            platform: nil, publishPorts: [], publishSockets: [], readOnly: false, readonlyPaths: [], remove: false, restart: nil, rosetta: false,
+            runtime: nil, ssh: false, shmSize: nil, sysctls: [], tmpFs: [], useInit: false, virtualization: false, volumes: [])
+        #expect(try made.attachStreams.isEmpty)
+        #expect(made.arch == "amd64")
+        let attached = Flags.Management(
+            addHosts: [], arch: "arm64", capAdd: [], capDrop: [], cidfile: "", detach: false,
+            dns: .init(domain: nil, nameservers: [], options: [], searchDomains: []), dnsDisabled: false, entrypoint: nil, hostname: nil,
+            initImage: nil, kernel: nil, kernelArgs: [], labels: [], maskedPaths: [], mounts: [], name: nil, networks: [], os: "linux",
+            platform: nil, publishPorts: [], publishSockets: [], readOnly: false, readonlyPaths: [], remove: false, restart: nil, rosetta: false,
+            runtime: nil, ssh: false, shmSize: nil, sysctls: [], tmpFs: [], useInit: false, virtualization: false, volumes: [], attach: ["stdout"])
+        #expect(try attached.attachStreams == [.stdout])
+    }
+
     @Test("the health flags are honoured now, so they are not among these")
     func healthFlagsAreNotUnsupported() {
         for flag in ["--no-healthcheck"] {
