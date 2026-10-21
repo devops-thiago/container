@@ -62,6 +62,15 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     var copyBeforeStart = false
     /// What a copy in throws, once.
     var copyInError: (any Error)?
+    /// What a copy in of a source with this name throws, every time.
+    var copyInFailures: [String: any Error] = [:]
+    /// Holds the check for a copy before a start, which a route makes after it has read the
+    /// container's state, until it opens.
+    var copyBeforeStartGate: DockerLatch?
+    /// How often that check was made.
+    private(set) var copyBeforeStartChecks = 0
+    /// Holds the next copy in, once it is recorded, until it opens.
+    var copyInGate: DockerLatch?
     /// The container's status at each copy in, in order.
     private(set) var copyInStatuses: [RuntimeStatus?] = []
 
@@ -245,19 +254,32 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
 
     var copyInStatusCalls: [RuntimeStatus?] { lock.withLock { copyInStatuses } }
 
-    func supportsCopyBeforeStart() async -> Bool { lock.withLock { copyBeforeStart } }
+    func supportsCopyBeforeStart() async -> Bool {
+        let (supported, gate) = lock.withLock {
+            copyBeforeStartChecks += 1
+            return (copyBeforeStart, copyBeforeStartGate)
+        }
+        await gate?.wait()
+        return supported
+    }
 
     func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
         let status = base.snapshot(container.id)?.status
-        let failure: (any Error)? = lock.withLock {
+        let (failure, gate): ((any Error)?, DockerLatch?) = lock.withLock {
             copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))")
             copyRequesters.append("in \(requester ?? "-")")
             copyInStatuses.append(status)
-            defer { copyInError = nil }
-            return copyInError
+            defer {
+                copyInError = nil
+                copyInGate = nil
+            }
+            return (copyInError ?? copyInFailures[source.lastPathComponent], copyInGate)
         }
+        await gate?.wait()
         if let failure { throw failure }
         let target = root.path + (destination.hasSuffix("/") ? destination : destination + "/") + source.lastPathComponent
+        // The engine makes a destination that is missing.
+        try FileManager.default.createDirectory(atPath: (target as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: target, isDirectory: &isDirectory) {
             try FileManager.default.removeItem(atPath: target)
@@ -292,10 +314,11 @@ struct ToolHarness {
 
     static func start(
         options: DockerToolOptions = DockerToolOptions(logPollInterval: .milliseconds(20), logStatusInterval: .milliseconds(50), statsInterval: .milliseconds(50)),
-        execLimits: DockerExecLimits = .init(), limits: DockerHTTPLimits = .init()
+        execLimits: DockerExecLimits = .init(), limits: DockerHTTPLimits = .init(), tools: FakeTools? = nil,
+        copies: DockerPendingCopies = DockerPendingCopies()
     ) async throws -> ToolHarness {
-        let tools = try FakeTools(snapshots: snapshots())
-        let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300), logOptions: options)
+        let tools = try tools ?? FakeTools(snapshots: snapshots())
+        let streams = DockerContainerStreams(engine: tools, execLimits: execLimits, drain: .milliseconds(300), logOptions: options, copies: copies)
         let identities = DockerIdentityStore(persistence: nil)
         let server = try await DockerAPIServerTests.Harness.start(limits: limits) { router in
             ContainerRoutes.register(on: &router, engine: tools, identities: identities, streams: streams, now: { Fixtures.now })
@@ -304,10 +327,12 @@ struct ToolHarness {
         return ToolHarness(tools: tools, streams: streams, server: server)
     }
 
-    func stop() async throws {
+    /// - Parameter keepEngine: leave the fake engine's files for a service started after this
+    ///   one, as an agent that restarts finds the engine's.
+    func stop(keepEngine: Bool = false) async throws {
         await streams.shutdown()
         try await server.stop()
-        tools.cleanup()
+        if !keepEngine { tools.cleanup() }
     }
 
     struct Answer {

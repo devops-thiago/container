@@ -256,18 +256,25 @@ extension ContainerToolRoutes.Routes {
     /// `PUT /containers/{id}/archive?path=&noOverwriteDirNonDir=`: unpacks the uploaded tar
     /// into the directory `path`.
     ///
-    /// The body is spooled to disk under its own bound, unpacked into the scratch directory
-    /// through `DockerTarExtractor`'s checks, and each name at the top of it is copied in. The
-    /// archive must be uncompressed, as the CLI sends it.
+    /// The body is spooled to disk under its own bound, unpacked through `DockerTarExtractor`'s
+    /// checks, and each name at the top of it is copied in. The archive must be uncompressed, as
+    /// the CLI sends it.
     ///
     /// A container that is not running has no filesystem to copy into until its VM is up: what
     /// it is sent is unpacked and checked now, and copied in at its next start
     /// (`DockerPendingCopies`). Its paths cannot be looked at before then, so `path` is not
     /// checked to be a directory and `noOverwriteDirNonDir` is not applied; the copy makes a
-    /// missing `path`.
+    /// missing `path`. A start that takes the queue while the upload is unpacked leaves it to be
+    /// copied in here, into the container it started, the same way.
+    ///
+    /// Into a running container that something is still held for (started where this service
+    /// did not see it), what is held goes in first, so the uploads land in the order they came.
     func extract(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let path = try Self.archivePath(request)
         let noOverwriteDirNonDir = try request.bool("noOverwriteDirNonDir")
+        // Before the state is read: a start that takes the queue after this is one it cannot
+        // be held for.
+        let observed = await streams.copies.now()
         let container = try await find(reference)
         let heldForStart = !ContainerViewMapper.isRunning(container.snapshot)
         if heldForStart {
@@ -278,6 +285,7 @@ extension ContainerToolRoutes.Routes {
                     "container \(container.dockerID) is not running: SiliconShip copies files into a running container only, so start it first")
             }
         } else {
+            await streams.applyHeld(to: container.snapshot)
             switch try await probe(container, path, follow: true) {
             case .notFound:
                 throw Self.fileNotFound(path, reference)
@@ -293,10 +301,11 @@ extension ContainerToolRoutes.Routes {
         }
         try Self.refuseCompressed(archive)
 
-        let scratch = try makeScratch()
+        // What is held is kept where the held copies are, so that it outlasts this service.
+        let scratch = try (heldForStart ? streams.copies.makeUploadDirectory() : nil) ?? makeScratch()
         var keepScratch = false
         defer { if !keepScratch { try? FileManager.default.removeItem(at: scratch) } }
-        let root = scratch.appending(path: "root", directoryHint: .isDirectory)
+        let root = scratch.appending(path: DockerPendingCopies.rootName, directoryHint: .isDirectory)
         guard mkdir(root.path(percentEncoded: false), 0o700) == 0 else {
             throw DockerAPIError.internalError("could not make a directory for the archive")
         }
@@ -309,10 +318,13 @@ extension ContainerToolRoutes.Routes {
         }
 
         if heldForStart {
-            await streams.copies.add(
-                DockerPendingCopies.Upload(scratch: scratch, root: root, entries: entries, destination: path, requester: request.peer?.requester),
-                engineID: container.engineID)
-            keepScratch = true
+            let upload = DockerPendingCopies.Upload(scratch: scratch, root: root, entries: entries, destination: path, requester: request.peer?.requester)
+            if try await streams.copies.add(upload, engineID: container.engineID, observed: observed) {
+                keepScratch = true
+                return .empty(.ok)
+            }
+            // Started meanwhile, past the point of copying in what is held: into it now.
+            try await copyIn(entries, from: root, into: path, of: container, reference: reference, requester: request.peer?.requester)
             return .empty(.ok)
         }
         if noOverwriteDirNonDir {
@@ -327,16 +339,21 @@ extension ContainerToolRoutes.Routes {
                 }
             }
         }
+        try await copyIn(entries, from: root, into: path, of: container, reference: reference, requester: request.peer?.requester)
+        return .empty(.ok)
+    }
+
+    /// Copies each of `entries`, unpacked in `root`, into the directory `path` in `container`.
+    func copyIn(
+        _ entries: [DockerExtractedEntry], from root: URL, into path: String, of container: DockerContainer, reference: String, requester: String?
+    ) async throws {
         for entry in entries {
             do {
-                try await engine.copyIn(
-                    container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode,
-                    requester: request.peer?.requester)
+                try await engine.copyIn(container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode, requester: requester)
             } catch {
                 throw DockerAPIError.internalError("could not copy \(entry.name) into \(path) in container \(reference): \(DockerContainerProcesses.message(error))")
             }
         }
-        return .empty(.ok)
     }
 
     /// Refuses an archive that starts like gzip, bzip2, xz or zstd: dockerd takes them, this
