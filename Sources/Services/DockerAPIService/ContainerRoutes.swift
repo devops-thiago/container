@@ -128,7 +128,8 @@ public enum ContainerRoutes {
         for (container, name) in renames {
             do {
                 try await engine.rename(container.snapshot, to: name)
-                await identities.renamedInEngine(container, to: name)
+                // Saved at the next change should this fail: the engine's label has the name.
+                try? await identities.renamedInEngine(container, to: name)
             } catch {
                 log.warning("could not give the engine a container's name", metadata: ["container": "\(container.engineID)", "error": "\(error)"])
             }
@@ -209,7 +210,12 @@ public enum ContainerRoutes {
                     body, reservation: reservation, image: image, imageReference: reference, defaults: try await engine.createDefaults(),
                     allocatePort: allocatePort, newVolumeName: { DockerIdentityTable.randomID(using: &generator) })
                 let incarnation = try await engine.create(plan, requester: request.peer?.requester)
-                await identities.commit(reservation, incarnation: incarnation, extras: plan.extras)
+                do {
+                    try await identities.commit(reservation, incarnation: incarnation, extras: plan.extras)
+                } catch {
+                    await discard(reservation.engineID, volumes: plan.extras.anonymousVolumes)
+                    throw error
+                }
                 await report("create", engineID: reservation.engineID, change: .created)
                 return try .json(DockerContainerCreateResponse(Id: reservation.dockerID, Warnings: plan.warnings), status: .created)
             } catch {
@@ -218,10 +224,22 @@ public enum ContainerRoutes {
             }
         }
 
-        /// Reports what this service just did to a container, as the engine has it now.
+        /// Removes a container whose identity could not be kept, and its anonymous volumes, as
+        /// dockerd removes a container it made but could not write to disk. What cannot be
+        /// removed stays; the create's failure is what the client hears.
+        func discard(_ engineID: String, volumes: [String]) async {
+            if let snapshot = try? await engine.get(engineID) {
+                try? await engine.delete(snapshot, force: true)
+            }
+            for volume in volumes {
+                try? await engine.deleteVolume(volume)
+            }
+        }
+
+        /// Reports what this service just did to a container, as the engine has it now. An
+        /// identity that cannot be saved costs the event, not the operation: the store logs it.
         func report(_ action: String, engineID: String, change: DockerEventBus.ContainerChange, extra: [String: String] = [:]) async {
-            guard let events, let snapshot = try? await engine.get(engineID) else { return }
-            let container = await identities.resolve(snapshot)
+            guard let events, let snapshot = try? await engine.get(engineID), let container = try? await identities.resolve(snapshot) else { return }
             await events.container(action, container, change: change, extra: extra)
         }
 
@@ -262,22 +280,29 @@ public enum ContainerRoutes {
             } catch {
                 if container.extras?.autoRemove == true {
                     try? await engine.delete(container.snapshot, force: true)
-                    await removed(container, failure: DockerContainerProcesses.message(error))
+                    try? await removed(container, failure: DockerContainerProcesses.message(error))
                 }
                 throw error
             }
         }
 
         /// What follows a deletion: waits on it answer, attaches waiting for it go, and so do
-        /// its execs that are not running.
-        func removed(_ container: DockerContainer, failure: String? = nil) async {
+        /// its execs that are not running. Throws, once all of that is done, when the store
+        /// could not save that the container is gone.
+        func removed(_ container: DockerContainer, failure: String? = nil) async throws {
             let engineID = container.engineID
             await report("destroy", container, change: .removed)
-            await identities.forget(engineID: engineID)
+            var unsaved: (any Error)?
+            do {
+                try await identities.forget(engineID: engineID)
+            } catch {
+                unsaved = error
+            }
             await streams.waits.removed(engineID, failure: failure)
             await streams.attaches.release(engineID: engineID)
             await streams.execs.release(engineID: engineID)
             await streams.copies.discard(engineID)
+            if let unsaved { throw unsaved }
         }
 
         func stopTimeout(_ request: DockerRequest) throws(DockerAPIError) -> Int32 {
@@ -348,12 +373,17 @@ public enum ContainerRoutes {
                 } catch let error as DockerAPIError where error.status == .conflict {
                     throw DockerAPIError.conflict("Error when allocating new name: \(error.message)")
                 }
-                await identities.renamedInEngine(container, to: name)
+                do {
+                    try await identities.renamedInEngine(container, to: name)
+                } catch {
+                    // As dockerd, which keeps the old name when it cannot write the new one.
+                    try? await engine.rename(container.snapshot, to: container.name)
+                    throw error
+                }
             } else {
                 try await identities.rename(container, to: name, among: all)
             }
-            if let events {
-                let renamed = await identities.resolve(try await engine.get(container.engineID) ?? container.snapshot)
+            if let events, let renamed = try? await identities.resolve(try await engine.get(container.engineID) ?? container.snapshot) {
                 await events.container("rename", renamed, change: .none, extra: ["oldName": "/" + container.name])
             }
             return .empty()
@@ -374,13 +404,21 @@ public enum ContainerRoutes {
                 await report("die", container, change: .died(exitCode: 137))
             }
             try await engine.delete(container.snapshot, force: force)
-            await removed(container)
+            // The container is gone whether or not the store could save that, so its volumes go
+            // as asked before the store's failure is answered.
+            var unsaved: (any Error)?
+            do {
+                try await removed(container)
+            } catch {
+                unsaved = error
+            }
             if removeVolumes {
                 for volume in container.extras?.anonymousVolumes ?? [] {
                     // dockerd removes what it can and does not fail the delete over the rest.
                     try? await engine.deleteVolume(volume)
                 }
             }
+            if let unsaved { throw unsaved }
             return .empty()
         }
 
@@ -405,7 +443,8 @@ public enum ContainerRoutes {
                     // dockerd skips a container it cannot remove and goes on with the rest.
                     continue
                 }
-                await removed(container)
+                // As dockerd, a removal it could not finish is not listed; the store logs why.
+                guard (try? await removed(container)) != nil else { continue }
                 deleted.append(container.dockerID)
                 reclaimed += size
             }

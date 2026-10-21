@@ -526,13 +526,14 @@ public enum NetworkRoutes {
                 incarnation = try await containers.create(plan(changed), requester: requester)
             } catch {
                 if let restored = try? await containers.create(plan(original), requester: requester) {
-                    await identities.recreated(container, incarnation: restored)
+                    // The create's failure is the one to answer; the store logs its own.
+                    try? await identities.recreated(container, incarnation: restored)
                 } else {
                     await events?.recreateEnded(container.engineID)
                 }
                 throw error
             }
-            await identities.recreated(container, incarnation: incarnation)
+            try await identities.recreated(container, incarnation: incarnation)
         }
     }
 }

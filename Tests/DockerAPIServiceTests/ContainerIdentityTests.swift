@@ -160,7 +160,7 @@ struct ContainerIdentityTests {
         let extras = DockerContainerExtras(image: "alpine", imageID: "sha256:1", autoRemove: true, anonymousVolumes: ["volume"])
         // The list is taken, a create commits, then the list is joined.
         let joined = try await store.join {
-            await store.commit(reservation, incarnation: "inc-1", extras: extras)
+            try await store.commit(reservation, incarnation: "inc-1", extras: extras)
             return [web]
         }
         #expect(joined.map(\.name) == ["web"])
@@ -171,7 +171,7 @@ struct ContainerIdentityTests {
         let api = Fixtures.dockerContainer(name: "api", dockerID: reservation.dockerID)
         _ = try await store.join {
             _ = try await store.join {
-                await store.commit(reservation2, incarnation: "inc-1", extras: extras)
+                try await store.commit(reservation2, incarnation: "inc-1", extras: extras)
                 return [web, api]
             }
             return [web, api]
@@ -191,7 +191,7 @@ struct ContainerIdentityTests {
         let all = try await store.join { [web] }
         // The engine took the new name after the list read the old label.
         _ = try await store.join {
-            await store.renamedInEngine(all[0], to: "front")
+            try await store.renamedInEngine(all[0], to: "front")
             return [web]
         }
         #expect(await store.records.map(\.name) == ["front"])
@@ -201,7 +201,7 @@ struct ContainerIdentityTests {
 
         // Deleted after the list read it: the list still shows it, but no record comes back.
         let stale = try await store.join {
-            await store.forget(engineID: "abc123def456")
+            try await store.forget(engineID: "abc123def456")
             return [web]
         }
         #expect(stale.map(\.name) == ["web"])
@@ -263,14 +263,14 @@ struct ContainerIdentityTests {
         let persistence = MemoryIdentityPersistence()
         let store = DockerIdentityStore(persistence: persistence)
         let reservation = try await store.reserve(name: "web", among: [])
-        await store.commit(reservation, incarnation: "inc-9", extras: DockerContainerExtras(image: "alpine", imageID: "sha256:x"))
+        try await store.commit(reservation, incarnation: "inc-9", extras: DockerContainerExtras(image: "alpine", imageID: "sha256:x"))
         #expect(persistence.records.map(\.name) == ["web"])
         #expect(persistence.records.first?.incarnation == "inc-9")
-        await store.forget(engineID: reservation.engineID)
+        try await store.forget(engineID: reservation.engineID)
         #expect(persistence.records.isEmpty)
         // Control: forgetting a container with no record writes nothing.
         let saves = persistence.saves
-        await store.forget(engineID: "unknown")
+        try await store.forget(engineID: "unknown")
         #expect(persistence.saves == saves)
     }
 
@@ -313,7 +313,7 @@ struct ContainerIdentityTests {
         let all = try await store.join { [web] }
         try? await store.rename(all[0], to: "front", among: all)
         #expect(try await store.localRenames { [web] }.map(\.1) == ["front"])
-        await store.renamedInEngine(all[0], to: "front")
+        try await store.renamedInEngine(all[0], to: "front")
         #expect(try await store.localRenames { [web] }.isEmpty)
     }
 }
