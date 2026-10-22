@@ -201,6 +201,25 @@ struct CopyMemoryHeadroomTests {
         #expect(control.recorded == Self.lift + ["sync"])
     }
 
+    @Test("the sync's time limit holds even when the sync does not end on cancellation", .timeLimit(.minutes(1)))
+    func boundedEvenIfUncancellable() async throws {
+        let clock = ManualClock()
+        let release = Mutex(false)
+        let outcome = Task {
+            try await CopyMemoryHeadroom.within(.seconds(10), sleep: clock.sleep) {
+                // A sync that ignores cancellation and ends only when released.
+                while !release.withLock({ $0 }) {
+                    await Task.yield()
+                    try? await Task.sleep(for: .milliseconds(2))
+                }
+            }
+        }
+        try await clock.waitForSleeps(1)
+        clock.advance()
+        #expect(try await outcome.value == false)
+        release.withLock { $0 = true }
+    }
+
     @Test("a copy runs even when the limit cannot be lifted, and nothing is put back", .timeLimit(.minutes(1)))
     func liftFails() async throws {
         let clock = ManualClock()

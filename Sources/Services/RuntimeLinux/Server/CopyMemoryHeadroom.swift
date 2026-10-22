@@ -182,23 +182,39 @@ actor CopyMemoryHeadroom {
         }
     }
 
-    /// Whether `operation` finished within `limit`. It is cancelled when it did not.
-    private static func within(
+    /// Whether `operation` finished within `limit`. One that did not is cancelled and left to
+    /// end on its own: a sync the guest is still carrying out need not end when asked to.
+    static func within(
         _ limit: Duration, sleep: @escaping Sleep, _ operation: @escaping @Sendable () async throws -> Void
     ) async throws -> Bool {
-        try await withThrowingTaskGroup(of: Bool.self) { group in
-            group.addTask {
+        let (events, continuation) = AsyncStream<Result<Bool, any Error>>.makeStream()
+        let work = Task {
+            do {
                 try await operation()
-                return true
+                continuation.yield(.success(true))
+            } catch {
+                continuation.yield(.failure(error))
             }
-            group.addTask {
-                try await sleep(limit)
-                return false
-            }
-            let finished = try await group.next() ?? false
-            group.cancelAll()
-            return finished
         }
+        let timer = Task {
+            do {
+                try await sleep(limit)
+                continuation.yield(.success(false))
+            } catch {}
+        }
+        defer {
+            timer.cancel()
+            continuation.finish()
+        }
+        var first: Result<Bool, any Error> = .success(false)
+        for await event in events {
+            first = event
+            break
+        }
+        if case .success(false) = first {
+            work.cancel()
+        }
+        return try first.get()
     }
 }
 
