@@ -32,9 +32,7 @@ public struct MachineConfig: Codable, Sendable {
     }
 
     public static var defaultMemory: MemorySize {
-        let bytes = max(ProcessInfo.processInfo.physicalMemory / 2, 1024 * 1024 * 1024)
-        let gb = bytes / (1024 * 1024 * 1024)
-        return try! MemorySize("\(gb)gb")
+        ContainerConfig.defaultMemory
     }
 
     public static let defaultHomeMount: HomeMountOption = .rw

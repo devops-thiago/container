@@ -25,7 +25,7 @@ image = "ghcr.io/apple/container-builder-shim/builder:0.13.1"
 
 [container]
 cpus = 4
-memory = "1gb"
+memory = "16gb"
 
 [dns]
 domain = "test"
@@ -89,7 +89,7 @@ Defaults applied when `container run` / `container create` is invoked without `-
 | Key      | Type       | Default | Description                                                                |
 |----------|------------|---------|----------------------------------------------------------------------------|
 | `cpus`   | `Int`      | `4`     | Default CPU count per container.                                           |
-| `memory` | [MemorySize](#memorysize-format) | `"1g"`  | Default RAM per container. |
+| `memory` | [MemorySize](#memorysize-format) | half the host's memory, in whole gigabytes, at least `"1g"` | Default RAM per container. Docker Desktop gives its VM half the host's memory, and a Docker container with no limit can use all of it. A VM takes memory from the host only as its guest touches it. |
 
 ## `[dns]`
 
