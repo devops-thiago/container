@@ -24,14 +24,19 @@ public struct SandboxSnapshot: Codable, Sendable {
     public var networks: [Attachment]
     /// Containers placed in the sandbox.
     public var containers: [ContainerSnapshot]
+    /// Whether the OOM killer killed a process in the container during this run, as Docker's
+    /// `OOMKilled` says. Known once the run has ended; nil from a runtime that does not say.
+    public var oomKilled: Bool?
 
     public init(
         status: RuntimeStatus,
         networks: [Attachment],
-        containers: [ContainerSnapshot]
+        containers: [ContainerSnapshot],
+        oomKilled: Bool? = nil
     ) {
         self.status = status
         self.networks = networks
         self.containers = containers
+        self.oomKilled = oomKilled
     }
 }

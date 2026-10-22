@@ -307,7 +307,8 @@ public actor ContainersService {
                         exitedAt: exit?.exitedAt,
                         restartCount: restartRecord.restartCount,
                         // What the run's end recorded; a container that never ran was not stopped.
-                        stopRequested: exit.map { $0.stopRequested } ?? false
+                        stopRequested: exit.map { $0.stopRequested } ?? false,
+                        oomKilled: exit.map { $0.oomKilled } ?? false
                     ),
                     restartRecord: restartRecord
                 )
@@ -654,6 +655,7 @@ public actor ContainersService {
         state.snapshot.exitCode = nil
         state.snapshot.exitedAt = nil
         state.snapshot.stopRequested = false
+        state.snapshot.oomKilled = false
         recentExits.forget(id)
         containers[id] = state
         return state
@@ -1784,6 +1786,9 @@ public actor ContainersService {
         // still needs its exit.
         if let code, !waitFailed { recordExit(code, of: id, incarnation: expectedIncarnation) }
 
+        // Asked before the runtime goes: it read the container's memory events as the run ended.
+        let oomKilled = waitFailed ? nil : await Self.runOOMKilled(client: state.client)
+
         try await self.tearDownRuntime(id: id, client: state.client, responseTimeout: responseTimeout)
 
         let path = self.containerRoot.appendingPathComponent(id)
@@ -1793,6 +1798,7 @@ public actor ContainersService {
         state.stopSent = false
         state.signalsSent = []
         state.snapshot.stopRequested = stopRequested
+        if let oomKilled { state.snapshot.oomKilled = oomKilled }
         // Keep why it stopped, not just that it did — in memory for this apiserver, and
         // on disk so the answer survives a restart.
         if let code {
@@ -1800,7 +1806,9 @@ public actor ContainersService {
             state.snapshot.exitedAt = code.exitedAt
             do {
                 try bundle.setExitStatus(
-                    ExitRecord(exitCode: code.exitCode, exitedAt: code.exitedAt, stopRequested: stopRequested))
+                    ExitRecord(
+                        exitCode: code.exitCode, exitedAt: code.exitedAt, stopRequested: stopRequested,
+                        oomKilled: state.snapshot.oomKilled))
             } catch {
                 self.log.warning(
                     "failed to record exit status",
@@ -1835,6 +1843,7 @@ public actor ContainersService {
             state.snapshot.status = .restarting
             self.scheduleRestart(of: id, after: delay, in: &state)
             await self.setContainerState(id, state, context: context)
+            if oomKilled == true { self.emit(.oom, state.snapshot) }
             self.emit(.die, state.snapshot, exitCode: code?.exitCode)
             await self.persistRestartRecord(state.restartRecord, for: id)
             self.log.info(
@@ -1849,6 +1858,7 @@ public actor ContainersService {
 
         state.snapshot.status = .stopped
         await self.setContainerState(id, state, context: context)
+        if oomKilled == true { self.emit(.oom, state.snapshot) }
         self.emit(.die, state.snapshot, exitCode: code?.exitCode)
 
         let options = try getContainerCreationOptions(id: id)
@@ -2118,13 +2128,21 @@ public actor ContainersService {
         }
     }
 
+    /// Whether the OOM killer acted in the container during the run that just ended, as its
+    /// runtime read it; nil when the runtime cannot say.
+    private static func runOOMKilled(client: RuntimeClient?) async -> Bool? {
+        guard let client else { return nil }
+        return try? await client.state(responseTimeout: .seconds(5)).oomKilled
+    }
+
     /// Keep the snapshot's `stopRequested` with its recorded exit, so an engine start reads
     /// it: for a requested end that the restart policy overrode.
     private func persistStopRequested(of snapshot: ContainerSnapshot) {
         guard let code = snapshot.exitCode, let exitedAt = snapshot.exitedAt else { return }
         let bundle = ContainerResource.Bundle(path: self.containerRoot.appendingPathComponent(snapshot.id))
         do {
-            try bundle.setExitStatus(ExitRecord(exitCode: code, exitedAt: exitedAt, stopRequested: snapshot.stopRequested))
+            try bundle.setExitStatus(
+                ExitRecord(exitCode: code, exitedAt: exitedAt, stopRequested: snapshot.stopRequested, oomKilled: snapshot.oomKilled))
         } catch {
             self.log.warning(
                 "failed to record exit status",
