@@ -51,6 +51,12 @@ struct PrestartCopyTests {
         func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws {
             copies.append(Copy(isDirectory: isDirectory, root: root, path: path, mode: mode, createParents: createParents))
         }
+
+        private(set) var copiesOut: [(root: String, path: String, destination: URL)] = []
+
+        func copyOut(root: String, path: String, to destination: URL) async throws {
+            copiesOut.append((root, path, destination))
+        }
     }
 
     static let directory = GuestFileIdentity(device: 1, inode: 2, isDirectory: true)
