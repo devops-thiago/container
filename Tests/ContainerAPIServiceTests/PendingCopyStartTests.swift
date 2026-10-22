@@ -143,6 +143,91 @@ struct PendingCopyStartTests {
         #expect(queue.holds("left"))
     }
 
+    /// The entries a queue copied in, by name, in order.
+    final class CopyLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var names: [String] = []
+        var calls: [String] { lock.withLock { names } }
+        func append(_ name: String) { lock.withLock { names.append(name) } }
+    }
+
+    struct Refused: Error {}
+
+    static func setMode(_ mode: mode_t, _ url: URL) {
+        _ = chmod(url.path(percentEncoded: false), mode)
+    }
+
+    static func record(_ upload: URL) throws -> PendingCopyQueue.Record {
+        try JSONDecoder().decode(PendingCopyQueue.Record.self, from: Data(contentsOf: upload.appending(path: PendingCopyQueue.recordName)))
+    }
+
+    @Test("an entry whose record cannot be rewritten keeps its source; the next start copies it in again and finishes")
+    func recordNotRewritten() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let queue = PendingCopyQueue(appRoot: f.root)
+        let name = try Self.hold(queue, "c", [("one.txt", "1"), ("two.txt", "2"), ("three.txt", "3")])
+        try queue.claim("c")
+        let taken = queue.directory.appending(path: "applying/c/\(name)")
+        // The record is rewritten through a file beside it, which cannot be made now; what is
+        // under root/ can still be removed.
+        Self.setMode(0o500, taken)
+        defer { Self.setMode(0o700, taken) }
+        let log = CopyLog()
+        let error = await #expect(throws: (any Error).self) {
+            try await queue.apply("c") { source, _, _, _ in
+                log.append(source.lastPathComponent)
+                if source.lastPathComponent == "two.txt" {
+                    Self.setMode(0o700, taken)
+                    throw Refused()
+                }
+            }
+        }
+        #expect("\(error.map { "\($0)" } ?? "")".contains("could not copy two.txt"))
+        #expect(log.calls == ["one.txt", "two.txt"])
+        let held = queue.directory.appending(path: "pending/c/\(name)")
+        #expect(FileManager.default.fileExists(atPath: PendingCopyQueue.root(of: held).appending(path: "one.txt").path(percentEncoded: false)))
+        #expect(try Self.record(held).entries.map(\.name) == ["one.txt", "two.txt", "three.txt"])
+
+        try queue.claim("c")
+        let again = CopyLog()
+        try await queue.apply("c") { source, _, _, _ in again.append(source.lastPathComponent) }
+        #expect(again.calls == ["one.txt", "two.txt", "three.txt"])
+        queue.release("c")
+        #expect(!queue.holds("c"))
+        #expect(Self.names(in: queue.directory.appending(path: "pending/c")).isEmpty)
+    }
+
+    @Test("an upload whose last entry cannot be recorded as in stays whole; the next start copies it in again and removes it")
+    func lastEntryNotRecorded() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let queue = PendingCopyQueue(appRoot: f.root)
+        let name = try Self.hold(queue, "c", [("one.txt", "1"), ("two.txt", "2")])
+        try queue.claim("c")
+        let taken = queue.directory.appending(path: "applying/c/\(name)")
+        Self.setMode(0o500, taken)
+        defer { Self.setMode(0o700, taken) }
+        let log = CopyLog()
+        try await queue.apply("c") { source, _, _, _ in log.append(source.lastPathComponent) }
+        #expect(log.calls == ["one.txt", "two.txt"])
+        Self.setMode(0o700, taken)
+        queue.release("c")
+        let held = queue.directory.appending(path: "pending/c/\(name)")
+        for entry in ["one.txt", "two.txt"] {
+            #expect(FileManager.default.fileExists(atPath: PendingCopyQueue.root(of: held).appending(path: entry).path(percentEncoded: false)))
+        }
+        #expect(try Self.record(held).entries.map(\.name) == ["one.txt", "two.txt"])
+
+        try queue.claim("c")
+        let again = CopyLog()
+        try await queue.apply("c") { source, _, _, _ in again.append(source.lastPathComponent) }
+        #expect(again.calls == ["one.txt", "two.txt"])
+        queue.release("c")
+        #expect(!queue.holds("c"))
+        #expect(Self.names(in: queue.directory.appending(path: "pending/c")).isEmpty)
+    }
+
     static func eventually(within time: Duration = .seconds(5), _ condition: () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: time)
         while ContinuousClock.now < deadline {
