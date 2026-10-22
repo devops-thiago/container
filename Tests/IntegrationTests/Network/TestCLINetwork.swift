@@ -75,6 +75,36 @@ struct TestCLINetwork {
         }
     }
 
+    @available(macOS 26, *)
+    @Test func testAnInternalNetworkGetsTheNamesButNoLoopbackRelay() async throws {
+        try await ContainerFixture.with { f in
+            let loopbackOnly = try LoopbackFileServer(serving: Data("loopback-\(f.testID)".utf8))
+            defer { loopbackOnly.shutdown() }
+            let everywhere = try LoopbackFileServer(serving: Data("everywhere-\(f.testID)".utf8), bindHost: "0.0.0.0")
+            defer { everywhere.shutdown() }
+            let loopbackPort = try #require(loopbackOnly.url.port)
+            let everywherePort = try #require(everywhere.url.port)
+            let net = "\(f.testID)-internal"
+            f.addCleanup { f.doNetworkDeleteIfExists(net) }
+            try f.doNetworkCreate(net, args: ["--internal"])
+            let client = "\(f.testID)-internal-client"
+            f.addCleanup { try? f.doRemove(client, force: true) }
+            // As with Docker's --internal, the gateway's own services answer and nothing else
+            // of the Mac does: the loopback-only one stays out of reach, however long it waits.
+            let result = try f.run([
+                "run", "--rm", "--name", client, "--network", net, WarmupImage.alpine320.rawValue,
+                "sh", "-c",
+                "grep -qw host.docker.internal /etc/hosts && echo NAMED; wget -T 5 -qO- \"$1\"; echo; "
+                    + "for i in 1 2 3; do wget -T 3 -qO- \"$2\" && exit 0; sleep 1; done; echo NO-RELAY", "--",
+                "http://host.docker.internal:\(everywherePort)/payload", "http://host.docker.internal:\(loopbackPort)/payload",
+            ]).check()
+            #expect(result.output.contains("NAMED"))
+            #expect(result.output.contains("everywhere-\(f.testID)"))
+            #expect(result.output.contains("NO-RELAY"))
+            #expect(!result.output.contains("loopback-\(f.testID)"))
+        }
+    }
+
     @Test func testExplicitAddHostWinsOverHostDockerInternal() async throws {
         try await ContainerFixture.with { f in
             let client = "\(f.testID)-client"

@@ -34,6 +34,11 @@ public struct SocketForwarderResult: Sendable {
         }
     }
 
+    /// Closes the listener and returns once it is closed.
+    public func closeNow() async {
+        try? await self.channel.close().get()
+    }
+
     public func wait() async throws {
         try await self.channel.closeFuture.get()
     }

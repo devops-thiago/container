@@ -59,12 +59,25 @@ container run -it --rm alpine/curl curl http://host.docker.internal:8000
 ```
 
 A service listening on every interface (`0.0.0.0`, or `::`) answers at the gateway directly. One
-bound to `127.0.0.1` or `::1` alone (Ollama and most dev servers by default) answers too: each
-network's helper follows the Mac's TCP listeners and, for every port a service listens on at
-loopback only, listens on that network's gateway address and relays the connection to the
-loopback port. It listens on the network's bridge address only, never on every interface, and
-serves only clients inside the network's subnet, so nothing is exposed to the local network. A
-service that starts listening is reachable within about a second. TCP only.
+bound to `127.0.0.1` or `::1` alone (Ollama and most dev servers by default) answers too: while a
+container is on the network, its helper follows the Mac's TCP listeners and, for each port a
+service listens on at loopback only, listens on that network's gateway address and relays the
+connection to the loopback port. It listens on the network's bridge address only, never on every
+interface, and serves only clients inside the network's subnet, so nothing is exposed to the
+local network. A service that starts listening is reachable within about a second. TCP only.
+
+The relay has these limits:
+
+- Ports below 1024 are not relayed: macOS lets an unprivileged process bind them on every
+  interface but not on one address such as the gateway. A loopback service on such a port is
+  one only root can start; make it listen on every interface to reach it.
+- Only `127.0.0.1` and `::1` count as loopback; a service on another address in 127/8 (an alias
+  someone added) is not relayed.
+- Each network relays at most 64 ports (the lowest ones) and 64 connections at a time; a
+  connection beyond that is closed at once.
+- An `--internal` network gets no relay: as with Docker's `network create --internal`, its
+  containers reach the gateway's own services (those listening on every interface) and nothing
+  else. The names still resolve there, to that gateway.
 
 An explicit `--add-host host.docker.internal:<address>` replaces the built-in entry, and
 `--add-host <name>:host-gateway` names the same gateway. A container created with

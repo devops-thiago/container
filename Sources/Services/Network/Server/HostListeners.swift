@@ -21,13 +21,14 @@ import Darwin
 /// A TCP socket listening on the Mac: the address it is bound to and its port.
 public struct HostListener: Sendable, Hashable {
     public enum Address: Sendable, Hashable {
-        /// `127.0.0.1` (or anything else in 127/8).
+        /// `127.0.0.1`.
         case loopbackV4
         /// `::1`.
         case loopbackV6
         /// Every IPv4 address: `0.0.0.0`, or a dual-stack `::`. The gateway reaches it already.
         case anyV4
-        /// Anything else: one interface's address, or an IPv6-only wildcard.
+        /// Anything else: one interface's address, another 127/8 address, or an IPv6-only
+        /// wildcard.
         case other
     }
 
@@ -87,19 +88,28 @@ public enum HostListeners {
     }
 
     private static func listener(_ pcb: xinpcb64) -> HostListener {
-        let port = UInt16(bigEndian: pcb.inp_lport)
-        if pcb.inp_vflag & UInt8(INP_IPV4) != 0 {
-            let address = UInt32(bigEndian: pcb.inp_dependladdr.inp46_local.ia46_addr4.s_addr)
-            if address == 0 { return HostListener(address: .anyV4, port: port) }
-            if address >> 24 == 127 { return HostListener(address: .loopbackV4, port: port) }
-            return HostListener(address: .other, port: port)
-        }
-        var local = pcb.inp_dependladdr.inp6_local
-        let bytes = withUnsafeBytes(of: &local) { Array($0) }
-        if bytes == [UInt8](repeating: 0, count: 15) + [1] { return HostListener(address: .loopbackV6, port: port) }
-        return HostListener(address: .other, port: port)
+        var local6 = pcb.inp_dependladdr.inp6_local
+        return classify(
+            ipv4: pcb.inp_vflag & UInt8(INP_IPV4) != 0,
+            v4Address: UInt32(bigEndian: pcb.inp_dependladdr.inp46_local.ia46_addr4.s_addr),
+            v6Address: withUnsafeBytes(of: &local6) { Array($0) },
+            port: UInt16(bigEndian: pcb.inp_lport))
     }
     #endif
+
+    /// What a listener's local address means here. A socket that takes IPv4 (`ipv4`, set for
+    /// a dual-stack `::` too) is read by its IPv4 address; any other by its IPv6 one. Only
+    /// `127.0.0.1` itself is the loopback the relay dials: another 127/8 address is an alias
+    /// someone added, which a relay to 127.0.0.1 would miss.
+    static func classify(ipv4: Bool, v4Address: UInt32, v6Address: [UInt8], port: UInt16) -> HostListener {
+        if ipv4 {
+            if v4Address == 0 { return HostListener(address: .anyV4, port: port) }
+            if v4Address == 0x7F00_0001 { return HostListener(address: .loopbackV4, port: port) }
+            return HostListener(address: .other, port: port)
+        }
+        if v6Address == [UInt8](repeating: 0, count: 15) + [1] { return HostListener(address: .loopbackV6, port: port) }
+        return HostListener(address: .other, port: port)
+    }
 }
 
 public enum HostListenersError: Error, CustomStringConvertible {

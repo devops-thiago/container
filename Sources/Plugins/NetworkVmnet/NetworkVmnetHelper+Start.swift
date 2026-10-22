@@ -99,14 +99,17 @@ extension NetworkVmnetHelper {
                     log: log
                 )
                 try await network.start()
-                // host.docker.internal is the gateway: relay the Mac's loopback services there.
-                if let status = await network.status {
-                    let forwarder = HostLoopbackForwarder(
+                // host.docker.internal is the gateway: relay the Mac's loopback services there
+                // while containers are on the network, unless it is an internal one.
+                var forwarder: HostLoopbackForwarder?
+                if HostLoopbackForwarder.relays(for: mode), let status = await network.status {
+                    forwarder = HostLoopbackForwarder(
                         gateway: status.ipv4Gateway, subnet: status.ipv4Subnet,
                         eventLoopGroup: MultiThreadedEventLoopGroup.singleton, log: log)
-                    Task { await forwarder.run() }
                 }
-                let service = try await DefaultNetworkService(network: network, log: log)
+                let service = try await DefaultNetworkService(
+                    network: network, log: log,
+                    attachmentsChanged: { [forwarder] attached in await forwarder?.attachmentsChanged(attached) })
                 let harness = NetworkHarness(service: service)
                 log.info("starting XPC server")
                 try await InstanceAttach.serve(

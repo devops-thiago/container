@@ -508,6 +508,7 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIO", package: "swift-nio"),
                 "ContainerNetworkServer",
+                "ContainerResource",
                 "SocketForwarder",
             ]
         ),
