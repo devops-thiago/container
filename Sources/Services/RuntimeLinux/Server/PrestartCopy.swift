@@ -31,6 +31,10 @@ protocol GuestCopyAgent: Sendable {
     /// if `root` were `/`, so the write can never land outside it. A directory goes as an
     /// archive the agent unpacks at `path`; a file is written at `path`, replacing what is there.
     func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws
+    /// Copy `path` under `root` to `destination` on the host: a directory's contents into
+    /// `destination`, a regular file as `destination`. The agent resolves `path` confined to
+    /// `root` and refuses anything else.
+    func copyOut(root: String, path: String, to destination: URL) async throws
 }
 
 /// Copies into a container whose VM is up and whose root filesystem is mounted, but whose init
@@ -149,30 +153,110 @@ struct VminitdCopyAgent: GuestCopyAgent {
         }
     }
 
+    func copyOut(root: String, path: String, to destination: URL) async throws {
+        let port = Self.port()
+        let listener = try vm.listen(port)
+        defer { try? listener.finish() }
+        let (metadata, metadataContinuation) = AsyncStream.makeStream(of: Vminitd.CopyMetadata.self)
+        try await Self.runCopyTasks(
+            rpc: {
+                defer { metadataContinuation.finish() }
+                let announced = Mutex(false)
+                try await agent.copy(
+                    direction: .copyOut, root: root, path: path, vsockPort: port,
+                    onMetadata: { item in
+                        announced.withLock { $0 = true }
+                        metadataContinuation.yield(item)
+                        metadataContinuation.finish()
+                    })
+                guard announced.withLock({ $0 }) else {
+                    throw ContainerizationError(.internalError, message: "copyOut: the VM sent no metadata for the copy")
+                }
+            },
+            transfer: {
+                // Without metadata the RPC failed, and its error is the one to report.
+                guard let metadata = await metadata.first(where: { _ in true }) else { return }
+                guard let connection = await listener.first(where: { _ in true }) else {
+                    throw ContainerizationError(.internalError, message: "copyOut: the VM did not connect for the copy")
+                }
+                try listener.finish()
+                try await Self.receive(to: destination, isArchive: metadata.isArchive, from: connection)
+            },
+            closeListener: { try? listener.finish() })
+    }
+
     /// Writes `source` to `connection` off the cooperative pool, and closes it: a directory as
     /// a gzipped pax archive of its contents, a file as its bytes.
     static func send(_ source: URL, isDirectory: Bool, to connection: FileHandle) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    defer { connection.closeFile() }
-                    if isDirectory {
-                        let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
-                        try writer.open(fileDescriptor: connection.fileDescriptor)
-                        try writer.archiveDirectory(source)
-                        try writer.finishEncoding()
-                    } else {
-                        let file = try FileHandle(forReadingFrom: source)
-                        defer { try? file.close() }
-                        while let chunk = try file.read(upToCount: 1 << 20), !chunk.isEmpty {
-                            try connection.write(contentsOf: chunk)
-                        }
-                    }
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: error)
+        try await transfer(over: connection) { fd in
+            if isDirectory {
+                let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
+                try writer.open(fileDescriptor: fd)
+                try writer.archiveDirectory(source)
+                try writer.finishEncoding()
+            } else {
+                let file = try FileHandle(forReadingFrom: source)
+                defer { try? file.close() }
+                let output = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+                while let chunk = try file.read(upToCount: chunkSize), !chunk.isEmpty {
+                    try output.write(contentsOf: chunk)
                 }
             }
         }
+    }
+
+    /// Reads what the guest sends on `connection` into `destination` off the cooperative pool,
+    /// and closes it: an archive is unpacked into `destination`, a file's bytes replace it.
+    static func receive(to destination: URL, isArchive: Bool, from connection: FileHandle) async throws {
+        try await transfer(over: connection) { fd in
+            if isArchive {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+                let input = FileHandle(fileDescriptor: dup(fd), closeOnDealloc: true)
+                let reader = try ArchiveReader(format: .pax, filter: .gzip, fileHandle: input)
+                _ = try reader.extractContents(to: destination)
+            } else {
+                let output = open(destination.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o644)
+                guard output != -1 else {
+                    throw ContainerizationError(
+                        .internalError, message: "copyOut: failed to open '\(destination.path)': \(String(cString: strerror(errno)))")
+                }
+                let file = FileHandle(fileDescriptor: output, closeOnDealloc: true)
+                let input = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+                while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
+                    try file.write(contentsOf: chunk)
+                }
+                try file.close()
+            }
+        }
+    }
+
+    static let chunkSize = 1 << 20
+
+    /// Runs `body` with `connection`'s descriptor on a thread of its own, off the cooperative
+    /// pool, then closes `connection`. Cancelling the caller shuts the connection down, so a
+    /// read or write blocked on the guest returns at once and the guest's end sees the copy
+    /// end; without it a cancelled copy streamed on to the end of its file.
+    static func transfer(over connection: FileHandle, _ body: @escaping @Sendable (Int32) throws -> Void) async throws {
+        let open = Mutex(true)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let thread = Thread {
+                    let result = Result { try body(connection.fileDescriptor) }
+                    open.withLock { isOpen in
+                        isOpen = false
+                        connection.closeFile()
+                    }
+                    continuation.resume(with: result)
+                }
+                thread.name = "copy transfer"
+                thread.start()
+            }
+        } onCancel: {
+            open.withLock { isOpen in
+                if isOpen { _ = shutdown(connection.fileDescriptor, SHUT_RDWR) }
+            }
+        }
+        // A read ended by the shutdown looks like the end of the stream: still a cancelled copy.
+        try Task.checkCancellation()
     }
 }

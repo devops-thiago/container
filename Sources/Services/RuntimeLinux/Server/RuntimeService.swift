@@ -59,6 +59,10 @@ public actor RuntimeService {
     /// Whether the kernel's OOM killer killed a process in the container's cgroup during this
     /// run, read from the cgroup's `memory.events` before the run is torn down.
     private var oomKilled = false
+    /// Copies in and out, which a stop ends before it unmounts the root filesystem.
+    private let copies = ActiveCopies()
+    /// vminitd's memory limit, lifted while copies into the container run (#640).
+    private let copyHeadroom: CopyMemoryHeadroom
 
     private static let sshAuthSocketGuestPath = "/var/host-services/ssh-auth.sock"
     private static let sshAuthSocketEnvVar = "SSH_AUTH_SOCK"
@@ -113,6 +117,7 @@ public actor RuntimeService {
         self.interfaceStrategies = interfaceStrategies
         self.log = log
         self.monitor = ExitMonitor(log: log)
+        self.copyHeadroom = CopyMemoryHeadroom(log: log)
         self.eventLoopGroup = eventLoopGroup
         self.connection = connection
     }
@@ -913,35 +918,32 @@ public actor RuntimeService {
             defer { access?.stopAccessingSecurityScopedResource() }
 
             let ctr = try getContainer()
-            if self.state == .booted {
-                // Created, not started: containerization's copyIn takes only a started
-                // container, so the copy goes to the root filesystem through the agent itself.
-                let rootfs = PublishedSocketMounts.guestRootfs(containerID: ctr.container.id)
-                try await ctr.container.withVirtualMachineInstance { vm in
-                    let agent = try await vm.dialAgent()
-                    do {
-                        guard let vminitd = agent as? Vminitd else {
-                            throw ContainerizationError(.unsupported, message: "the VM's agent cannot copy into a container before it starts")
+            let container = ctr.container
+            let rootfs = PublishedSocketMounts.guestRootfs(containerID: container.id)
+            let booted = self.state == .booted
+            // Through the agent, not containerization's copyIn: that holds the container's lock
+            // for the whole transfer, and every exec and signal waits on it (#639). Created and
+            // not started, the destination is resolved as the prestart copy does it.
+            let headroom = copyHeadroom
+            try await copies.run {
+                try await headroom.withLifted(VminitdMemory(container: container)) {
+                    try await RunningCopy.withAgent(of: container) { vminitd, vm in
+                        let agent = VminitdCopyAgent(agent: vminitd, vm: vm)
+                        if booted {
+                            try await PrestartCopy.copyIn(
+                                from: URL(fileURLWithPath: source), to: destination, mode: mode, createParents: createParents, rootfs: rootfs,
+                                agent: agent)
+                        } else {
+                            try await RunningCopy.copyIn(
+                                from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: destination), mode: mode,
+                                createParents: createParents, rootfs: rootfs, agent: agent)
                         }
-                        try await PrestartCopy.copyIn(
-                            from: URL(fileURLWithPath: source), to: destination, mode: mode, createParents: createParents, rootfs: rootfs,
-                            agent: VminitdCopyAgent(agent: vminitd, vm: vm))
-                    } catch {
-                        try? await agent.close()
-                        throw error
                     }
-                    try await agent.close()
                 }
-                self.log.info("copied into the container before its start", metadata: ["destination": "\(destination)"])
-                return message.reply()
             }
-            try await ctr.container.copyIn(
-                from: URL(fileURLWithPath: source),
-                to: URL(fileURLWithPath: destination),
-                mode: mode,
-                createParents: createParents
-            )
-
+            if booted {
+                self.log.info("copied into the container before its start", metadata: ["destination": "\(destination)"])
+            }
             return message.reply()
         default:
             throw ContainerizationError(
@@ -983,11 +985,17 @@ public actor RuntimeService {
             defer { access?.stopAccessingSecurityScopedResource() }
 
             let ctr = try getContainer()
-            try await ctr.container.copyOut(
-                from: URL(fileURLWithPath: source),
-                to: URL(fileURLWithPath: destination),
-                createParents: createParents
-            )
+            let container = ctr.container
+            let rootfs = PublishedSocketMounts.guestRootfs(containerID: container.id)
+            // Through the agent, not containerization's copyOut, which holds the container's
+            // lock for the whole transfer (#639).
+            try await copies.run {
+                try await RunningCopy.withAgent(of: container) { vminitd, vm in
+                    try await RunningCopy.copyOut(
+                        from: source, to: URL(fileURLWithPath: destination), createParents: createParents, rootfs: rootfs,
+                        agent: VminitdCopyAgent(agent: vminitd, vm: vm))
+                }
+            }
 
             return message.reply()
         default:
@@ -1854,10 +1862,19 @@ public actor RuntimeService {
 
         // Now actually bring down the vm.
         await self.recordOOMKills(lc)
+        await self.endCopies()
         await self.unmountGuestTmpfs(lc)
         try await lc.stop()
 
         return code
+    }
+
+    /// End the copies in and out of the container before it stops: a file a copy still has
+    /// open keeps the root filesystem from unmounting, and the stop then fails to delete the
+    /// container's process (EBUSY).
+    private func endCopies() async {
+        await self.copies.cancelAll()
+        await self.copyHeadroom.discard()
     }
 
     /// Note whether the OOM killer acted in the container's cgroup this run. Read while the
@@ -1912,6 +1929,7 @@ public actor RuntimeService {
         await self.stopHealthMonitor()
 
         await self.recordOOMKills(container)
+        await self.endCopies()
         await self.unmountGuestTmpfs(container)
         do {
             try await container.stop()
