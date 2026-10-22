@@ -153,9 +153,12 @@ struct RunningCopyTests {
     func cancelledSendEnds() async throws {
         let source = try PrestartCopyTests.Source()
         // More than the socket buffers hold, to a guest that reads nothing: the send blocks.
-        try Data(count: 64 << 20).write(to: source.file)
+        // Random, so that the archive's compression does not shrink it to what they hold.
+        var noise = Data(count: 64 << 20)
+        noise.withUnsafeMutableBytes { arc4random_buf($0.baseAddress, $0.count) }
+        try noise.write(to: source.file)
         let (copy, guest) = try Self.connection()
-        let send = Task { try await VminitdCopyAgent.send(source.file, isDirectory: false, to: copy) }
+        let send = Task { try await VminitdCopyAgent.send(source.file, isDirectory: false, name: "hello.txt", mode: 0, owner: nil, to: copy) }
         try await Task.sleep(for: .milliseconds(300))
         send.cancel()
         await #expect(throws: (any Error).self) { try await send.value }
@@ -193,7 +196,7 @@ struct RunningCopyTests {
         try Data("nested contents\n".utf8).write(to: source.directory.appending(path: "inner.txt"))
         let (sendEnd, receiveEnd) = try Self.connection()
         let directoryOut = source.top.appending(path: "dir.out")
-        async let sent: Void = VminitdCopyAgent.send(source.directory, isDirectory: true, to: sendEnd)
+        async let sent: Void = VminitdCopyAgent.send(source.directory, isDirectory: true, name: ".", mode: 0, owner: nil, to: sendEnd)
         async let unpacked: Void = VminitdCopyAgent.receive(to: directoryOut, isArchive: true, from: receiveEnd)
         try await sent
         try await unpacked

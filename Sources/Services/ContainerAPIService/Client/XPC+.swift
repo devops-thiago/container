@@ -207,6 +207,8 @@ public enum XPCKeys: String {
     case destinationPath
     case fileMode
     case createParents
+    /// Whether a copy in is owned by the container's user, as `docker cp -a` has it.
+    case copyUIDGID
 }
 
 public enum XPCRoute: String {

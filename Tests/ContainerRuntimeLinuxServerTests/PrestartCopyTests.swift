@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import ContainerizationError
 import Foundation
 import Synchronization
@@ -33,6 +34,7 @@ struct PrestartCopyTests {
             let path: String
             let mode: UInt32
             let createParents: Bool
+            var owner: CopyOwner? = nil
         }
 
         var entries: [String: GuestFileIdentity]
@@ -48,8 +50,8 @@ struct PrestartCopyTests {
             return entries[path]
         }
 
-        func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws {
-            copies.append(Copy(isDirectory: isDirectory, root: root, path: path, mode: mode, createParents: createParents))
+        func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws {
+            copies.append(Copy(isDirectory: isDirectory, root: root, path: path, mode: mode, createParents: createParents, owner: owner))
         }
 
         private(set) var copiesOut: [(root: String, path: String, destination: URL)] = []

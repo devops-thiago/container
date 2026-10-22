@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import Containerization
+import ContainerizationArchive
 import Darwin
 import Foundation
 import GRPCCore
@@ -48,7 +49,7 @@ struct PrestartCopyRPCTests {
     }
 
     // Exercise the real Vminitd serializer, not a fake GuestCopyAgent above the broken call.
-    @Test("the prestart RPC marks only directory payloads as archives", .timeLimit(.minutes(1)))
+    @Test("every copy in goes to the agent as an archive, a file's too", .timeLimit(.minutes(1)))
     func archiveFlagOnWire() async throws {
         let receiver = Receiver()
         try await withGRPCServer(
@@ -72,19 +73,15 @@ struct PrestartCopyRPCTests {
             }
             let agent = try await Vminitd(connection: FileHandle(fileDescriptor: fd, closeOnDealloc: false), group: MultiThreadedEventLoopGroup.singleton)
             do {
-                for directory in [true, false] {
-                    try await VminitdCopyAgent.requestCopy(
-                        agent: agent, isDirectory: directory, root: "/run/container/test/rootfs", path: "/smoke", port: 12345,
-                        mode: 0o640, createParents: true)
-                }
+                try await VminitdCopyAgent.requestCopy(
+                    agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true)
             } catch {
                 try? await agent.close()
                 throw error
             }
             try await agent.close()
             let requests = receiver.requests.withLock { $0 }
-            #expect(requests.map(\.isArchive) == [true, false])
-            #expect(requests.count == 2)
+            #expect(requests.map(\.isArchive) == [true])
             for request in requests {
                 #expect(request.direction == .copyIn)
                 #expect(request.root == "/run/container/test/rootfs")
@@ -96,16 +93,33 @@ struct PrestartCopyRPCTests {
         }
     }
 
-    @Test("regular files are sent unchanged even when their bytes look like gzip")
-    func rawFilePayload() async throws {
+    @Test("a file is unpacked in its destination's parent, as the one entry named for it")
+    func fileUnpackPoint() {
+        #expect(VminitdCopyAgent.unpackPoint(for: "/etc/app/config", isDirectory: false) == ("/etc/app", "config"))
+        #expect(VminitdCopyAgent.unpackPoint(for: "/motd", isDirectory: false) == ("/", "motd"))
+        #expect(VminitdCopyAgent.unpackPoint(for: "/srv/smoke", isDirectory: true) == ("/srv/smoke", "."))
+    }
+
+    @Test("a file goes as one archive entry with its bytes, its mode and its host owner")
+    func fileArchivePayload() async throws {
         let source = try PrestartCopyTests.Source()
         let expected = Data([0x1f, 0x8b, 0x08, 0, 0, 1, 2, 3])
         try expected.write(to: source.file)
-        let pipe = Pipe()
-        try await VminitdCopyAgent.send(source.file, isDirectory: false, to: pipe.fileHandleForWriting)
-        let actual = try pipe.fileHandleForReading.readToEnd()
-        try pipe.fileHandleForReading.close()
-        #expect(actual == expected)
+        let archive = source.top.appending(path: "payload.tar.gz")
+        FileManager.default.createFile(atPath: archive.path, contents: nil)
+        try await VminitdCopyAgent.send(
+            source.file, isDirectory: false, name: "config", mode: 0o640, owner: nil, to: FileHandle(forWritingTo: archive))
+        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: archive))
+        try #require(entries.count == 1)
+        let (entry, data) = entries[0]
+        #expect(entry.path == "config")
+        #expect(entry.fileType == .regular)
+        #expect(entry.permissions & 0o7777 == 0o640)
+        #expect(data == expected)
+        var info = stat()
+        #expect(stat(source.file.path, &info) == 0)
+        #expect(entry.owner == info.st_uid)
+        #expect(entry.group == info.st_gid)
     }
 
     @Test("directory payloads contain nested files and their contents")
@@ -116,7 +130,7 @@ struct PrestartCopyRPCTests {
         try Data("nested contents\n".utf8).write(to: nested.appending(path: "hello.txt"))
         let archive = source.top.appending(path: "payload.tar.gz")
         FileManager.default.createFile(atPath: archive.path, contents: nil)
-        try await VminitdCopyAgent.send(source.directory, isDirectory: true, to: FileHandle(forWritingTo: archive))
+        try await VminitdCopyAgent.send(source.directory, isDirectory: true, name: ".", mode: 0, owner: nil, to: FileHandle(forWritingTo: archive))
         let extracted = source.top.appending(path: "extracted")
         try FileManager.default.createDirectory(at: extracted, withIntermediateDirectories: true)
         let tar = Process()
