@@ -621,7 +621,7 @@ Copies files between a container and the local filesystem. The container must be
 **Usage**
 
 ```bash
-container copy [--debug] [--follow-link] <source> <destination>
+container copy [--debug] [--follow-link] [--archive] <source> <destination>
 ```
 
 **Arguments**
@@ -632,6 +632,11 @@ container copy [--debug] [--follow-link] <source> <destination>
 **Options**
 
 *   `-L, --follow-link`: Always follow symlinks in the source path. It decides what a `-` stream archives; a copy to or from a host path already copies what a symlink points to.
+*   `-a, --archive`: Archive mode, as `docker cp -a` has it: what is copied into a container belongs to the container's user (its `--user`, or its image's `USER`, looked up in the container's `/etc/passwd` and `/etc/group`). A container without a user is unaffected.
+
+**Ownership**
+
+As with `docker cp`, what is copied into a container keeps the owner and mode its source names: a host file's uid, gid and permissions, or those each entry of a `-` tar archive names, replacing a file already at the destination. With `-a`, the container's user owns it instead.
 
 **Path Format**
 
@@ -656,6 +661,12 @@ container cp mycontainer:/var/log/app.log - | tar -xO
 
 # extract a tar archive from stdin into a container directory
 tar -c -C ./site . | container cp - mycontainer:/usr/share/nginx/html
+
+# copy a directory in owned by root, whoever owns it on the host
+tar -c --uid 0 --gid 0 -C . site | container cp - mycontainer:/srv
+
+# copy a directory in owned by the container's user
+container cp -a ./site mycontainer:/home/app/
 ```
 
 ### `container prune`

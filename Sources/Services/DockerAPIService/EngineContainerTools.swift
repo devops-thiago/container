@@ -48,9 +48,11 @@ public protocol EngineContainerTools: Sendable {
     /// and everything in it. `requester` is as `EngineContainers.create` takes it.
     func copyOut(_ container: ContainerSnapshot, source: String, destination: URL, requester: String?) async throws
     /// Copies `source` on the host into the directory `destination` in the container, as
-    /// `destination/<name of source>`. A file gets `mode`. `requester` is as
-    /// `EngineContainers.create` takes it.
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws
+    /// `destination/<name of source>`. A file gets `mode`. Each file keeps the owner its
+    /// source names, or one recorded on it when it was staged (`CopyOwner`); `copyUIDGID`
+    /// gives everything the container's user instead, as dockerd's `copyUIDGID` does.
+    /// `requester` is as `EngineContainers.create` takes it.
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, requester: String?) async throws
     /// Writes the container's filesystem to `archive` as an uncompressed tar: a running
     /// container's as it is now, a stopped one's as it was left, and one never started its
     /// image's. `archive` is in `scratchDirectory()`.

@@ -851,12 +851,13 @@ public actor ContainersService {
     private func copyInHeld(id: String, client: RuntimeClient) async throws {
         do {
             try self.pendingCopies.claim(id)
-            try await self.pendingCopies.apply(id) { source, destination, mode, requester in
+            try await self.pendingCopies.apply(id) { source, destination, mode, copyUIDGID, requester in
                 let path = source.path(percentEncoded: false)
                 let bookmark = try await Self.copyHostDirectoryBookmark(for: path, verb: "read") {
                     await HostDirectoryGrants.shared.lend($0, requester: requester)
                 }
-                try await client.copyIn(source: path, destination: destination, mode: mode, createParents: true, hostDirectoryBookmark: bookmark)
+                try await client.copyIn(
+                    source: path, destination: destination, mode: mode, createParents: true, copyUIDGID: copyUIDGID, hostDirectoryBookmark: bookmark)
             }
         } catch let failure as PendingCopyQueue.Failure {
             self.log.error(
@@ -1323,7 +1324,8 @@ public actor ContainersService {
     ///
     /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
     public func copyIn(
-        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, requester: String? = nil
+        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false,
+        requester: String? = nil
     ) async throws {
         self.log.debug("\(#function)")
 
@@ -1335,7 +1337,9 @@ public actor ContainersService {
         let bookmark = try await Self.copyHostDirectoryBookmark(for: source, verb: "read") {
             await HostDirectoryGrants.shared.lend($0, requester: requester)
         }
-        try await client.copyIn(source: source, destination: destination, mode: mode, createParents: createParents, hostDirectoryBookmark: bookmark)
+        try await client.copyIn(
+            source: source, destination: destination, mode: mode, createParents: createParents, copyUIDGID: copyUIDGID,
+            hostDirectoryBookmark: bookmark)
     }
 
     /// Copy a file or directory from the container to the host.
