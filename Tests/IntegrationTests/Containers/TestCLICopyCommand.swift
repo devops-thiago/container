@@ -568,31 +568,64 @@ struct TestCLICopyCommand {
         }
     }
 
-    /// Seconds `body` takes.
-    private static func timed(_ body: () throws -> Void) rethrows -> Double {
-        let start = ContinuousClock.now
-        try body()
-        let elapsed = ContinuousClock.now - start
-        return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    /// Seconds `body` takes, run on a thread of its own, off the cooperative pool.
+    private static func timed(_ body: @escaping @Sendable () throws -> Void) async throws -> Double {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Double, any Error>) in
+            Thread {
+                let start = ContinuousClock.now
+                let result = Result { try body() }
+                let elapsed = ContinuousClock.now - start
+                continuation.resume(
+                    with: result.map { Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18 })
+            }.start()
+        }
     }
 
-    /// 2 GiB: long enough to still be copying when the exec and the signal are sent.
+    /// 2 GiB: several seconds of copying even on fast hardware.
     private static let largeCopyBytes: UInt64 = 2 << 30
 
+    /// Wait until `progress` reports bytes copied but not all of them, while the copy runs.
+    /// Returns false when the copy ended first.
+    private static func waitForProgress(
+        running: Running, _ progress: @escaping @Sendable () throws -> UInt64
+    ) async throws -> Bool {
+        while running.now {
+            let bytes = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt64, any Error>) in
+                Thread { continuation.resume(with: Result { try progress() }) }.start()
+            }
+            if bytes > 0 && bytes < largeCopyBytes && running.now { return true }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
     /// While a copy runs, an exec and a signal to the container are answered at once, and the
-    /// copy is still running when they are.
-    private static func expectAnsweredDuring(_ f: ContainerFixture, _ name: String, copy: [String]) async throws {
+    /// copy is still running when they are. The probes go out once the copy is seen part way.
+    private static func expectAnsweredDuring(
+        _ f: ContainerFixture, _ name: String, copy: [String], progress: @escaping @Sendable () throws -> UInt64
+    ) async throws {
         let running = Running()
         async let copied = Self.runInBackground(f, copy, running: running)
-        try await Task.sleep(for: .seconds(2))
-        #expect(running.now, "the copy ended before the container was asked anything")
-        let exec = try timed { try f.run(["exec", name, "true"]).check() }
-        let kill = try timed { try f.run(["kill", "-s", "SIGUSR1", name]).check() }
+        let observed = try await waitForProgress(running: running, progress)
+        let exec = try await timed { try f.run(["exec", name, "true"]).check() }
+        let kill = try await timed { try f.run(["kill", "-s", "SIGUSR1", name]).check() }
         let stillCopying = running.now
         try await copied.check()
+        #expect(observed, "the copy was never seen part way: the container answered only once it ended")
         #expect(exec < 5, "exec took \(exec)s during the copy")
         #expect(kill < 5, "kill took \(kill)s during the copy")
         #expect(stillCopying, "the exec and the signal were answered only after the copy ended")
+    }
+
+    /// The size of `path` in the container, 0 when it is not there yet.
+    private static func guestSize(_ f: ContainerFixture, _ name: String, _ path: String) throws -> UInt64 {
+        let result = try f.run(["exec", name, "sh", "-c", "stat -c %s \(path) 2>/dev/null || echo 0"])
+        return UInt64(result.output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// The size of `path` on the host, 0 when it is not there yet.
+    private static func hostSize(_ path: String) -> UInt64 {
+        ((try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? UInt64) ?? 0
     }
 
     @Test func testExecAndKillAnswerDuringLargeCopyIn() async throws {
@@ -604,7 +637,9 @@ struct TestCLICopyCommand {
                 let handle = try FileHandle(forWritingTo: URL(filePath: src.string))
                 try handle.truncate(atOffset: Self.largeCopyBytes)
                 try handle.close()
-                try await Self.expectAnsweredDuring(f, name, copy: ["copy", src.string, "\(name):/root/large.bin"])
+                try await Self.expectAnsweredDuring(f, name, copy: ["copy", src.string, "\(name):/root/large.bin"]) {
+                    try Self.guestSize(f, name, "/root/large.bin")
+                }
                 let size = try f.doExec(name, cmd: ["stat", "-c", "%s", "/root/large.bin"])
                 #expect(size.trimmingCharacters(in: .whitespacesAndNewlines) == "\(Self.largeCopyBytes)")
             }
@@ -617,7 +652,10 @@ struct TestCLICopyCommand {
             try await f.withContainer(image: image) { name in
                 try f.doExec(name, cmd: ["sh", "-c", "head -c \(Self.largeCopyBytes) /dev/zero > /root/large.bin"])
                 let dest = f.testDir.appending("large.out")
-                try await Self.expectAnsweredDuring(f, name, copy: ["copy", "\(name):/root/large.bin", dest.string])
+                let destination = dest.string
+                try await Self.expectAnsweredDuring(f, name, copy: ["copy", "\(name):/root/large.bin", destination]) {
+                    Self.hostSize(destination)
+                }
                 let size = try FileManager.default.attributesOfItem(atPath: dest.string)[.size] as? UInt64
                 #expect(size == Self.largeCopyBytes)
             }
@@ -635,9 +673,11 @@ struct TestCLICopyCommand {
                 try handle.close()
                 let running = Running()
                 async let copied = Self.runInBackground(f, ["copy", src.string, "\(name):/root/large.bin"], running: running)
-                try await Task.sleep(for: .seconds(2))
-                #expect(running.now, "the copy ended before the stop")
-                let stop = try Self.timed { try f.doStop(name) }
+                let observed = try await Self.waitForProgress(running: running) {
+                    try Self.guestSize(f, name, "/root/large.bin")
+                }
+                #expect(observed, "the copy ended before the stop")
+                let stop = try await Self.timed { try f.doStop(name) }
                 let result = try await copied
                 #expect(result.status != 0, "a copy whose container stopped under it must fail")
                 #expect(stop < 30, "stop took \(stop)s during the copy")
