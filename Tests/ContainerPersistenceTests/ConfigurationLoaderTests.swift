@@ -102,6 +102,42 @@ struct ConfigurationLoaderTests {
         }
     }
 
+    @Test func containerMemoryDefaultsToHalfTheHost() async throws {
+        try await TemporaryStorage.withTempDir { tempDir in
+            let config: ContainerSystemConfig = try await ConfigurationLoader.load(configurationFiles: [tempDir.appending("none.toml")])
+            let expected = ContainerConfig.defaultMemory(hostMemory: ProcessInfo.processInfo.physicalMemory)
+            #expect(config.container.memory == expected)
+            #expect(ContainerConfig().memory == expected)
+        }
+    }
+
+    @Test(arguments: [
+        (UInt64(8) << 30, "4gb"),
+        (UInt64(16) << 30, "8gb"),
+        (UInt64(18) << 30, "9gb"),
+        (UInt64(32) << 30, "16gb"),
+        (UInt64(36) << 30, "18gb"),
+        (UInt64(3) << 30, "1gb"),
+        (UInt64(1) << 30, "1gb"),
+        (UInt64(512) << 20, "1gb"),
+    ])
+    func containerMemoryDefaultIsHalfInWholeGigabytes(host: UInt64, expected: String) throws {
+        #expect(ContainerConfig.defaultMemory(hostMemory: host).formatted == expected)
+    }
+
+    @Test func machineMemoryDefaultMatchesContainers() {
+        #expect(MachineConfig.defaultMemory == ContainerConfig.defaultMemory)
+    }
+
+    @Test func explicitContainerMemoryIsKept() async throws {
+        try await TemporaryStorage.withTempDir { tempDir in
+            let tmpFile = tempDir.appending("test.toml")
+            try Self.writeToml("[container]\nmemory = \"1g\"\n", to: tmpFile)
+            let config: ContainerSystemConfig = try await ConfigurationLoader.load(configurationFiles: [tmpFile])
+            #expect(config.container.memory == (try MemorySize("1g")))
+        }
+    }
+
     @Test func tomlOverrideAllKeys() async throws {
         try await TemporaryStorage.withTempDir { tempDir in
             let toml = """
