@@ -46,6 +46,9 @@ public struct ContainerEvent: Codable, Sendable, Equatable {
         public static let create = Action(rawValue: "create")
         /// Its process is running: a start by hand, or one the engine made for a restart policy.
         public static let start = Action(rawValue: "start")
+        /// The OOM killer killed one of its processes, as Docker's `oom` says; reported when
+        /// the run ends, before its `die`.
+        public static let oom = Action(rawValue: "oom")
         /// Its process ended, however it ended; `exitCode` says how when it is known.
         public static let die = Action(rawValue: "die")
         /// The container was removed.

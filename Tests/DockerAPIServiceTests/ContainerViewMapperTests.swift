@@ -165,12 +165,25 @@ struct ContainerViewMapperTests {
         #expect(inspect.State.Status == "exited")
         #expect(!inspect.State.Running)
         #expect(inspect.State.ExitCode == 2)
+        #expect(inspect.State.OOMKilled == false)
         #expect(inspect.State.FinishedAt == ContainerViewMapper.timestamp(exited))
         #expect(inspect.NetworkSettings.IPAddress == "")
         #expect(inspect.NetworkSettings.Networks.keys.sorted() == ["shop"])
         // Control: without extras the command is the engine's, whole.
         #expect(inspect.Config.Cmd == ["/bin/sh", "-c", "sleep 1"])
         #expect(inspect.HostConfig.AutoRemove == false)
+    }
+
+    @Test("a run the OOM killer ended shows OOMKilled with its 137, as Docker's State does")
+    func inspectOOMKilled() throws {
+        var snapshot = Fixtures.snapshot(Fixtures.configuration(id: "x"), status: .stopped, exitCode: 137, exited: Fixtures.now)
+        snapshot.oomKilled = true
+        let inspect = ContainerViewMapper.inspect(container(snapshot), context: context)
+        #expect(inspect.State.OOMKilled)
+        #expect(inspect.State.ExitCode == 137)
+        // Nil, from an engine that did not say, is Docker's false.
+        snapshot.oomKilled = nil
+        #expect(!ContainerViewMapper.inspect(container(snapshot), context: context).State.OOMKilled)
     }
 
     @Test("the inspect JSON uses Docker's field names")

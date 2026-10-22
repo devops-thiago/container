@@ -131,11 +131,12 @@ extension RuntimeClient {
         }
     }
 
-    public func state() async throws -> SandboxSnapshot {
+    /// - Parameter responseTimeout: how long to wait for the answer; nil waits as `send` does.
+    public func state(responseTimeout: Duration? = nil) async throws -> SandboxSnapshot {
         let request = XPCMessage(route: RuntimeRoutes.state.rawValue)
         let response: XPCMessage
         do {
-            response = try await self.client.send(request)
+            response = try await self.client.send(request, responseTimeout: responseTimeout)
         } catch {
             throw ContainerizationError(
                 .internalError,

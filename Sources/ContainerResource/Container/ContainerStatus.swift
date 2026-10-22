@@ -38,6 +38,9 @@ public struct ContainerStatus: Codable, Sendable {
     public let restartError: String?
     /// The container's health, when it has a health check and has been started with it.
     public let health: ContainerHealth?
+    /// Whether the OOM killer killed a process in the container since it last started, as
+    /// Docker's `State.OOMKilled` says; see ``ContainerSnapshot/oomKilled``.
+    public let oomKilled: Bool?
 
     public init(
         state: RuntimeStatus,
@@ -47,7 +50,8 @@ public struct ContainerStatus: Codable, Sendable {
         exitedAt: Date? = nil,
         restartCount: Int = 0,
         restartError: String? = nil,
-        health: ContainerHealth? = nil
+        health: ContainerHealth? = nil,
+        oomKilled: Bool? = nil
     ) {
         self.state = state
         self.networks = networks
@@ -57,6 +61,7 @@ public struct ContainerStatus: Codable, Sendable {
         self.restartCount = restartCount
         self.restartError = restartError
         self.health = health
+        self.oomKilled = oomKilled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -68,6 +73,7 @@ public struct ContainerStatus: Codable, Sendable {
         case restartCount
         case restartError
         case health
+        case oomKilled
     }
 
     public init(from decoder: any Decoder) throws {
@@ -80,5 +86,6 @@ public struct ContainerStatus: Codable, Sendable {
         restartCount = try container.decodeIfPresent(Int.self, forKey: .restartCount) ?? 0
         restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
         health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
+        oomKilled = try container.decodeIfPresent(Bool.self, forKey: .oomKilled)
     }
 }

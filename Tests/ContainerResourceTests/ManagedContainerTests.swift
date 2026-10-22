@@ -53,6 +53,20 @@ struct ManagedContainerTests {
         #expect(mc.status.state == .running)
     }
 
+    @Test("inspect's status says OOMKilled with the exit, as the snapshot does")
+    func factoryMapsOOMKilled() throws {
+        let snapshot = ContainerSnapshot(
+            configuration: makeTestConfiguration(id: "oom"), status: .stopped, networks: [], exitCode: 137, oomKilled: true)
+        let mc = ManagedContainer(snapshot)
+        #expect(mc.status.exitCode == 137)
+        #expect(mc.status.oomKilled == true)
+        let status =
+            try #require(
+                try JSONSerialization.jsonObject(with: JSONEncoder().encode(mc)) as? [String: Any])["status"] as? [String: Any]
+        #expect(status?["oomKilled"] as? Bool == true)
+        #expect(ManagedContainer(ContainerSnapshot(configuration: makeTestConfiguration(id: "n"), status: .running, networks: [])).status.oomKilled == nil)
+    }
+
     @Test func nameValidAcceptsContainerNames() {
         #expect(ManagedContainer.nameValid("my-container_1.2"))
         #expect(ManagedContainer.nameValid("ABC"))

@@ -201,7 +201,7 @@ public actor DockerEventBus {
 
     /// The actions the engine reports for a container, which this service does not report again
     /// while it follows the engine.
-    static let engineActions: Set<String> = ["create", "start", "die", "destroy", "rename", "kill", "stop"]
+    static let engineActions: Set<String> = ["create", "start", "oom", "die", "destroy", "rename", "kill", "stop"]
 
     /// - Parameter source: the containers to read while anyone is subscribed, as the container
     ///   routes see them; nil reports only what this service does.

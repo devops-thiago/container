@@ -75,6 +75,12 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// restart delay of a run that had already ended by itself. Nil from an engine that does
     /// not say, and in snapshots or exit records written before it did: not known.
     public var stopRequested: Bool?
+    /// Whether the kernel's OOM killer killed a process in the container since it last
+    /// started, as Docker's `State.OOMKilled` says: the container's initial process, which
+    /// ends the run with 137, or another of its processes. Known once a run has ended; false
+    /// from a start until then. Nil from an engine that does not say, and in snapshots or exit
+    /// records written before it did.
+    public var oomKilled: Bool?
 
     public init(
         configuration: ContainerConfiguration,
@@ -87,7 +93,8 @@ public struct ContainerSnapshot: Codable, Sendable {
         restartCount: Int = 0,
         restartError: String? = nil,
         health: ContainerHealth? = nil,
-        stopRequested: Bool? = nil
+        stopRequested: Bool? = nil,
+        oomKilled: Bool? = nil
     ) {
         self.configuration = configuration
         self.incarnation = incarnation
@@ -100,6 +107,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         self.restartError = restartError
         self.health = health
         self.stopRequested = stopRequested
+        self.oomKilled = oomKilled
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -114,6 +122,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         case restartError
         case health
         case stopRequested
+        case oomKilled
     }
 
     public init(from decoder: any Decoder) throws {
@@ -131,5 +140,6 @@ public struct ContainerSnapshot: Codable, Sendable {
         restartError = try container.decodeIfPresent(String.self, forKey: .restartError)
         health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
         stopRequested = try container.decodeIfPresent(Bool.self, forKey: .stopRequested)
+        oomKilled = try container.decodeIfPresent(Bool.self, forKey: .oomKilled)
     }
 }

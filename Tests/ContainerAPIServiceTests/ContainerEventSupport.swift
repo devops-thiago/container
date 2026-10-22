@@ -141,6 +141,9 @@ final class FakeRuntime: Sendable {
         var closed = false
         /// Copies in and starts, in the order they came.
         var calls: [String] = []
+        /// What the runtime says of the OOM killer in its state: nil, as a runtime that does
+        /// not say, until the test sets it.
+        var oomKilled: Bool?
     }
 
     private final class Shared: Sendable {
@@ -190,7 +193,10 @@ final class FakeRuntime: Sendable {
                 let reply = message.reply()
                 reply.set(
                     key: RuntimeKeys.snapshot.rawValue,
-                    value: try JSONEncoder().encode(SandboxSnapshot(status: .running, networks: [], containers: [])))
+                    value: try JSONEncoder().encode(
+                        SandboxSnapshot(
+                            status: .running, networks: [], containers: [],
+                            oomKilled: shared.state.withLock { $0.oomKilled })))
                 return reply
             },
             RuntimeRoutes.wait.rawValue: XPCServer.route { message in
@@ -270,6 +276,12 @@ final class FakeRuntime: Sendable {
     /// The process ends with `code`.
     func exit(_ code: Int32) {
         Self.exit(shared, code)
+    }
+
+    /// The runtime's state says whether the OOM killer killed a process in the container this
+    /// run, as the Linux runtime reads it from the cgroup's memory events.
+    func reportOOMKilled(_ killed: Bool) {
+        shared.state.withLock { $0.oomKilled = killed }
     }
 
     var starts: Int { shared.state.withLock { $0.started } }

@@ -56,6 +56,9 @@ public actor RuntimeService {
     /// The tmpfs mounts holding published sockets that are mounted in the VM, under the
     /// container's root filesystem, for this run (see `PublishedSocketMounts`).
     private var guestTmpfsMounted: [Filesystem] = []
+    /// Whether the kernel's OOM killer killed a process in the container's cgroup during this
+    /// run, read from the cgroup's `memory.events` before the run is torn down.
+    private var oomKilled = false
 
     private static let sshAuthSocketGuestPath = "/var/host-services/ssh-auth.sock"
     private static let sshAuthSocketEnvVar = "SSH_AUTH_SOCK"
@@ -447,10 +450,12 @@ public actor RuntimeService {
             var mounted = config
             mounted.mounts = try await Self.mountsToBind(config.mounts, rootfs: rootfsFilesystem.source)
             // Give the VM headroom beyond the container's cgroup limits for the guest kernel,
-            // vminitd, and the overhead configured via `config.resources.cpuOverhead`.
+            // vminitd, and the overhead configured via `config.resources.cpuOverhead`. The
+            // memory reserve is sized so the container's own limit trips first (see
+            // `GuestMemoryReserve`).
             let vmResources = VMResources(
                 cpus: config.resources.cpus + config.resources.cpuOverhead,
-                memoryInBytes: config.resources.memoryInBytes + VMResources.guestMemoryOverhead
+                memoryInBytes: GuestMemoryReserve.vmBytes(forLimit: config.resources.memoryInBytes)
             )
             let guestHosts = GuestHosts(
                 hostname: Self.guestHostname(for: config), aliases: attachments.flatMap(\.aliases),
@@ -684,7 +689,8 @@ public actor RuntimeService {
             .init(
                 status: status,
                 networks: networks,
-                containers: cs != nil ? [cs!] : []
+                containers: cs != nil ? [cs!] : [],
+                oomKilled: self.oomKilled
             )
         )
         return reply
@@ -1822,10 +1828,55 @@ public actor RuntimeService {
         }
 
         // Now actually bring down the vm.
+        await self.recordOOMKills(lc)
         await self.unmountGuestTmpfs(lc)
         try await lc.stop()
 
         return code
+    }
+
+    /// Note whether the OOM killer acted in the container's cgroup this run. Read while the
+    /// cgroup still exists, before the container is stopped; bounded, so a guest that no
+    /// longer answers does not hold up the stop.
+    private func recordOOMKills(_ lc: LinuxContainer) async {
+        guard !self.oomKilled else { return }
+        // Not `Timeout.run`: its task group waits for the read even after the deadline, and
+        // the read queues on the container's lock, which a stuck exec can hold.
+        let events = await Self.firstOf(seconds: 5) {
+            try? await lc.statistics(categories: .memoryEvents).memoryEvents
+        }
+        guard let events else {
+            self.log.debug("could not read the container's memory events")
+            return
+        }
+        if Self.wasOOMKilled(oomKillEvents: events.oomKill) {
+            self.oomKilled = true
+            self.log.warning(
+                "the OOM killer killed a process in the container",
+                metadata: ["oom_kill": "\(events.oomKill)"])
+        }
+    }
+
+    /// The result of `operation`, or nil when it has not finished within `seconds`. The
+    /// operation is left running then, not awaited.
+    static func firstOf<T: Sendable>(
+        seconds: Int, _ operation: @escaping @Sendable () async -> T?
+    ) async -> T? {
+        let once = ResumeOnce<T?>()
+        return await withCheckedContinuation { cc in
+            once.set(cc)
+            Task { once.resume(returning: await operation()) }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                once.resume(returning: nil)
+            }
+        }
+    }
+
+    /// Docker's `OOMKilled`: a process in the container was killed by the OOM killer since it
+    /// last started. The cgroup is created for each start, so any count means this run.
+    static func wasOOMKilled(oomKillEvents: UInt64) -> Bool {
+        oomKillEvents > 0
     }
 
     private func cleanUpContainer(containerInfo: ContainerInfo, exitStatus: ExitStatus? = nil) async throws {
@@ -1835,6 +1886,7 @@ public actor RuntimeService {
         // Every way a run ends comes through here: a stop, the process exiting, a failed start.
         await self.stopHealthMonitor()
 
+        await self.recordOOMKills(container)
         await self.unmountGuestTmpfs(container)
         do {
             try await container.stop()
@@ -2137,5 +2189,22 @@ extension RuntimeService {
             self.log.error("failed to create bundle", metadata: ["error": "\(error)"])
             throw error
         }
+    }
+}
+
+/// A continuation resumed by whichever caller comes first; later calls do nothing.
+final class ResumeOnce<T: Sendable>: Sendable {
+    private let continuation = Mutex<CheckedContinuation<T, Never>?>(nil)
+
+    func set(_ cc: CheckedContinuation<T, Never>) {
+        continuation.withLock { $0 = cc }
+    }
+
+    func resume(returning value: T) {
+        let cc = continuation.withLock { cc in
+            defer { cc = nil }
+            return cc
+        }
+        cc?.resume(returning: value)
     }
 }

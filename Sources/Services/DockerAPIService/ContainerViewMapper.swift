@@ -334,7 +334,7 @@ public enum ContainerViewMapper {
                 Running: status == .running || status == .restarting,
                 Paused: false,
                 Restarting: status == .restarting,
-                OOMKilled: false,
+                OOMKilled: snapshot.oomKilled ?? false,
                 Dead: false,
                 Pid: 0,
                 ExitCode: Int(snapshot.exitCode ?? 0),
