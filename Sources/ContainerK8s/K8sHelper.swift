@@ -24,7 +24,7 @@ import Logging
 // MARK: - K8sHelper
 
 public struct K8sHelper {
-    public static let pluginName: String = "k8s"
+    public static let pluginName: String = ResourcePluginValues.kubernetes
     public static let defaultName: String = "k8s-dev"
     public static let controlPlaneRoleName: String = "control-plane"
     public static let workerRoleName: String = "worker"
