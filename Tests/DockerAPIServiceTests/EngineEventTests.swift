@@ -161,6 +161,11 @@ struct EngineEventTests {
         #expect(DockerEventBus.dockerEvent(health)?.action == "health_status: healthy")
         health.health = nil
         #expect(DockerEventBus.dockerEvent(health) == nil)
+        var oom = event
+        oom.action = .oom
+        oom.exitCode = nil
+        #expect(DockerEventBus.dockerEvent(oom)?.action == "oom")
+        #expect(DockerEventBus.dockerEvent(oom)?.attributes["exitCode"] == nil)
         var rename = event
         rename.action = .rename
         rename.attributes = ["oldName": "old"]
