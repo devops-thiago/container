@@ -24,12 +24,16 @@ import SystemPackage
 
 extension Application {
     public struct ContainerCopy: AsyncLoggableCommand {
-        enum PathRef {
+        enum PathRef: Equatable {
             case local(String)
             case container(id: String, path: String)
+            /// `-`: a tar archive on stdin as the source, on stdout as the destination, as
+            /// `docker cp` has it. A file named `-` is `./-`.
+            case stream
         }
 
         static func parsePathRef(_ ref: String) throws -> PathRef {
+            if ref == "-" { return .stream }
             let parts = ref.components(separatedBy: ":")
             switch parts.count {
             case 1:
@@ -46,15 +50,24 @@ extension Application {
         public static let configuration = CommandConfiguration(
             commandName: "copy",
             abstract: "Copy files/folders between a container and the local filesystem",
+            discussion: """
+                Use '-' as the source to read a tar archive from stdin
+                and extract it to a directory destination in a container.
+                Use '-' as the destination to stream a tar archive of a
+                container source to stdout.
+                """,
             aliases: ["cp"])
 
         @OptionGroup()
         public var logOptions: Flags.Logging
 
-        @Argument(help: "Source path (container:path or local path)")
+        @Flag(name: [.customShort("L"), .customLong("follow-link")], help: "Always follow symlinks in SRC_PATH")
+        var followLink = false
+
+        @Argument(help: "Source path (container:path, local path, or - for a tar archive on stdin)")
         var source: String
 
-        @Argument(help: "Destination path (container:path or local path)")
+        @Argument(help: "Destination path (container:path, local path, or - for a tar archive on stdout)")
         var destination: String
 
         public func run() async throws {
@@ -63,6 +76,13 @@ extension Application {
             let dstRef = try Self.parsePathRef(destination)
 
             switch (srcRef, dstRef) {
+            case (.container(let id, let path), .stream):
+                try await ContainerCopyStream.copyOut(id: id, path: path, followLink: followLink, to: .standardOutput)
+            case (.stream, .container(let id, let path)):
+                try await ContainerCopyStream.copyIn(id: id, path: path, from: .standardInput)
+            case (.stream, _), (_, .stream):
+                // The Docker CLI's words when neither side names a container.
+                throw ContainerizationError(.invalidArgument, message: "must specify at least one container source")
             case (.container(let id, let path), .local(let localPath)):
                 let srcPath = FilePath(path)
                 let destPath = FilePath(HostPath.absolute(localPath))
