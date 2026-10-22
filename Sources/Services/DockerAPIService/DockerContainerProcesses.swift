@@ -84,16 +84,19 @@ public actor DockerContainerProcesses {
         let stdinPipe: StdioPipe?
         let stdoutPipe: StdioPipe?
         let stderrPipe: StdioPipe?
+        let stdio: DockerProcessStdio
         do {
             stdinPipe = stdinOpen && claimed.contains { $0.options.stdin } ? try StdioPipe(.intoContainer) : nil
             stdoutPipe = claimed.contains { $0.options.stdout } ? try StdioPipe(.outOfContainer) : nil
             stderrPipe = !tty && claimed.contains { $0.options.stderr } ? try StdioPipe(.outOfContainer) : nil
+            stdio = DockerProcessStdio(
+                stdin: try stdinPipe?.containerHandleForEngine(), stdout: try stdoutPipe?.containerHandleForEngine(),
+                stderr: try stderrPipe?.containerHandleForEngine())
         } catch {
             await attaches.complete(tickets, .released)
             throw DockerAPIError.internalError("could not make the container's stdio: \(error)")
         }
         let pipes = [stdinPipe, stdoutPipe, stderrPipe].compactMap { $0 }
-        let stdio = DockerProcessStdio(stdin: stdinPipe?.containerHandle, stdout: stdoutPipe?.containerHandle, stderr: stderrPipe?.containerHandle)
 
         // Before the process can exit: a wait from here on hears this run's exit.
         await waits.starting(engineID)

@@ -125,7 +125,7 @@ enum DockerContainerCommand {
             }
             process = try await tools.createProcess(
                 container, id: "docker-api-\(UUID().uuidString.lowercased())", configuration: configuration,
-                stdio: DockerProcessStdio(stdout: stdoutPipe.containerHandle, stderr: stderrPipe.containerHandle))
+                stdio: DockerProcessStdio(stdout: try stdoutPipe.containerHandleForEngine(), stderr: try stderrPipe.containerHandleForEngine()))
         } catch {
             throw Unavailable(message: DockerContainerProcesses.message(error))
         }
