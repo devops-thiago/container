@@ -124,11 +124,16 @@ final class FakeRuntime: Sendable {
         var health: [HealthUpdate] = []
         /// Copies in of a source with one of these names fail.
         var copyInFailures: Set<String> = []
+        /// Starts of processes with these IDs are not answered until `releaseHeldStarts()`, as
+        /// a guest that is out of memory does not answer an exec.
+        var holdStarts: Set<String> = []
     }
 
     private struct State {
         var exit: ExitStatus?
         var waiters: [CheckedContinuation<ExitStatus?, Never>] = []
+        var heldStarts: [CheckedContinuation<Void, Never>] = []
+        var released = false
         var healthWaiters: [CheckedContinuation<HealthUpdate?, Never>] = []
         var health: [HealthUpdate]
         var started = 0
@@ -157,11 +162,28 @@ final class FakeRuntime: Sendable {
         let routes: [String: XPCServer.RouteHandler] = [
             RuntimeRoutes.bootstrap.rawValue: XPCServer.route { $0.reply() },
             RuntimeRoutes.start.rawValue: XPCServer.route { message in
+                let process = message.string(key: RuntimeKeys.id.rawValue) ?? ""
                 shared.state.withLock {
                     $0.started += 1
-                    $0.calls.append("start")
+                    $0.calls.append(behavior.holdStarts.contains(process) ? "start \(process) held" : "start")
+                }
+                if behavior.holdStarts.contains(process) {
+                    await withCheckedContinuation { continuation in
+                        let now = shared.state.withLock { state in
+                            if state.released || state.closed { return true }
+                            state.heldStarts.append(continuation)
+                            return false
+                        }
+                        if now { continuation.resume() }
+                    }
+                    return message.reply()
                 }
                 if let code = behavior.exitOnStart { Self.exit(shared, code) }
+                return message.reply()
+            },
+            RuntimeRoutes.createProcess.rawValue: XPCServer.route { message in
+                let process = message.string(key: RuntimeKeys.id.rawValue) ?? ""
+                shared.state.withLock { $0.calls.append("createProcess \(process)") }
                 return message.reply()
             },
             RuntimeRoutes.state.rawValue: XPCServer.route { message in
@@ -235,6 +257,16 @@ final class FakeRuntime: Sendable {
         RuntimeClient.create(id: id, runtime: runtime, endpoint: xpc_endpoint_create(listener))
     }
 
+    /// Answers every start held by `Behavior.holdStarts`, and those still to come.
+    func releaseHeldStarts() {
+        let held = shared.state.withLock { state in
+            state.released = true
+            defer { state.heldStarts = [] }
+            return state.heldStarts
+        }
+        for start in held { start.resume() }
+    }
+
     /// The process ends with `code`.
     func exit(_ code: Int32) {
         Self.exit(shared, code)
@@ -257,14 +289,16 @@ final class FakeRuntime: Sendable {
 
     /// Answer every wait still open, and stop listening.
     func close() {
-        let (waiters, healthWaiters) = shared.state.withLock { state in
+        let (waiters, healthWaiters, heldStarts) = shared.state.withLock { state in
             state.closed = true
             defer {
                 state.waiters = []
                 state.healthWaiters = []
+                state.heldStarts = []
             }
-            return (state.waiters, state.healthWaiters)
+            return (state.waiters, state.healthWaiters, state.heldStarts)
         }
+        for start in heldStarts { start.resume() }
         for waiter in waiters { waiter.resume(returning: nil) }
         for waiter in healthWaiters { waiter.resume(returning: nil) }
         xpc_connection_cancel(listener)
