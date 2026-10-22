@@ -38,6 +38,26 @@ public struct LogFileReader {
         return Data(bytes.prefix(count))
     }
 
+    /// The file has no name left: its container was deleted.
+    public func isDeleted() throws -> Bool {
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return info.st_nlink == 0
+    }
+
+    /// The file was rewritten from the start since the last read: the engine's rollover of a
+    /// full log, or the start of the container's next run.
+    public func isRewritten() throws -> Bool {
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let headChanged = try !Self.readHead(handle).starts(with: head)
+        return UInt64(info.st_size) < offset || headChanged
+    }
+
     public mutating func nextChunk() throws -> Data {
         var info = stat()
         guard fstat(handle.fileDescriptor, &info) == 0 else {
@@ -59,11 +79,23 @@ public struct LogFileReader {
 public enum LogFileFollow {
     /// Vnode notifications are coalesced signals, never queued log payloads. Cancellation
     /// closes the descriptor only after its dispatch source has finished using it.
-    public static func follow(_ handle: FileHandle, onData: @Sendable (Data) -> Void) async throws {
+    ///
+    /// With `runEnded`, the follow ends with the container's run, as `docker logs -f` does:
+    /// `runEnded` is asked every `statusInterval`, and the log file is looked at for having
+    /// been deleted, with its container, at every change to it, and asked again when the file
+    /// is rewritten from the start. Once the run has ended, what is left of it in the file is
+    /// read and the follow returns; a file rewritten by the next run's start is not read. The
+    /// engine has written all of a process's output by the time it reports the exit, so that
+    /// read is the last output.
+    /// Without `runEnded` it follows until cancelled.
+    public static func follow(
+        _ handle: FileHandle, statusInterval: Duration = .seconds(1), runEnded: (@Sendable () async throws -> Bool)? = nil,
+        onData: @Sendable (Data) -> Void
+    ) async throws {
         var reader = try LogFileReader(handle: handle, startAtEnd: true)
         let (events, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: handle.fileDescriptor, eventMask: [.write, .extend, .attrib],
+            fileDescriptor: handle.fileDescriptor, eventMask: [.write, .extend, .attrib, .delete, .link],
             queue: DispatchQueue(label: "container.log.follow"))
         source.setEventHandler { continuation.yield() }
         source.setCancelHandler {
@@ -71,14 +103,48 @@ public enum LogFileFollow {
             continuation.finish()
         }
         source.resume()
-        defer { source.cancel() }
+        // Taken before the ticker sleeps, so its first wake finds the interval gone by.
+        var lastLook = ContinuousClock.now
+        // Wakes the loop to ask `runEnded` while the container writes nothing.
+        let ticker: Task<Void, Never>? =
+            runEnded == nil
+            ? nil
+            : Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: statusInterval)
+                    continuation.yield()
+                }
+            }
+        defer {
+            ticker?.cancel()
+            source.cancel()
+        }
         continuation.yield()
         for await _ in events {
+            // Decided before the read below, so that everything written before the end is read.
+            var ended = false
+            if let runEnded {
+                if try reader.isDeleted() {
+                    ended = true
+                } else if lastLook.duration(to: .now) >= statusInterval {
+                    lastLook = .now
+                    ended = try await runEnded()
+                }
+            }
             while !Task.isCancelled {
+                if let runEnded, try reader.isRewritten() {
+                    // The engine's rollover goes on being read; the next run's start does not.
+                    if !ended {
+                        lastLook = .now
+                        ended = try await runEnded()
+                    }
+                    if ended { return }
+                }
                 let data = try reader.nextChunk()
                 guard !data.isEmpty else { break }
                 onData(data)
             }
+            if ended { return }
         }
     }
 }
