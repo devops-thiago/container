@@ -30,11 +30,15 @@ public actor DefaultNetworkService: NetworkService {
     /// The other names each hostname answers to, by canonical hostname, so a peer's hosts file can list them.
     private var aliases: [String: [String]] = [:]
     private var allocationsBySession: [XPCServerSession: [(hostname: String, index: UInt32)]]
+    /// Told how many clients hold attachments whenever that changes.
+    private let attachmentsChanged: (@Sendable (Int) async -> Void)?
 
-    /// Set up a network service for the specified network.
+    /// Set up a network service for the specified network. `attachmentsChanged` hears the
+    /// number of clients holding attachments each time one comes or goes.
     public init(
         network: any Network,
-        log: Logger
+        log: Logger,
+        attachmentsChanged: (@Sendable (Int) async -> Void)? = nil
     ) async throws {
         guard let status = await network.status else {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
@@ -47,6 +51,7 @@ public actor DefaultNetworkService: NetworkService {
         self.allocator = try AttachmentAllocator(lower: subnet.lower.value + 2, size: size)
         self.macAddresses = [:]
         self.allocationsBySession = [:]
+        self.attachmentsChanged = attachmentsChanged
     }
 
     @Sendable
@@ -132,6 +137,7 @@ public actor DefaultNetworkService: NetworkService {
             await session.onDisconnect { [weak self] in
                 await self?.releaseSession(session)
             }
+            await attachmentsChanged?(allocationsBySession.count)
         }
 
         return (attachment: attachment, additionalData: additionalData)
@@ -148,7 +154,8 @@ public actor DefaultNetworkService: NetworkService {
             macAddresses.removeValue(forKey: allocation.index)
             aliases.removeValue(forKey: AttachmentOptions.canonicalHostname(allocation.hostname))
         }
-        log.info("released session", metadata: ["allocations": "\(allocations.count)"])
+        log.info("released session", metadata: ["allocations": "\(allocations.count)", "sessions": "\(allocationsBySession.count)"])
+        await attachmentsChanged?(allocationsBySession.count)
     }
 
     @Sendable
