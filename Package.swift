@@ -573,6 +573,7 @@ let package = Package(
                 "ContainerNetworkVmnetServer",
                 "ContainerPersistence",
                 "ContainerPlugin",
+                .product(name: "NIOPosix", package: "swift-nio"),
                 "ContainerResource",
                 "ContainerVersion",
                 "ContainerXPC",
@@ -594,11 +595,13 @@ let package = Package(
             name: "ContainerNetworkServer",
             dependencies: [
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
                 "ContainerNetworkClient",
                 "ContainerResource",
                 "ContainerXPC",
                 "DNSServer",
+                "SocketForwarder",
             ],
             path: "Sources/Services/Network/Server"
         ),
@@ -606,11 +609,14 @@ let package = Package(
             name: "ContainerNetworkServerTests",
             dependencies: [
                 .product(name: "ContainerizationExtras", package: "containerization"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIO", package: "swift-nio"),
                 "ContainerNetworkClient",
                 "ContainerNetworkServer",
                 "ContainerResource",
                 "ContainerXPC",
                 "DNSServer",
+                "SocketForwarder",
             ]
         ),
         .target(

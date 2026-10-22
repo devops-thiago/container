@@ -25,10 +25,18 @@ public struct SocketForwarderResult: Sendable {
 
     public var proxyAddress: SocketAddress? { self.channel.localAddress }
 
+    /// Whether the listener is still open.
+    public var isActive: Bool { self.channel.isActive }
+
     public func close() {
         self.channel.eventLoop.execute {
             _ = channel.close()
         }
+    }
+
+    /// Closes the listener and returns once it is closed.
+    public func closeNow() async {
+        try? await self.channel.close().get()
     }
 
     public func wait() async throws {

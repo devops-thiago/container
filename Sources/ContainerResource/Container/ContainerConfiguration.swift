@@ -182,6 +182,10 @@ public struct ContainerConfiguration: Sendable, Codable {
         /// its gateway, which is where services bound on every interface of the host answer.
         public static let hostGateway = "host-gateway"
 
+        /// The names Docker Desktop gives every container for the Mac: both stand for the
+        /// gateway here, where the network helper answers for the Mac's own services.
+        public static let dockerHostNames = ["host.docker.internal", "gateway.docker.internal"]
+
         public var name: String
         /// An IPv4 or IPv6 literal, or `hostGateway`.
         public var address: String

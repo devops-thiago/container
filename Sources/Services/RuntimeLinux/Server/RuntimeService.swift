@@ -158,6 +158,11 @@ public actor RuntimeService {
                         + peer.aliases.filter { $0 != peer.hostname },
                 ))
         }
+        // Docker Desktop's names for the Mac, on every network, unless an explicit host
+        // claims one (removed with the colliding aliases below).
+        if let gateway {
+            hostsEntries.append(Hosts.Entry(ipAddress: gateway, hostnames: ContainerConfiguration.ExtraHost.dockerHostNames))
+        }
         // Resolvers can return every matching hosts entry, in file order. Remove
         // colliding aliases before appending explicit hosts so stale peer addresses
         // cannot win, while keeping each peer's remaining aliases intact.

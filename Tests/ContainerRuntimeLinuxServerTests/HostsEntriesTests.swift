@@ -55,7 +55,32 @@ struct HostsEntriesTests {
         let entries = try RuntimeService.hostsEntries(
             hostname: "self", primaryAddress: nil, peers: [], searchDomain: "container.internal",
             extraHosts: [.init(name: "host.docker.internal", address: "host-gateway"), .init(name: "literal", address: "2001:db8::8")], gateway: "198.51.100.1")
-        #expect(entries.map(\.rendered) == ["127.0.0.1 localhost", "198.51.100.1 host.docker.internal", "2001:db8::8 literal"])
+        #expect(
+            entries.map(\.rendered) == [
+                "127.0.0.1 localhost", "198.51.100.1 gateway.docker.internal", "198.51.100.1 host.docker.internal", "2001:db8::8 literal",
+            ])
+    }
+
+    @Test func everyNetworkedGuestKnowsTheMacByDockerDesktopsNames() throws {
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "self", primaryAddress: "192.0.2.10", peers: [peer("web")], searchDomain: "container.internal",
+            extraHosts: [], gateway: "192.0.2.1")
+        #expect(entries.filter { $0.hostnames.contains("host.docker.internal") }.map(\.ipAddress) == ["192.0.2.1"])
+        #expect(entries.filter { $0.hostnames.contains("gateway.docker.internal") }.map(\.ipAddress) == ["192.0.2.1"])
+    }
+
+    @Test func anExplicitHostDockerInternalWinsOverTheBuiltInOne() throws {
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "self", primaryAddress: "192.0.2.10", peers: [], searchDomain: "container.internal",
+            extraHosts: [.init(name: "HOST.docker.internal", address: "203.0.113.7")], gateway: "192.0.2.1")
+        #expect(entries.filter { $0.hostnames.contains { $0.lowercased() == "host.docker.internal" } }.map(\.ipAddress) == ["203.0.113.7"])
+        #expect(entries.filter { $0.hostnames.contains("gateway.docker.internal") }.map(\.ipAddress) == ["192.0.2.1"])
+    }
+
+    @Test func aGuestWithNoNetworkGetsNoHostNamesAndNoError() throws {
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "self", primaryAddress: nil, peers: [], searchDomain: "container.internal", extraHosts: [], gateway: nil)
+        #expect(entries.map(\.rendered) == ["127.0.0.1 localhost"])
     }
 
     @Test func missingGatewayIsStillRejectedByRuntime() throws {
@@ -83,6 +108,7 @@ struct HostsEntriesTests {
                 "192.0.2.10 shop-web-1 web",
                 "192.0.2.30 shop-db-1 shop-db-1.container.internal db postgres",
                 "192.0.2.20 cache cache.container.internal",
+                "192.0.2.1 host.docker.internal gateway.docker.internal",
             ])
     }
 
@@ -104,6 +130,7 @@ struct HostsEntriesTests {
             try guest.entries(peers: []).map(\.rendered) == [
                 "127.0.0.1 localhost",
                 "192.0.2.10 api backend",
+                "192.0.2.1 host.docker.internal gateway.docker.internal",
                 "192.0.2.99 registry",
             ])
         let later = try ContainerResource.Attachment(
@@ -115,6 +142,7 @@ struct HostsEntriesTests {
                 "192.0.2.10 api backend",
                 "192.0.2.40 worker worker.example.test jobs",
                 "192.0.2.20 cache cache.example.test",
+                "192.0.2.1 host.docker.internal gateway.docker.internal",
                 "192.0.2.99 registry",
             ])
         #expect(

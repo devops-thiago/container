@@ -55,6 +55,8 @@ extension ConnectHandler {
 
         ClientBootstrap(group: context.eventLoop)
             .connectTimeout(self.connectTimeout)
+            // The backend's end of output reaches the client as a half-close too.
+            .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .connect(to: serverAddress)
             .assumeIsolatedUnsafeUnchecked()
             .whenComplete { result in
