@@ -118,14 +118,6 @@ public struct DockerPathStat: Sendable, Equatable {
     }
 }
 
-/// What looking at a path in a container found.
-enum DockerPathProbe: Equatable {
-    case found(DockerPathStat)
-    case notFound
-    /// The container has no `stat` to look with.
-    case unavailable
-}
-
 /// `GET`, `HEAD` and `PUT /containers/{id}/archive`, which `docker cp` drives.
 ///
 /// The engine copies files in and out of a running container; a path's mode, size, time and
@@ -142,44 +134,17 @@ extension ContainerToolRoutes.Routes {
     }
 
     static func fileNotFound(_ path: String, _ reference: String) -> DockerAPIError {
-        .notFound("Could not find the file \(path) in container \(reference)")
+        ContainerPathArchive.notFound(path, in: reference)
     }
 
     /// Looks at `path` in the container with `stat`, following a final symlink when `follow`.
     func probe(_ container: DockerContainer, _ path: String, follow: Bool) async throws -> DockerPathProbe {
-        let name = DockerPathStat.baseName(path)
-        let run: DockerCapturedRun
-        do {
-            run = try await DockerContainerCommand.run(engine, in: container.snapshot, ["stat"] + (follow ? ["-L"] : []) + ["-c", "%f %s %Y", path])
-        } catch is DockerContainerCommand.Unavailable {
-            return .unavailable
-        }
-        if run.status == DockerContainerCommand.notFoundStatus, !run.reason.contains(path) {
-            return .unavailable
-        }
-        guard run.status == 0 else {
-            if run.reason.contains("No such file or directory") { return .notFound }
-            throw DockerAPIError.internalError("stat \(path): \(run.reason.isEmpty ? "exit status \(run.status)" : run.reason)")
-        }
-        guard var stat = DockerPathStat.parse(statOutput: run.stdoutText, name: name) else {
-            throw DockerAPIError.internalError("stat \(path): could not read its output")
-        }
-        if stat.isSymlink {
-            let link = try? await DockerContainerCommand.run(engine, in: container.snapshot, ["readlink", path])
-            if let link, link.status == 0 {
-                stat.linkTarget = link.stdoutText.trimmingCharacters(in: .newlines)
-            }
-        }
-        return .found(stat)
+        try await ContainerPathArchive.probe(engine, in: container.snapshot, path, follow: follow)
     }
 
     /// A directory of its own in the scratch directory, for one request's copies.
     func makeScratch() throws -> URL {
-        let directory = try engine.scratchDirectory().appending(path: "docker-archive-\(UUID().uuidString)", directoryHint: .isDirectory)
-        guard mkdir(directory.path(percentEncoded: false), 0o700) == 0 else {
-            throw DockerAPIError.internalError("could not make a directory for the copy: \(String(cString: strerror(errno)))")
-        }
-        return directory
+        try ContainerPathArchive.makeScratch(engine)
     }
 
     /// Copies `path` out of the container into `destination`, saying "not found" in dockerd's
@@ -227,20 +192,14 @@ extension ContainerToolRoutes.Routes {
         }
 
         // The root and a trailing `/.` are archived as `.`, the way dockerd names them.
-        let entryName = name == "/" ? "." : name
+        let entryName = ContainerPathArchive.entryName(for: path)
         let scratch = try makeScratch()
         let stat: DockerPathStat
         let copy = scratch.appending(path: "copy")
         do {
-            if let known, known.isSymlink {
-                // The link itself, not what it points to.
-                guard symlink(known.linkTarget, copy.path(percentEncoded: false)) == 0 else {
-                    throw DockerAPIError.internalError("could not stage the link \(path)")
-                }
-            } else {
+            stat = try await ContainerPathArchive.stage(path, known: known, at: copy) {
                 try await copyOut(container, path, to: copy, reference: reference, requester: request.peer?.requester)
             }
-            stat = try known ?? DockerPathStat.host(copy.path(percentEncoded: false), name: name)
         } catch {
             try? FileManager.default.removeItem(at: scratch)
             throw error
@@ -358,14 +317,6 @@ extension ContainerToolRoutes.Routes {
     /// Refuses an archive that starts like gzip, bzip2, xz or zstd: dockerd takes them, this
     /// service does not, and the CLI never sends one.
     static func refuseCompressed(_ archive: URL) throws {
-        let handle = try FileHandle(forReadingFrom: archive)
-        defer { try? handle.close() }
-        let magic = Array(try handle.read(upToCount: 6) ?? Data())
-        let compressed =
-            magic.starts(with: [0x1F, 0x8B]) || magic.starts(with: Array("BZh".utf8)) || magic.starts(with: [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])
-            || magic.starts(with: [0x28, 0xB5, 0x2F, 0xFD])
-        if compressed {
-            throw DockerAPIError.badRequest("SiliconShip copies an uncompressed tar archive into a container; this one is compressed")
-        }
+        try ContainerPathArchive.refuseCompressed(archive)
     }
 }
