@@ -122,6 +122,19 @@ struct PrestartCopyRPCTests {
         #expect(entry.group == info.st_gid)
     }
 
+    @Test("a file's archive is stored, not compressed: a copy costs what sending its bytes did")
+    func fileArchiveIsStored() async throws {
+        let source = try PrestartCopyTests.Source()
+        try Data(count: 1 << 20).write(to: source.file)
+        let archive = source.top.appending(path: "stored.tar.gz")
+        FileManager.default.createFile(atPath: archive.path, contents: nil)
+        try await VminitdCopyAgent.send(source.file, isDirectory: false, name: "zeros", mode: 0, owner: nil, to: FileHandle(forWritingTo: archive))
+        let size = try #require(try FileManager.default.attributesOfItem(atPath: archive.path)[.size] as? Int)
+        #expect(size > 1 << 20, "a megabyte of zeros compressed to \(size) bytes")
+        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: archive))
+        #expect(entries.map(\.1) == [Data(count: 1 << 20)])
+    }
+
     @Test("directory payloads contain nested files and their contents")
     func nestedDirectoryPayload() async throws {
         let source = try PrestartCopyTests.Source()
