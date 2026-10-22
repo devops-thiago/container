@@ -113,10 +113,29 @@ struct RunningCopyTests {
                 try await caller.value
             } throws: { error in
                 (error as? ContainerizationError)?.code == .invalidState
-                    && (error as? ContainerizationError)?.message.contains("the container stopped during the copy") == true
+                    && (error as? ContainerizationError)?.message == ActiveCopies.stoppedMessage
             }
         }
         #expect(copies.count == 0)
+    }
+
+    @Test("a copy that arrives once the stop has begun is refused, and taken again after the next start", .timeLimit(.minutes(1)))
+    func closedUntilReopened() async throws {
+        let copies = ActiveCopies()
+        // The natural-exit path: the container's process ended and its cleanup has begun.
+        await copies.cancelAll()
+        let ran = Mutex(false)
+        await #expect {
+            try await copies.run { ran.withLock { $0 = true } }
+        } throws: { error in
+            (error as? ContainerizationError)?.code == .invalidState
+                && (error as? ContainerizationError)?.message.contains("the container is stopping") == true
+        }
+        #expect(!ran.withLock { $0 })
+        #expect(copies.count == 0)
+        copies.reopen()
+        try await copies.run { ran.withLock { $0 = true } }
+        #expect(ran.withLock { $0 })
     }
 
     @Test("cancelling the caller cancels its copy", .timeLimit(.minutes(1)))
@@ -133,6 +152,13 @@ struct RunningCopyTests {
         caller.cancel()
         await #expect(throws: CancellationError.self) { try await caller.value }
         #expect(copies.count == 0)
+    }
+
+    /// Run blocking `body` on a thread of its own, off the cooperative pool.
+    static func onThread<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, any Error>) in
+            Thread { continuation.resume(with: Result { try body() }) }.start()
+        }
     }
 
     /// A connected pair of stream sockets standing in for the copy's vsock connection: the
@@ -163,7 +189,7 @@ struct RunningCopyTests {
         send.cancel()
         await #expect(throws: (any Error).self) { try await send.value }
         // The guest drains what was buffered, then reaches the end of the stream.
-        let drained = try guest.readToEnd() ?? Data()
+        let drained = try await Self.onThread { try guest.readToEnd() ?? Data() }
         #expect(drained.count < 64 << 20)
     }
 
@@ -188,8 +214,10 @@ struct RunningCopyTests {
         let (fileCopy, fileGuest) = try Self.connection()
         let fileOut = source.top.appending(path: "file.out")
         async let received: Void = VminitdCopyAgent.receive(to: fileOut, isArchive: false, from: fileCopy)
-        try fileGuest.write(contentsOf: bytes)
-        try fileGuest.close()
+        try await Self.onThread {
+            try fileGuest.write(contentsOf: bytes)
+            try fileGuest.close()
+        }
         try await received
         #expect(try Data(contentsOf: fileOut) == bytes)
 

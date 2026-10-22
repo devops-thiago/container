@@ -20,6 +20,8 @@ import Logging
 
 /// What lifting vminitd's memory limit for a copy asks of the VM's agent.
 protocol VminitdMemoryControl: Sendable {
+    /// What vminitd's cgroup `memory.high` holds now.
+    func memoryHigh() async throws -> String
     /// Write `value` to vminitd's cgroup `memory.high`.
     func setMemoryHigh(_ value: String) async throws
     /// Write every dirty page in the VM back to its disk.
@@ -33,42 +35,57 @@ protocol VminitdMemoryControl: Sendable {
 /// `vminitd/Sources/VminitdCore/AgentCommand.swift`). Cgroup writeback sizes a cgroup's dirty
 /// pages from its limit, so that gave a copy about 16 MiB of dirty pages and made it nearly
 /// write-through: 300 MB took 2 to 8 s where the same bytes through `exec -i … cat >` took 1 s,
-/// and 2 GB 32 to 47 s against 7 to 8 s (#640). Docker writes a `docker cp` from its daemon, which has no
-/// limit of its own, so the copy's page cache counts against the machine, not the container.
-/// With the limit lifted the copy's page cache counts against the VM in the same way: the
-/// kernel's global dirty limits bound what is not yet written, and the rest is page cache the
-/// kernel reclaims under pressure like any other.
+/// and 2 GB 32 to 47 s against 7 to 8 s (#640). Docker writes a `docker cp` from its daemon, which
+/// has no limit of its own, so the copy's page cache counts against the machine, not the
+/// container. With the limit lifted the copy's page cache counts against the VM in the same way:
+/// the kernel's global dirty limits bound what is not yet written, and the rest is page cache
+/// the kernel reclaims under pressure like any other. Every copy into the container lifts it,
+/// a copy the Docker API held for a container that had not started yet too.
 ///
-/// The limit goes back once the last copy has ended and `settleDelay` has passed, after a
-/// sync: by then the kernel has written the copy back, so putting the limit back only drops
-/// clean page cache and never leaves vminitd over its limit with dirty pages, where the
-/// kernel would make it wait.
+/// The limit goes back to what it was before the lift once the last copy has ended and
+/// `settleDelay` has passed, after a sync: by then the kernel has written the copy back, so
+/// putting the limit back only drops clean page cache and never leaves vminitd over its limit
+/// with dirty pages, where the kernel would make it wait. A sync that takes longer than
+/// `syncLimit` leaves the limit lifted and tries again after another `settleDelay`, so a copy
+/// that arrives meanwhile is never kept waiting behind it for long.
 actor CopyMemoryHeadroom {
     /// vminitd's cgroup, created by vminitd at boot.
     static let memoryHighPath = "/sys/fs/cgroup/vminitd/memory.high"
-    /// What vminitd sets at boot (containerization 0.47.0 `AgentCommand.bootstrap`).
+    /// What vminitd sets at boot (containerization 0.47.0 `AgentCommand.bootstrap`), put back
+    /// when the value before the lift could not be read.
     static let vminitdMemoryHigh: UInt64 = 80 * 1024 * 1024
     static let lifted = "max"
     /// The kernel writes back dirty pages within `dirty_expire_centisecs` (30 s) of their
     /// first write, checked every `dirty_writeback_centisecs` (5 s).
     static let defaultSettleDelay: Duration = .seconds(35)
+    static let defaultSyncLimit: Duration = .seconds(10)
+
+    typealias Sleep = @Sendable (Duration) async throws -> Void
 
     private let settleDelay: Duration
+    private let syncLimit: Duration
+    private let sleep: Sleep
     private let log: Logger?
     private var active = 0
-    private var isLifted = false
+    /// The value to put back, while the limit is lifted.
+    private var saved: String?
     /// The wait before putting the limit back, while no copy runs.
     private var restoreTimer: Task<Void, Never>?
     /// Putting the limit back, once started.
     private var restoring: Task<Void, Never>?
 
-    init(settleDelay: Duration = defaultSettleDelay, log: Logger? = nil) {
+    init(
+        settleDelay: Duration = defaultSettleDelay, syncLimit: Duration = defaultSyncLimit,
+        sleep: @escaping Sleep = { try await Task.sleep(for: $0) }, log: Logger? = nil
+    ) {
         self.settleDelay = settleDelay
+        self.syncLimit = syncLimit
+        self.sleep = sleep
         self.log = log
     }
 
     /// Whether the limit is lifted now.
-    var lifted: Bool { isLifted }
+    var lifted: Bool { saved != nil }
 
     /// Run `operation`, a copy into the container, with vminitd's limit lifted. A failure to
     /// lift it is logged and the copy runs anyway, at the speed it had before.
@@ -90,25 +107,39 @@ actor CopyMemoryHeadroom {
         while let restoring {
             await restoring.value
         }
-        guard !isLifted else { return }
+        guard saved == nil else { return }
+        var before: String
+        do {
+            before = try await control.memoryHigh().trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            log?.warning("could not read vminitd's memory limit; it goes back to vminitd's default", metadata: ["error": "\(error)"])
+            before = ""
+        }
+        if before.isEmpty || before == Self.lifted {
+            before = String(Self.vminitdMemoryHigh)
+        }
+        // Another copy may have lifted it while this one read.
+        guard saved == nil else { return }
         do {
             try await control.setMemoryHigh(Self.lifted)
-            isLifted = true
-            log?.info("lifted vminitd's memory limit for a copy")
+            saved = before
+            log?.info("lifted vminitd's memory limit for a copy", metadata: ["memory.high": "\(before)"])
         } catch {
             log?.warning("could not lift vminitd's memory limit for a copy", metadata: ["error": "\(error)"])
         }
     }
 
     private func scheduleRestore(_ control: some VminitdMemoryControl) {
-        guard isLifted, restoreTimer == nil else { return }
+        guard saved != nil, restoreTimer == nil else { return }
         let delay = settleDelay
+        let sleep = self.sleep
         restoreTimer = Task {
             do {
-                try await Task.sleep(for: delay)
+                try await sleep(delay)
             } catch {
                 return
             }
+            guard !Task.isCancelled else { return }
             await self.restore(control)
         }
     }
@@ -117,22 +148,27 @@ actor CopyMemoryHeadroom {
     func discard() {
         restoreTimer?.cancel()
         restoreTimer = nil
-        isLifted = false
+        saved = nil
     }
 
     /// Put the limit back unless a copy started meanwhile.
     private func restore(_ control: some VminitdMemoryControl) async {
         restoreTimer = nil
-        guard active == 0, isLifted, restoring == nil else { return }
+        guard active == 0, let value = saved, restoring == nil else { return }
+        let limit = syncLimit
+        let sleep = self.sleep
         let step = Task {
             do {
-                try await control.sync()
+                guard try await Self.within(limit, sleep: sleep, { try await control.sync() }) else {
+                    self.log?.warning("the sync before putting vminitd's memory limit back is slow; trying again later")
+                    return
+                }
                 // A copy that started during the sync waits for this step and finds the limit
                 // still lifted.
-                guard self.active == 0 else { return }
-                try await control.setMemoryHigh(String(Self.vminitdMemoryHigh))
-                self.isLifted = false
-                self.log?.info("put vminitd's memory limit back after a copy", metadata: ["memory.high": "\(Self.vminitdMemoryHigh)"])
+                guard self.active == 0, self.saved != nil else { return }
+                try await control.setMemoryHigh(value)
+                self.saved = nil
+                self.log?.info("put vminitd's memory limit back after a copy", metadata: ["memory.high": "\(value)"])
             } catch {
                 self.log?.warning("could not put vminitd's memory limit back after a copy", metadata: ["error": "\(error)"])
             }
@@ -140,12 +176,62 @@ actor CopyMemoryHeadroom {
         restoring = step
         await step.value
         restoring = nil
+        // A sync that ran out of time leaves the limit lifted: try again later.
+        if active == 0, saved != nil {
+            scheduleRestore(control)
+        }
+    }
+
+    /// Whether `operation` finished within `limit`. One that did not is cancelled and left to
+    /// end on its own: a sync the guest is still carrying out need not end when asked to.
+    static func within(
+        _ limit: Duration, sleep: @escaping Sleep, _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws -> Bool {
+        let (events, continuation) = AsyncStream<Result<Bool, any Error>>.makeStream()
+        let work = Task {
+            do {
+                try await operation()
+                continuation.yield(.success(true))
+            } catch {
+                continuation.yield(.failure(error))
+            }
+        }
+        let timer = Task {
+            do {
+                try await sleep(limit)
+                continuation.yield(.success(false))
+            } catch {}
+        }
+        defer {
+            timer.cancel()
+            continuation.finish()
+        }
+        var first: Result<Bool, any Error> = .success(false)
+        for await event in events {
+            first = event
+            break
+        }
+        if case .success(false) = first {
+            work.cancel()
+        }
+        return try first.get()
     }
 }
 
 /// `VminitdMemoryControl` over the container's VM.
 struct VminitdMemory: VminitdMemoryControl {
     let container: LinuxContainer
+
+    /// Read through the agent's own copy out, the one way vminitd 0.47.0 has to read a file in
+    /// the VM: a cgroup file is a regular file, read to its end.
+    func memoryHigh() async throws -> String {
+        let file = FileManager.default.temporaryDirectory.appending(path: "vminitd-memory-high-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try await RunningCopy.withAgent(of: container) { vminitd, vm in
+            try await VminitdCopyAgent(agent: vminitd, vm: vm).copyOut(root: "/", path: CopyMemoryHeadroom.memoryHighPath, to: file)
+        }
+        return try String(contentsOf: file, encoding: .utf8)
+    }
 
     func setMemoryHigh(_ value: String) async throws {
         try await RunningCopy.withAgent(of: container) { vminitd, _ in

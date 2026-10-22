@@ -104,17 +104,35 @@ enum RunningCopy {
 /// The copies running in a container, so that its stop can end them before it unmounts the
 /// root filesystem they write into.
 final class ActiveCopies: Sendable {
-    private let tasks = Mutex<[UUID: Task<Void, any Error>]>([:])
+    private struct State {
+        var tasks: [UUID: Task<Void, any Error>] = [:]
+        /// Set by `cancelAll` until `reopen`: the container is stopping, and a copy that
+        /// arrives now would hold a file open in a root filesystem about to be unmounted.
+        var closed = false
+    }
 
-    var count: Int { tasks.withLock { $0.count } }
+    private let state = Mutex(State())
+
+    /// What a copy ended by a stop reports. vminitd 0.47.0 writes a copy in straight into
+    /// its destination, so an interrupted copy leaves it partly written.
+    static let stoppedMessage = "the container stopped during the copy, which may have left the destination partly written"
+
+    var count: Int { state.withLock { $0.tasks.count } }
 
     /// Run `operation` as a copy that `cancelAll` ends. Cancelling the caller cancels it too.
-    /// A copy that `cancelAll` ended fails with `invalidState`: its container stopped.
+    /// A copy that `cancelAll` ended, or that arrives after it, fails with `invalidState`.
     func run(_ operation: @escaping @Sendable () async throws -> Void) async throws {
         let id = UUID()
-        let task = Task { try await operation() }
-        tasks.withLock { $0[id] = task }
-        defer { tasks.withLock { _ = $0.removeValue(forKey: id) } }
+        let task: Task<Void, any Error>? = state.withLock { state in
+            guard !state.closed else { return nil }
+            let task = Task { try await operation() }
+            state.tasks[id] = task
+            return task
+        }
+        guard let task else {
+            throw ContainerizationError(.invalidState, message: "cannot copy: the container is stopping")
+        }
+        defer { state.withLock { _ = $0.tasks.removeValue(forKey: id) } }
         do {
             try await withTaskCancellationHandler {
                 try await task.value
@@ -122,14 +140,22 @@ final class ActiveCopies: Sendable {
                 task.cancel()
             }
         } catch is CancellationError where !Task.isCancelled {
-            throw ContainerizationError(.invalidState, message: "the container stopped during the copy")
+            throw ContainerizationError(.invalidState, message: Self.stoppedMessage)
         }
     }
 
-    /// Cancel every running copy and wait for each to end.
+    /// Refuse new copies, cancel every running one and wait for each to end.
     func cancelAll() async {
-        let running = tasks.withLock { Array($0.values) }
+        let running = state.withLock { state in
+            state.closed = true
+            return Array(state.tasks.values)
+        }
         for task in running { task.cancel() }
         for task in running { _ = await task.result }
+    }
+
+    /// Take copies again: the container has been made anew.
+    func reopen() {
+        state.withLock { $0.closed = false }
     }
 }
