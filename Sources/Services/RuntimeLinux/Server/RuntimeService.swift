@@ -898,6 +898,7 @@ public actor RuntimeService {
     ///     - sourcePath: The host path to copy from.
     ///     - destinationPath: The container path to copy to.
     ///     - fileMode: The file permissions mode (UInt64).
+    ///     - copyUIDGID: Whether the container's user owns what is copied (Bool).
     ///
     /// - Returns: An XPC message with no parameters.
     @Sendable
@@ -919,12 +920,14 @@ public actor RuntimeService {
             }
             let mode = UInt32(message.uint64(key: RuntimeKeys.fileMode.rawValue))
             let createParents = message.bool(key: RuntimeKeys.createParents.rawValue)
+            let copyUIDGID = message.bool(key: RuntimeKeys.copyUIDGID.rawValue)
 
             let access = try Self.copyHostAccess(bookmark: message.dataNoCopy(key: RuntimeKeys.hostDirectoryBookmark.rawValue), path: source)
             defer { access?.stopAccessingSecurityScopedResource() }
 
             let ctr = try getContainer()
             let container = ctr.container
+            let user = ctr.config.initProcess.user
             let rootfs = PublishedSocketMounts.guestRootfs(containerID: container.id)
             let booted = self.state == .booted
             // Through the agent, not containerization's copyIn: that holds the container's lock
@@ -935,14 +938,15 @@ public actor RuntimeService {
                 try await headroom.withLifted(VminitdMemory(container: container)) {
                     try await RunningCopy.withAgent(of: container) { vminitd, vm in
                         let agent = VminitdCopyAgent(agent: vminitd, vm: vm)
+                        let owner = copyUIDGID ? try await CopyUser.owner(of: user, rootfs: rootfs, agent: agent) : nil
                         if booted {
                             try await PrestartCopy.copyIn(
                                 from: URL(fileURLWithPath: source), to: destination, mode: mode, createParents: createParents, rootfs: rootfs,
-                                agent: agent)
+                                owner: owner, agent: agent)
                         } else {
                             try await RunningCopy.copyIn(
                                 from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: destination), mode: mode,
-                                createParents: createParents, rootfs: rootfs, agent: agent)
+                                createParents: createParents, rootfs: rootfs, owner: owner, agent: agent)
                         }
                     }
                 }

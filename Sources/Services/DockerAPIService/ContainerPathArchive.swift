@@ -179,13 +179,15 @@ package enum ContainerPathArchive {
 
     /// Reads a tar from `input` and copies what it holds into the directory `path` in
     /// `container`, as `docker cp - CTR:DEST` does: `path` must be a directory, or a link to
-    /// one, and an archive's own names are kept. The archive is spooled and unpacked through
-    /// `DockerTarExtractor`'s checks before anything is copied in.
+    /// one, and an archive's own names and owners are kept. The archive is spooled and
+    /// unpacked through `DockerTarExtractor`'s checks before anything is copied in.
     ///
-    /// - Parameter reference: the container as the caller named it, for the errors.
+    /// - Parameters:
+    ///   - reference: the container as the caller named it, for the errors.
+    ///   - copyUIDGID: `docker cp -a`: the container's user owns what is copied.
     package static func extract(
         _ tools: some EngineContainerTools, container: ContainerSnapshot, from input: FileHandle, into path: String, reference: String,
-        requester: String?
+        copyUIDGID: Bool = false, requester: String?
     ) async throws {
         var destination = path
         var probe = try await probe(tools, in: container, path, follow: false)
@@ -221,7 +223,9 @@ package enum ContainerPathArchive {
             throw DockerAPIError.badRequest(rejection.message)
         }
         for entry in entries {
-            try await tools.copyIn(container, source: root.appending(path: entry.name), destination: destination, mode: entry.mode, requester: requester)
+            try await tools.copyIn(
+                container, source: root.appending(path: entry.name), destination: destination, mode: entry.mode, copyUIDGID: copyUIDGID,
+                requester: requester)
         }
     }
 

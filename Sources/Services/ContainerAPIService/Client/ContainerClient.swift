@@ -510,9 +510,13 @@ public struct ContainerClient: Sendable {
 
     /// Copy a file or directory from the host into the container.
     ///
-    /// - Parameter requester: who this copy is for, as `create` takes it.
+    /// - Parameters:
+    ///   - copyUIDGID: what is copied belongs to the container's user, as `docker cp -a` has
+    ///     it; otherwise each file keeps the owner its source names.
+    ///   - requester: who this copy is for, as `create` takes it.
     public func copyIn(
-        id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, requester: String? = nil
+        id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, copyUIDGID: Bool = false,
+        requester: String? = nil
     ) async throws {
         let request = XPCMessage(route: .containerCopyIn)
         Self.setRequester(requester, on: request)
@@ -521,6 +525,7 @@ public struct ContainerClient: Sendable {
         request.set(key: .destinationPath, value: destination)
         request.set(key: .fileMode, value: UInt64(mode))
         request.set(key: .createParents, value: createParents)
+        request.set(key: .copyUIDGID, value: copyUIDGID)
 
         do {
             try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))

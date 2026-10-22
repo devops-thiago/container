@@ -64,6 +64,11 @@ extension Application {
         @Flag(name: [.customShort("L"), .customLong("follow-link")], help: "Always follow symlinks in SRC_PATH")
         var followLink = false
 
+        /// `docker cp -a`: what is copied into a container belongs to the container's user,
+        /// when it has one, instead of keeping its source's owner.
+        @Flag(name: [.customShort("a"), .customLong("archive")], help: "Archive mode (copy all uid/gid information)")
+        var archive = false
+
         @Argument(help: "Source path (container:path, local path, or - for a tar archive on stdin)")
         var source: String
 
@@ -79,7 +84,7 @@ extension Application {
             case (.container(let id, let path), .stream):
                 try await ContainerCopyStream.copyOut(id: id, path: path, followLink: followLink, to: .standardOutput)
             case (.stream, .container(let id, let path)):
-                try await ContainerCopyStream.copyIn(id: id, path: path, from: .standardInput)
+                try await ContainerCopyStream.copyIn(id: id, path: path, from: .standardInput, copyUIDGID: archive)
             case (.stream, _), (_, .stream):
                 // The Docker CLI's words when neither side names a container.
                 throw ContainerizationError(.invalidArgument, message: "must specify at least one container source")
@@ -128,7 +133,11 @@ extension Application {
                     throw ContainerizationError(.invalidArgument, message: "source path is not a directory: \(localPath)")
                 }
 
-                try await client.copyIn(id: id, source: srcPath.string, destination: path, createParents: true)
+                // The file's own mode, as the Docker CLI puts it in the archive it sends: the
+                // copy replaces what is at the destination, mode and all.
+                var info = stat()
+                let mode = stat(srcPath.string, &info) == 0 ? UInt32(info.st_mode) & 0o7777 : 0o644
+                try await client.copyIn(id: id, source: srcPath.string, destination: path, mode: mode, createParents: true, copyUIDGID: archive)
                 let printedDest = path.hasSuffix("/") ? "\(id):\(path)\(lastComponent.string)" : "\(id):\(path)"
                 print(printedDest)
             case (.container, .container):

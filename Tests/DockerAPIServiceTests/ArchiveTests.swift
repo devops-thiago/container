@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Foundation
 import NIOCore
 import Testing
@@ -58,6 +59,19 @@ struct TarBuilder {
         block.replaceSubrange(124..<136, with: field)
         Self.checksum(&block)
         bytes += block
+    }
+
+    /// A file whose header names `uid` and `gid` as its owner.
+    mutating func file(_ name: String, _ content: String, uid: UInt32, gid: UInt32) {
+        let data = Array(content.utf8)
+        var block = DockerTar.ustar(name: name, prefix: "", type: .file, mode: 0o644, size: UInt64(data.count), mtime: Fixtures.now, link: "")
+        for (offset, id) in [(108, uid), (116, gid)] {
+            let digits = String(id, radix: 8)
+            let field = Array((String(repeating: "0", count: max(7 - digits.count, 0)) + digits).utf8) + [0]
+            block.replaceSubrange(offset..<offset + 8, with: field)
+        }
+        Self.checksum(&block)
+        bytes += block + data + DockerTar.padding(data.count)
     }
 
     /// A pax extended header holding `records` as they are.
@@ -245,6 +259,27 @@ struct TarGuardTests {
         bad.file(evil, "x")
         let other = try Scratch()
         #expect(throws: DockerTarRejection.self) { try other.extract(bad.archive) }
+    }
+
+    @Test("each entry keeps the owner its header names, from ustar's fields or a pax record; an implied directory is root's")
+    func owners() throws {
+        let scratch = try Scratch()
+        var tar = TarBuilder()
+        tar.file("a/owned.txt", "owned\n", uid: 1234, gid: 4321)
+        tar.pax(DockerTar.paxRecords([("uid", "70000"), ("gid", "70001")]))
+        tar.directory("b")
+        tar.file("plain.txt", "plain\n")
+        _ = try scratch.extract(tar.archive)
+        let root = scratch.root.path
+        #expect(CopyOwner.recorded(at: root + "/a") == CopyOwner(uid: 0, gid: 0))
+        #expect(CopyOwner.recorded(at: root + "/a/owned.txt") == CopyOwner(uid: 1234, gid: 4321))
+        #expect(CopyOwner.recorded(at: root + "/b") == CopyOwner(uid: 70000, gid: 70001))
+        #expect(CopyOwner.recorded(at: root + "/plain.txt") == CopyOwner(uid: 0, gid: 0))
+
+        var huge = TarBuilder()
+        huge.pax(DockerTar.paxRecords([("uid", "4294967296")]))
+        huge.file("x", "x\n")
+        #expect(throws: DockerTarRejection.self) { try Scratch().extract(huge.archive) }
     }
 
     @Test("ustar's prefix field joins the name")
@@ -450,6 +485,36 @@ struct ArchiveRouteTests {
         return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
+    @Test("PUT keeps on each staged entry the owner its header names, and passes copyUIDGID on", arguments: [false, true])
+    func uploadOwners(copyUIDGID: Bool) async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try FileManager.default.createDirectory(at: h.tools.root.appending(path: "tmp"), withIntermediateDirectories: true)
+        var tar = TarBuilder()
+        tar.file("owned.txt", "owned\n", uid: 1234, gid: 4321)
+        tar.pax(DockerTar.paxRecords([("uid", "70000"), ("gid", "70001")]))
+        tar.file("big-ids.txt", "pax\n")
+        let put = try await h.request(
+            "PUT", "/containers/box/archive?path=/tmp&copyUIDGID=\(copyUIDGID)", body: tar.archive, contentType: "application/x-tar")
+        #expect(put.status == 200)
+        let flag = copyUIDGID ? " copyUIDGID" : ""
+        #expect(h.tools.copyCalls == ["in owned.txt /tmp 644\(flag)", "in big-ids.txt /tmp 644\(flag)"])
+        #expect(h.tools.copyOwnerCalls == [CopyOwner(uid: 1234, gid: 4321), CopyOwner(uid: 70000, gid: 70001)])
+    }
+
+    @Test("an upload held for a start keeps copyUIDGID for it")
+    func heldUploadKeepsCopyUIDGID() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        var tar = TarBuilder()
+        tar.file("hello.txt", "hello\n")
+        #expect(try await h.request("PUT", "/containers/off/archive?path=/data&copyUIDGID=true", body: tar.archive).status == 200)
+        #expect(try await h.request("POST", "/containers/off/start").status == 204)
+        #expect(h.tools.copyCalls == ["in hello.txt /data 644 copyUIDGID"])
+        #expect(h.tools.copyOwnerCalls == [CopyOwner(uid: 0, gid: 0)])
+    }
+
     @Test("PUT then GET round-trips a file and a directory, with the stat header and the file's mode")
     func roundTrip() async throws {
         let h = try await ToolHarness.start()
@@ -573,6 +638,8 @@ struct ArchiveRouteTests {
 
         #expect(try await h.request("POST", "/containers/off/start").status == 204)
         #expect(h.tools.copyCalls == ["in smoke / 755"])
+        // The directory the archive only implies is root's, as dockerd makes it.
+        #expect(h.tools.copyOwnerCalls == [CopyOwner(uid: 0, gid: 0)])
         // Bootstrapped, not yet started: the process sees the files from its first instruction.
         #expect(h.tools.copyInStatusCalls == [.stopped])
         #expect(try String(contentsOf: h.tools.root.appending(path: "smoke/hello.txt"), encoding: .utf8) == "hello from the host\n")

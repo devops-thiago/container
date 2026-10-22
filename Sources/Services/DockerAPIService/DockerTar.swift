@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Darwin
 import Foundation
 import NIOCore
@@ -256,6 +257,11 @@ struct DockerExtractedEntry: Equatable, Sendable {
 /// archive ends before. The rules are those of Go's archive/tar, which the Docker CLI writes
 /// these archives with and dockerd reads them with; as there, a directory's or a link's size
 /// field is not a body (`carriesData`).
+///
+/// What it unpacks belongs to this service, so the owner each entry's header names is kept
+/// on it as `CopyOwner` records it, for the copy into the container to give it, as dockerd
+/// gives every entry it unpacks its header's owner. A directory the archive does not name
+/// but has entries in is root's, as dockerd makes one.
 struct DockerTarExtractor {
     var maxBytes: Int
     var maxEntries: Int
@@ -272,6 +278,8 @@ struct DockerTarExtractor {
         var paxPath: String?
         var paxLink: String?
         var paxSize: UInt64?
+        var paxUID: UInt32?
+        var paxGID: UInt32?
         var entries = 0
 
         while true {
@@ -303,6 +311,8 @@ struct DockerTarExtractor {
                         }
                         paxSize = value
                     }
+                    if let text = records["uid"] { paxUID = try Self.id(text) }
+                    if let text = records["gid"] { paxGID = try Self.id(text) }
                 case .gnuLongName:
                     paxPath = Self.string(data[...])
                 case .gnuLongLink:
@@ -318,9 +328,13 @@ struct DockerTarExtractor {
             if let paxSize { size = paxSize }
             var name = paxPath ?? Self.ustarName(block)
             let link = paxLink ?? Self.string(block[157..<257])
+            let owner = CopyOwner(
+                uid: try paxUID ?? Self.id(try Self.number(block[108..<116])), gid: try paxGID ?? Self.id(try Self.number(block[116..<124])))
             paxPath = nil
             paxLink = nil
             paxSize = nil
+            paxUID = nil
+            paxGID = nil
             let mode = UInt32(truncatingIfNeeded: try Self.number(block[100..<108])) & 0o7777
 
             guard let type else { throw DockerTarRejection(message: "unsupported entry type '\(Character(UnicodeScalar(typeByte)))' for \(name)") }
@@ -340,12 +354,14 @@ struct DockerTarExtractor {
             case .directory:
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.makeDirectory(path, relative: relative, mode: mode)
+                try CopyOwner.record(owner, at: path)
             case .file, .contiguous:
                 guard size <= UInt64(maxBytes - state.bytes) else {
                     throw DockerTarRejection(message: "the archive holds more than \(maxBytes) bytes")
                 }
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.writeFile(path, relative: relative, mode: mode, size: size, from: &reader)
+                try CopyOwner.record(owner, at: path)
             case .symlink:
                 guard Self.linkStaysInside(link, from: components) else {
                     throw DockerTarRejection(message: "the symlink \(relative) points outside the archive: \(link)")
@@ -360,6 +376,7 @@ struct DockerTarExtractor {
                 }
                 try state.makeParents(components.dropLast(), under: rootPath)
                 try state.makeHardLink(path, relative: relative, target: rootPath + "/" + target)
+                try CopyOwner.record(owner, at: path)
             default:
                 throw DockerTarRejection(message: "unsupported entry type for \(relative): only files, directories and links can be copied")
             }
@@ -496,6 +513,18 @@ struct DockerTarExtractor {
 
     private static let invalidPAX = DockerTarRejection(message: "invalid extended header")
 
+    /// An owner id from a header: one a file in a container can have.
+    static func id(_ value: UInt64) throws -> UInt32 {
+        guard let id = UInt32(exactly: value) else { throw DockerTarRejection(message: "invalid owner id \(value) in the archive") }
+        return id
+    }
+
+    /// An owner id from a pax record, a decimal number.
+    static func id(_ text: String) throws -> UInt32 {
+        guard let value = UInt64(text) else { throw DockerTarRejection(message: "invalid owner id \(text) in an extended header") }
+        return try id(value)
+    }
+
     /// What has been unpacked so far.
     struct State {
         var bytes = 0
@@ -521,6 +550,7 @@ struct DockerTarExtractor {
                 relative = relative.isEmpty ? part : relative + "/" + part
                 guard !directories.contains(relative) else { continue }
                 try makeDirectory(root + "/" + relative, relative: relative, mode: 0o755)
+                try CopyOwner.record(CopyOwner(uid: 0, gid: 0), at: root + "/" + relative)
             }
         }
 

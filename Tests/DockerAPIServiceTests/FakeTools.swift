@@ -58,6 +58,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     private(set) var copies: [String] = []
     /// Who each copy was for, as `"out <requester>"` or `"in <requester>"`, with `-` for none.
     private(set) var copyRequesters: [String] = []
+    /// The owner recorded on each copy in's source when it was staged, nil for none.
+    private(set) var copyOwners: [CopyOwner?] = []
     private var statsCalls = 0
     private var getCalls = 0
     var createError: (any Error)?
@@ -115,6 +117,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     var getCount: Int { lock.withLock { getCalls } }
     var copyCalls: [String] { lock.withLock { copies } }
     var copyRequesterCalls: [String] { lock.withLock { copyRequesters } }
+    var copyOwnerCalls: [CopyOwner?] { lock.withLock { copyOwners } }
 
     // MARK: EngineContainers
 
@@ -130,9 +133,9 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         let process = try await base.bootstrap(container, stdio: stdio, requester: requester)
         do {
             try queue.claim(container.id)
-            try await queue.apply(container.id) { [self] source, destination, mode, requester in
+            try await queue.apply(container.id) { [self] source, destination, mode, copyUIDGID, requester in
                 do {
-                    try await copyIn(container, source: source, destination: destination, mode: mode, requester: requester)
+                    try await copyIn(container, source: source, destination: destination, mode: mode, copyUIDGID: copyUIDGID, requester: requester)
                 } catch {
                     // In the engine's words, as its runtime client reports them.
                     throw ContainerizationError(.internalError, message: DockerContainerProcesses.message(error))
@@ -289,10 +292,11 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         return supported
     }
 
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, requester: String?) async throws {
         let status = base.snapshot(container.id)?.status
         let (failure, gate): ((any Error)?, DockerLatch?) = lock.withLock {
-            copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))")
+            copies.append("in \(source.lastPathComponent) \(destination) \(String(mode, radix: 8))\(copyUIDGID ? " copyUIDGID" : "")")
+            copyOwners.append(CopyOwner.recorded(at: source.path(percentEncoded: false)))
             copyRequesters.append("in \(requester ?? "-")")
             copyInStatuses.append(status)
             defer {

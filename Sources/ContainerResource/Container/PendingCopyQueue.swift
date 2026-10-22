@@ -58,12 +58,16 @@ public struct PendingCopyQueue: Sendable {
         public var entries: [Entry]
         /// Who sent it, for a folder panel to name.
         public let requester: String?
+        /// Whether what it holds goes in owned by the container's user (`copyUIDGID`). A
+        /// record from before it could say so has none: each file keeps its archive's owner.
+        public let copyUIDGID: Bool?
 
-        public init(destination: String, entries: [Entry], requester: String?) {
+        public init(destination: String, entries: [Entry], requester: String?, copyUIDGID: Bool = false) {
             self.version = 1
             self.destination = destination
             self.entries = entries
             self.requester = requester
+            self.copyUIDGID = copyUIDGID
         }
     }
 
@@ -194,7 +198,7 @@ public struct PendingCopyQueue: Sendable {
     /// it go back to the queue for the next start, and the failure names it.
     public func apply(
         _ container: String,
-        copyIn: @Sendable (_ source: URL, _ destination: String, _ mode: UInt32, _ requester: String?) async throws -> Void
+        copyIn: @Sendable (_ source: URL, _ destination: String, _ mode: UInt32, _ copyUIDGID: Bool, _ requester: String?) async throws -> Void
     ) async throws {
         for (_, upload) in Self.uploads(in: applying(container)) {
             var record: Record
@@ -209,7 +213,7 @@ public struct PendingCopyQueue: Sendable {
             while let entry = record.entries.first {
                 let source = Self.root(of: upload).appending(path: entry.name)
                 do {
-                    try await copyIn(source, record.destination, entry.mode, record.requester)
+                    try await copyIn(source, record.destination, entry.mode, record.copyUIDGID ?? false, record.requester)
                 } catch {
                     release(container)
                     throw Failure(upload: upload, message: "could not copy \(entry.name) into \(record.destination) before the start: \(Self.reason(error))")
