@@ -1497,6 +1497,30 @@ public actor RuntimeService {
         return result
     }
 
+    /// `mounts` with `/sys` and the cgroup filesystem at `/sys/fs/cgroup` read-only, as Docker
+    /// mounts them for a container that is not privileged (moby `daemon/pkg/oci/defaults.go`).
+    /// Root in the container can then read its limits but not raise them. The guest agent
+    /// keeps its own read-write mount of both outside the container's root, so the limits it
+    /// sets and the memory events it reads are unaffected. `writable` leaves them as they are.
+    static func systemMounts(_ mounts: [Containerization.Mount], writable: Bool) -> [Containerization.Mount] {
+        guard !writable else {
+            return mounts
+        }
+        return mounts.map { mount in
+            let destination = FilePath(mount.destination).lexicallyNormalized().string
+            let isSystem =
+                (mount.type == "sysfs" && destination == "/sys")
+                || (mount.type == "cgroup2" && destination == "/sys/fs/cgroup")
+            guard isSystem else {
+                return mount
+            }
+            var mount = mount
+            mount.options.removeAll { $0 == "rw" || $0 == "ro" }
+            mount.options.append("ro")
+            return mount
+        }
+    }
+
     /// Configure `czConfig` from `config`.
     ///
     /// - Returns: the tmpfs mounts the runtime mounts in the VM itself once the container is
@@ -1513,6 +1537,7 @@ public actor RuntimeService {
         // If the host doesn't support this, we'll throw on container creation.
         czConfig.virtualization = config.virtualization
         czConfig.useInit = config.useInit
+        czConfig.mounts = Self.systemMounts(czConfig.mounts, writable: config.writableSysfs)
 
         // nil leaves LinuxContainer's own default set in place.
         if let maskedPaths = config.maskedPaths {

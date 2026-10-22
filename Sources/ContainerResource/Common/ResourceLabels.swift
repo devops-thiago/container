@@ -111,6 +111,15 @@ public struct ResourceLabelKeys {
 }
 
 /// System-defined values for resource the resource role label.
+/// Values of ``ResourceLabelKeys/plugin`` that the engine itself sets.
+public struct ResourcePluginValues {
+    /// A Kubernetes node.
+    public static let kubernetes = "k8s"
+
+    /// A machine.
+    public static let machine = "machine"
+}
+
 public struct ResourceRoleValues {
     /// Indicates a container that can build images.
     public static let builder = "builder"
