@@ -621,18 +621,23 @@ Copies files between a container and the local filesystem. The container must be
 **Usage**
 
 ```bash
-container copy [--debug] <source> <destination>
+container copy [--debug] [--follow-link] <source> <destination>
 ```
 
 **Arguments**
 
-*   `<source>`: Source path (local path or `container_id:path`)
-*   `<destination>`: Destination path (local path or `container_id:path`)
+*   `<source>`: Source path (local path, `container_id:path`, or `-` for a tar archive on stdin)
+*   `<destination>`: Destination path (local path, `container_id:path`, or `-` for a tar archive on stdout)
+
+**Options**
+
+*   `-L, --follow-link`: Always follow symlinks in the source path. It decides what a `-` stream archives; a copy to or from a host path already copies what a symlink points to.
 
 **Path Format**
 
 *   Local path: `/path/to/file` or `relative/path`
 *   Container path: `container_id:/path/in/container`
+*   `-`: a tar archive, as `docker cp` streams one. `container_id:path -` writes a tar of the path to stdout, its entries named for the path's last component (`.` for a path ending in `/.`); a symlink is archived as the link unless `-L` is given. `- container_id:path` extracts a tar from stdin into the directory `path`, which must exist. A file named `-` is `./-`.
 
 **Examples**
 
@@ -645,6 +650,12 @@ container cp mycontainer:/var/log/app.log ./logs/
 
 # copy using the full command name
 container copy ./data.txt mycontainer:/tmp/
+
+# stream a container file to stdout as a tar archive
+container cp mycontainer:/var/log/app.log - | tar -xO
+
+# extract a tar archive from stdin into a container directory
+tar -c -C ./site . | container cp - mycontainer:/usr/share/nginx/html
 ```
 
 ### `container prune`
