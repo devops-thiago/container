@@ -129,9 +129,12 @@ extension Array {
 /// as the Docker CLI puts it in the archive it sends.
 enum CopyArchive {
     /// Writes `source` to `fd` as a gzipped pax archive: a directory as `./` and everything in
-    /// it, a file as the one entry `name` with `mode` (0644 when 0).
+    /// it, a file as the one entry `name` with `mode` (0644 when 0). The agent takes nothing
+    /// but gzip, so a file's archive is stored rather than compressed: it costs a copy no more
+    /// than sending its bytes as they are did.
     static func write(_ source: URL, isDirectory: Bool, name: String, mode: UInt32, owner: CopyOwner?, to fd: Int32) throws {
-        let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
+        let writer = try ArchiveWriter(
+            configuration: .init(format: .pax, filter: .gzip, options: isDirectory ? [] : [.compressionLevel(0)]))
         try writer.open(fileDescriptor: fd)
         let path = FilePath(source.path(percentEncoded: false))
         if isDirectory {
