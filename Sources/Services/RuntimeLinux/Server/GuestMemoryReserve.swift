@@ -25,31 +25,34 @@
 /// own limit trips: vminitd and the NIC starve, execs hang, and the cgroup's OOM killer never
 /// gets to act.
 ///
-/// Measured on a 1152 MiB VM (1 GiB limit plus the 128 MiB this replaced), kernel 6.18:
-/// - `MemTotal` was 1101 MiB: 51 MiB never reaches the guest's allocator, 18 MiB of it the
-///   page structs (64 bytes per 4 KiB page, 1/64 of the VM).
-/// - With the container held at its limit, 166 MiB was in use outside its cgroup (vminitd's
-///   cgroup at its 80 MiB `memory.high`, 17 MiB of unreclaimable slab, the rest page cache
-///   of vminitd and the root cgroup).
-/// - `min_free_kbytes` was 4238 (high watermark 6.3 MiB).
+/// Measured with kernel 6.18.35:
+/// - With a 1 GiB container held at its limit, 166 MiB was in use outside its cgroup
+///   (vminitd's cgroup at its 80 MiB `memory.high`, 17 MiB of unreclaimable slab, the rest
+///   page cache of vminitd and the root cgroup). `min_free_kbytes` was 4238 to 11654 from a
+///   1 GiB to an 8 GiB VM.
+/// - The kernel keeps part of the VM from `MemTotal`, and more as the VM grows: 51 MiB of a
+///   1152 MiB VM, 53 of 1280, 139 of 2320, 181 of 4400 and 265 of 8560, about 95 MiB plus 2%
+///   from 2 GiB up.
+/// - The 128 MiB this replaced left 77 MiB outside a 1 GiB container where the guest uses
+///   166, so the container never reached its limit without starving the rest of the guest.
 ///
-/// So the old 128 MiB left the guest 77 MiB outside the container where it needs about 166,
-/// and the container could never reach its limit without starving the rest of the guest.
-/// With 256 MiB (a 896 MiB limit on the same VM) the guest kept 39 MiB free at the cap,
-/// execs answered within 2 s through the container's thrashing, no atomic allocation failed,
-/// and the cgroup OOM killer ended the workload.
+/// The reserve is 288 MiB plus 1/32 of the limit, which leaves at least 200 MiB outside the
+/// container's cgroup at every size measured: the 166 MiB in use and about 40 MiB free above
+/// the watermarks for atomic allocations. With it, a 1 GiB container at its limit kept the
+/// rest of the guest working (execs answered within 10 s through the container's own
+/// thrashing, the NIC never failed an allocation) and the cgroup's OOM killer ended it.
 public enum GuestMemoryReserve {
-    /// The fixed part: the measured 166 MiB used outside the container's cgroup at its cap,
-    /// the kernel's own 33 MiB beyond the page structs, and about 40 MiB kept free for
-    /// atomic allocations above the watermarks.
-    public static let fixedBytes: UInt64 = 240 * mib
+    /// The fixed part: the 166 MiB in use outside the container's cgroup at its limit, about
+    /// 40 MiB kept free, and the kernel's fixed share of what it keeps from `MemTotal`.
+    public static let fixedBytes: UInt64 = 288 * mib
 
-    /// The page structs: one 64-byte `struct page` per 4 KiB page of the VM.
-    public static let pageStructDivisor: UInt64 = 64
+    /// The part that grows with the VM: the kernel keeps about 2% of it, page structs
+    /// included; 1/32 covers that with room to spare.
+    public static let scaledDivisor: UInt64 = 32
 
     /// The reserve for a container limited to `limitBytes`, rounded up to whole MiB.
     public static func bytes(forLimit limitBytes: UInt64) -> UInt64 {
-        let scaled = limitBytes / pageStructDivisor
+        let scaled = limitBytes / scaledDivisor
         let (total, overflow) = fixedBytes.addingReportingOverflow(scaled)
         guard !overflow else { return UInt64.max }
         return roundUpToMiB(total)
