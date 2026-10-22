@@ -16,6 +16,7 @@
 
 import ContainerTestSupport
 import Foundation
+import Synchronization
 import Testing
 
 @Suite
@@ -541,6 +542,105 @@ struct TestCLICopyCommand {
                 try f.run(["copy", "\(name):/tmp/relfile.txt", "./"], currentDirectory: f.testDir).check()
                 let result = try String(contentsOfFile: f.testDir.appending("relfile.txt").string, encoding: .utf8)
                 #expect(result == content)
+            }
+        }
+    }
+
+    // MARK: - A large copy holds nothing else up (#639)
+
+    /// Whether a command run in the background is still running.
+    private final class Running: Sendable {
+        private let value = Mutex(true)
+        var now: Bool { value.withLock { $0 } }
+        func ended() { value.withLock { $0 = false } }
+    }
+
+    /// Runs the CLI with `arguments` on a thread of its own, so the test can act while it runs.
+    private static func runInBackground(
+        _ f: ContainerFixture, _ arguments: [String], running: Running
+    ) async throws -> CommandResult {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CommandResult, any Error>) in
+            Thread {
+                let result = Result { try f.run(arguments) }
+                running.ended()
+                continuation.resume(with: result)
+            }.start()
+        }
+    }
+
+    /// Seconds `body` takes.
+    private static func timed(_ body: () throws -> Void) rethrows -> Double {
+        let start = ContinuousClock.now
+        try body()
+        let elapsed = ContinuousClock.now - start
+        return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    }
+
+    /// 2 GiB: long enough to still be copying when the exec and the signal are sent.
+    private static let largeCopyBytes: UInt64 = 2 << 30
+
+    /// While a copy runs, an exec and a signal to the container are answered at once, and the
+    /// copy is still running when they are.
+    private static func expectAnsweredDuring(_ f: ContainerFixture, _ name: String, copy: [String]) async throws {
+        let running = Running()
+        async let copied = Self.runInBackground(f, copy, running: running)
+        try await Task.sleep(for: .seconds(2))
+        #expect(running.now, "the copy ended before the container was asked anything")
+        let exec = try timed { try f.run(["exec", name, "true"]).check() }
+        let kill = try timed { try f.run(["kill", "-s", "SIGUSR1", name]).check() }
+        let stillCopying = running.now
+        try await copied.check()
+        #expect(exec < 5, "exec took \(exec)s during the copy")
+        #expect(kill < 5, "kill took \(kill)s during the copy")
+        #expect(stillCopying, "the exec and the signal were answered only after the copy ended")
+    }
+
+    @Test func testExecAndKillAnswerDuringLargeCopyIn() async throws {
+        try await ContainerFixture.with { f in
+            let image = WarmupImage.alpine320.rawValue
+            try await f.withContainer(image: image) { name in
+                let src = f.testDir.appending("large.bin")
+                FileManager.default.createFile(atPath: src.string, contents: nil)
+                let handle = try FileHandle(forWritingTo: URL(filePath: src.string))
+                try handle.truncate(atOffset: Self.largeCopyBytes)
+                try handle.close()
+                try await Self.expectAnsweredDuring(f, name, copy: ["copy", src.string, "\(name):/root/large.bin"])
+                let size = try f.doExec(name, cmd: ["stat", "-c", "%s", "/root/large.bin"])
+                #expect(size.trimmingCharacters(in: .whitespacesAndNewlines) == "\(Self.largeCopyBytes)")
+            }
+        }
+    }
+
+    @Test func testExecAndKillAnswerDuringLargeCopyOut() async throws {
+        try await ContainerFixture.with { f in
+            let image = WarmupImage.alpine320.rawValue
+            try await f.withContainer(image: image) { name in
+                try f.doExec(name, cmd: ["sh", "-c", "head -c \(Self.largeCopyBytes) /dev/zero > /root/large.bin"])
+                let dest = f.testDir.appending("large.out")
+                try await Self.expectAnsweredDuring(f, name, copy: ["copy", "\(name):/root/large.bin", dest.string])
+                let size = try FileManager.default.attributesOfItem(atPath: dest.string)[.size] as? UInt64
+                #expect(size == Self.largeCopyBytes)
+            }
+        }
+    }
+
+    @Test func testStopDuringLargeCopyInFailsTheCopy() async throws {
+        try await ContainerFixture.with { f in
+            let image = WarmupImage.alpine320.rawValue
+            try await f.withContainer(image: image) { name in
+                let src = f.testDir.appending("large.bin")
+                FileManager.default.createFile(atPath: src.string, contents: nil)
+                let handle = try FileHandle(forWritingTo: URL(filePath: src.string))
+                try handle.truncate(atOffset: Self.largeCopyBytes)
+                try handle.close()
+                let running = Running()
+                async let copied = Self.runInBackground(f, ["copy", src.string, "\(name):/root/large.bin"], running: running)
+                try await Task.sleep(for: .seconds(2))
+                #expect(running.now, "the copy ended before the stop")
+                let stop = try Self.timed { try f.doStop(name) }
+                let result = try await copied
+                #expect(result.status != 0, "a copy whose container stopped under it must fail")
+                #expect(stop < 30, "stop took \(stop)s during the copy")
             }
         }
     }
