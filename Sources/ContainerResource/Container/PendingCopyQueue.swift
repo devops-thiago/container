@@ -204,6 +204,8 @@ public struct PendingCopyQueue: Sendable {
                 release(container)
                 throw Failure(upload: upload, message: "could not read the copy held in \(upload.path(percentEncoded: false)): \(error)")
             }
+            // Whether the record on disk names nothing that is in.
+            var recorded = true
             while let entry = record.entries.first {
                 let source = Self.root(of: upload).appending(path: entry.name)
                 do {
@@ -213,14 +215,24 @@ public struct PendingCopyQueue: Sendable {
                     throw Failure(upload: upload, message: "could not copy \(entry.name) into \(record.destination) before the start: \(Self.reason(error))")
                 }
                 record.entries.removeFirst()
-                if record.entries.isEmpty { break }
-                // What is in is not copied again; a record that cannot be rewritten leaves it
-                // to be copied again, which overwrites it.
-                try? Self.write(record, into: upload)
-                try? FileManager.default.removeItem(at: source)
+                // What is in is not copied again. Its source goes only once the record no
+                // longer names it: a record that cannot be rewritten leaves the entry, and its
+                // source, to be copied again, which overwrites it.
+                recorded = (try? Self.write(record, into: upload)) != nil
+                if recorded { try? FileManager.default.removeItem(at: source) }
             }
-            try? FileManager.default.removeItem(at: upload)
+            if recorded { retire(upload) }
         }
+    }
+
+    /// Takes a copied-in upload out of its queue whole, then removes it. One that cannot be
+    /// taken out stays, with a record naming nothing, and the next start removes it; what is
+    /// left of one taken out is under `staging/`, which is swept.
+    func retire(_ upload: URL) {
+        guard (try? Self.makeDirectory(staging)) != nil else { return }
+        let retired = staging.appending(path: "\(UUID().uuidString).tmp", directoryHint: .isDirectory)
+        guard rename(upload.path(percentEncoded: false), retired.path(percentEncoded: false)) == 0 else { return }
+        try? FileManager.default.removeItem(at: retired)
     }
 
     /// Lets `container`'s queue go: what the start took and did not copy in goes back to the
