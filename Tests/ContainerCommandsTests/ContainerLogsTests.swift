@@ -45,7 +45,7 @@ struct ContainerLogsTests {
             try #require(dup2(output.fileDescriptor, STDOUT_FILENO) == STDOUT_FILENO)
 
             let follower = Task {
-                try await Application.ContainerLogs.tail(fh: reader, n: nil, follow: true)
+                try await Application.ContainerLogs.tail(fh: reader, n: nil, runEnded: { false })
             }
             defer { follower.cancel() }
 
