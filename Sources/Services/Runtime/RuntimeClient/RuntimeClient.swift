@@ -302,12 +302,18 @@ extension RuntimeClient {
         }
     }
 
-    public func copyIn(source: String, destination: String, mode: UInt32, createParents: Bool = true, hostDirectoryBookmark: Data? = nil) async throws {
+    /// Copy `source` on the host into the container. `copyUIDGID` gives what is copied the
+    /// container's user as its owner, as `docker cp -a` does; otherwise each file keeps the
+    /// owner its source names.
+    public func copyIn(
+        source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false, hostDirectoryBookmark: Data? = nil
+    ) async throws {
         let request = XPCMessage(route: RuntimeRoutes.copyIn.rawValue)
         request.set(key: RuntimeKeys.sourcePath.rawValue, value: source)
         request.set(key: RuntimeKeys.destinationPath.rawValue, value: destination)
         request.set(key: RuntimeKeys.fileMode.rawValue, value: UInt64(mode))
         request.set(key: RuntimeKeys.createParents.rawValue, value: createParents)
+        request.set(key: RuntimeKeys.copyUIDGID.rawValue, value: copyUIDGID)
         if let hostDirectoryBookmark {
             request.set(key: RuntimeKeys.hostDirectoryBookmark.rawValue, value: hostDirectoryBookmark)
         }

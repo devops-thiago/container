@@ -459,7 +459,7 @@ public struct ContainersHarness: Sendable {
 
         try await service.copyIn(
             id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents,
-            requester: Self.requester(of: message, peerPID: peerPID))
+            copyUIDGID: message.bool(key: .copyUIDGID), requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 

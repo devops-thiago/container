@@ -226,9 +226,13 @@ extension ContainerToolRoutes.Routes {
     /// checked to be a directory and `noOverwriteDirNonDir` is not applied; the copy makes a
     /// missing `path`. An upload that finds a start has taken the queue before it is copied in
     /// here, into the container that start is starting, the same way.
+    ///
+    /// Each file goes in owned as the archive says, as dockerd unpacks it; `copyUIDGID`
+    /// (`docker cp -a`) gives everything the container's user instead, when it has one.
     func extract(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let path = try Self.archivePath(request)
         let noOverwriteDirNonDir = try request.bool("noOverwriteDirNonDir")
+        let copyUIDGID = try request.bool("copyUIDGID")
         let container = try await find(reference)
         let heldForStart = !ContainerViewMapper.isRunning(container.snapshot)
         if heldForStart {
@@ -272,7 +276,7 @@ extension ContainerToolRoutes.Routes {
         if heldForStart {
             let record = PendingCopyQueue.Record(
                 destination: path, entries: entries.map { PendingCopyQueue.Entry(name: $0.name, isDirectory: $0.isDirectory, mode: $0.mode) },
-                requester: request.peer?.requester)
+                requester: request.peer?.requester, copyUIDGID: copyUIDGID)
             // Once held, the staged directory is no longer where it was, and this removes nothing.
             switch try await streams.copies.hold(scratch, record: record, engineID: container.engineID) {
             case .held, .takenByStart:
@@ -281,7 +285,8 @@ extension ContainerToolRoutes.Routes {
                 // Started meanwhile, past the point of copying in what is held: into it now.
                 defer { try? FileManager.default.removeItem(at: upload) }
                 try await copyIn(
-                    entries, from: PendingCopyQueue.root(of: upload), into: path, of: container, reference: reference, requester: request.peer?.requester)
+                    entries, from: PendingCopyQueue.root(of: upload), into: path, of: container, reference: reference, copyUIDGID: copyUIDGID,
+                    requester: request.peer?.requester)
                 return .empty(.ok)
             }
         }
@@ -297,17 +302,21 @@ extension ContainerToolRoutes.Routes {
                 }
             }
         }
-        try await copyIn(entries, from: root, into: path, of: container, reference: reference, requester: request.peer?.requester)
+        try await copyIn(
+            entries, from: root, into: path, of: container, reference: reference, copyUIDGID: copyUIDGID, requester: request.peer?.requester)
         return .empty(.ok)
     }
 
     /// Copies each of `entries`, unpacked in `root`, into the directory `path` in `container`.
     func copyIn(
-        _ entries: [DockerExtractedEntry], from root: URL, into path: String, of container: DockerContainer, reference: String, requester: String?
+        _ entries: [DockerExtractedEntry], from root: URL, into path: String, of container: DockerContainer, reference: String, copyUIDGID: Bool,
+        requester: String?
     ) async throws {
         for entry in entries {
             do {
-                try await engine.copyIn(container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode, requester: requester)
+                try await engine.copyIn(
+                    container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode, copyUIDGID: copyUIDGID,
+                    requester: requester)
             } catch {
                 throw DockerAPIError.internalError("could not copy \(entry.name) into \(path) in container \(reference): \(DockerContainerProcesses.message(error))")
             }

@@ -48,6 +48,8 @@ public enum RuntimeKeys: String {
     case destinationPath
     case fileMode
     case createParents
+    /// Whether a copy in is owned by the container's user, as `docker cp -a` has it.
+    case copyUIDGID
     /// The app-issued host folder grant, consumed by the runtime for this copy.
     case hostDirectoryBookmark
     /// Image path for snapshot operations

@@ -175,7 +175,7 @@ struct PendingCopyStartTests {
         defer { Self.setMode(0o700, taken) }
         let log = CopyLog()
         let error = await #expect(throws: (any Error).self) {
-            try await queue.apply("c") { source, _, _, _ in
+            try await queue.apply("c") { source, _, _, _, _ in
                 log.append(source.lastPathComponent)
                 if source.lastPathComponent == "two.txt" {
                     Self.setMode(0o700, taken)
@@ -191,7 +191,7 @@ struct PendingCopyStartTests {
 
         try queue.claim("c")
         let again = CopyLog()
-        try await queue.apply("c") { source, _, _, _ in again.append(source.lastPathComponent) }
+        try await queue.apply("c") { source, _, _, _, _ in again.append(source.lastPathComponent) }
         #expect(again.calls == ["one.txt", "two.txt", "three.txt"])
         queue.release("c")
         #expect(!queue.holds("c"))
@@ -209,7 +209,7 @@ struct PendingCopyStartTests {
         Self.setMode(0o500, taken)
         defer { Self.setMode(0o700, taken) }
         let log = CopyLog()
-        try await queue.apply("c") { source, _, _, _ in log.append(source.lastPathComponent) }
+        try await queue.apply("c") { source, _, _, _, _ in log.append(source.lastPathComponent) }
         #expect(log.calls == ["one.txt", "two.txt"])
         Self.setMode(0o700, taken)
         queue.release("c")
@@ -221,7 +221,7 @@ struct PendingCopyStartTests {
 
         try queue.claim("c")
         let again = CopyLog()
-        try await queue.apply("c") { source, _, _, _ in again.append(source.lastPathComponent) }
+        try await queue.apply("c") { source, _, _, _, _ in again.append(source.lastPathComponent) }
         #expect(again.calls == ["one.txt", "two.txt"])
         queue.release("c")
         #expect(!queue.holds("c"))

@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Containerization
 import ContainerizationArchive
 import ContainerizationError
@@ -28,9 +29,11 @@ protocol GuestCopyAgent: Sendable {
     func identity(root: String, path: String) async throws -> GuestFileIdentity?
     /// Copy `source` on the host to `path` under `root`. The agent resolves `path` confined to
     /// `root` (openat2 with `RESOLVE_IN_ROOT`): a symlink or `..` in the image is followed as
-    /// if `root` were `/`, so the write can never land outside it. A directory goes as an
-    /// archive the agent unpacks at `path`; a file is written at `path`, replacing what is there.
-    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws
+    /// if `root` were `/`, so the write can never land outside it. Both go as an archive the
+    /// agent unpacks, which gives each entry the owner it names (`CopyArchive`): a directory's
+    /// at `path`, a file's as the one entry at `path`, replacing what is there. `owner`, when
+    /// given, owns everything copied (`copyUIDGID`).
+    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws
     /// Copy `path` under `root` to `destination` on the host: a directory's contents into
     /// `destination`, a regular file as `destination`. The agent resolves `path` confined to
     /// `root` and refuses anything else.
@@ -48,7 +51,8 @@ protocol GuestCopyAgent: Sendable {
 /// itself.
 enum PrestartCopy {
     static func copyIn(
-        from source: URL, to destination: String, mode: UInt32, createParents: Bool, rootfs: String, agent: some GuestCopyAgent
+        from source: URL, to destination: String, mode: UInt32, createParents: Bool, rootfs: String, owner: CopyOwner? = nil,
+        agent: some GuestCopyAgent
     ) async throws {
         let path = FilePath(destination)
         guard path.isAbsolute else {
@@ -75,7 +79,8 @@ enum PrestartCopy {
             target = normalized
         }
         try await agent.copy(
-            from: source, isDirectory: isDirectory.boolValue, root: rootfs, path: target.string, mode: mode, createParents: createParents)
+            from: source, isDirectory: isDirectory.boolValue, root: rootfs, path: target.string, mode: mode, createParents: createParents,
+            owner: owner)
     }
 }
 
@@ -100,30 +105,50 @@ struct VminitdCopyAgent: GuestCopyAgent {
         try await VminitdMountAgent(agent: agent).identity(root: root, path: path)
     }
 
-    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool) async throws {
+    func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws {
+        let unpack = Self.unpackPoint(for: path, isDirectory: isDirectory)
+        if !isDirectory, !createParents {
+            // The agent makes the directory an archive is unpacked in: a file copy that may
+            // not make its parents fails here instead, as the agent fails a file it cannot open.
+            guard try await identity(root: root, path: unpack.directory)?.isDirectory == true else {
+                throw ContainerizationError(.notFound, message: "copyIn: no directory '\(unpack.directory)' to copy '\(path)' into")
+            }
+        }
         let port = Self.port()
         let listener = try vm.listen(port)
         defer { try? listener.finish() }
         try await Self.runCopyTasks(
             rpc: {
                 try await Self.requestCopy(
-                    agent: agent, isDirectory: isDirectory, root: root, path: path, port: port, mode: mode, createParents: createParents)
+                    agent: agent, root: root, path: unpack.directory, port: port, mode: mode, createParents: createParents)
             },
             transfer: {
                 guard let connection = await listener.first(where: { _ in true }) else {
                     throw ContainerizationError(.internalError, message: "copyIn: the VM did not connect for the copy")
                 }
                 try listener.finish()
-                try await Self.send(source, isDirectory: isDirectory, to: connection)
+                try await Self.send(source, isDirectory: isDirectory, name: unpack.name, mode: mode, owner: owner, to: connection)
             },
             closeListener: { try? listener.finish() })
     }
 
-    /// The RPC and the payload must agree: otherwise the guest writes the archive bytes as
-    /// a regular file. Keep this at the real Vminitd boundary so tests can decode the request.
-    static func requestCopy(agent: Vminitd, isDirectory: Bool, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool) async throws {
+    /// Where the agent unpacks the archive for a copy to `path`, and the name a file's one
+    /// entry has in it: a directory's archive at `path` itself, a file's in `path`'s parent.
+    static func unpackPoint(for path: String, isDirectory: Bool) -> (directory: String, name: String) {
+        guard !isDirectory else { return (path, ".") }
+        let file = FilePath(path)
+        let parent = file.removingLastComponent()
+        return (parent.isEmpty ? "/" : parent.string, file.lastComponent?.string ?? path)
+    }
+
+    /// Every copy in is an archive, so that the agent gives what it writes the owner the
+    /// archive names: the agent writes a payload sent as a plain file as root, and keeps the
+    /// owner of a file it overwrites. The RPC and the payload must agree: otherwise the guest
+    /// writes the archive bytes as a regular file. Keep this at the real Vminitd boundary so
+    /// tests can decode the request.
+    static func requestCopy(agent: Vminitd, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool) async throws {
         try await agent.copy(
-            direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: isDirectory)
+            direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: true)
     }
 
     static func runCopyTasks(
@@ -185,23 +210,11 @@ struct VminitdCopyAgent: GuestCopyAgent {
             closeListener: { try? listener.finish() })
     }
 
-    /// Writes `source` to `connection` off the cooperative pool, and closes it: a directory as
-    /// a gzipped pax archive of its contents, a file as its bytes.
-    static func send(_ source: URL, isDirectory: Bool, to connection: FileHandle) async throws {
+    /// Writes `source` to `connection` off the cooperative pool as the archive `CopyArchive`
+    /// makes of it, and closes it.
+    static func send(_ source: URL, isDirectory: Bool, name: String, mode: UInt32, owner: CopyOwner?, to connection: FileHandle) async throws {
         try await transfer(over: connection) { fd in
-            if isDirectory {
-                let writer = try ArchiveWriter(configuration: .init(format: .pax, filter: .gzip))
-                try writer.open(fileDescriptor: fd)
-                try writer.archiveDirectory(source)
-                try writer.finishEncoding()
-            } else {
-                let file = try FileHandle(forReadingFrom: source)
-                defer { try? file.close() }
-                let output = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-                while let chunk = try file.read(upToCount: chunkSize), !chunk.isEmpty {
-                    try output.write(contentsOf: chunk)
-                }
-            }
+            try CopyArchive.write(source, isDirectory: isDirectory, name: name, mode: mode, owner: owner, to: fd)
         }
     }
 

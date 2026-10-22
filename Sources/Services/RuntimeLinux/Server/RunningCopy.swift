@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Containerization
 import ContainerizationError
 import Foundation
@@ -34,7 +35,8 @@ enum RunningCopy {
     /// name, else at the path itself, and a missing directory (a trailing `/`) is refused for
     /// a file.
     static func copyIn(
-        from source: URL, to destination: URL, mode: UInt32, createParents: Bool, rootfs: String, agent: some GuestCopyAgent
+        from source: URL, to destination: URL, mode: UInt32, createParents: Bool, rootfs: String, owner: CopyOwner? = nil,
+        agent: some GuestCopyAgent
     ) async throws {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory) else {
@@ -43,7 +45,8 @@ enum RunningCopy {
         let path = try await destinationPath(
             from: source, to: destination, sourceIsDirectory: isDirectory.boolValue, rootfs: rootfs, agent: agent)
         try await agent.copy(
-            from: source, isDirectory: isDirectory.boolValue, root: rootfs, path: path, mode: mode, createParents: createParents)
+            from: source, isDirectory: isDirectory.boolValue, root: rootfs, path: path, mode: mode, createParents: createParents,
+            owner: owner)
     }
 
     /// Copy `source` in the container to `destination` on the host: a directory as its

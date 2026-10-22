@@ -38,12 +38,14 @@ enum ContainerCopyStream {
         }
     }
 
-    /// Reads a tar from `input` into the directory `path` in container `id`.
-    static func copyIn(id: String, path: String, from input: FileHandle) async throws {
+    /// Reads a tar from `input` into the directory `path` in container `id`. `copyUIDGID` is
+    /// `-a`: what is copied belongs to the container's user, not to the archive's owners.
+    static func copyIn(id: String, path: String, from input: FileHandle, copyUIDGID: Bool = false) async throws {
         let tools = ClientContainerTools()
         let container = try await ContainerClient().get(id: id)
         try await translated {
-            try await ContainerPathArchive.extract(tools, container: container, from: input, into: path, reference: id, requester: nil)
+            try await ContainerPathArchive.extract(
+                tools, container: container, from: input, into: path, reference: id, copyUIDGID: copyUIDGID, requester: nil)
         }
     }
 
@@ -93,9 +95,10 @@ struct ClientContainerTools: EngineContainerTools {
         try await ContainerClient().copyOut(id: container.id, source: source, destination: destination.path(percentEncoded: false), requester: requester)
     }
 
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, requester: String?) async throws {
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, requester: String?) async throws {
         try await ContainerClient().copyIn(
-            id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, requester: requester)
+            id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, copyUIDGID: copyUIDGID,
+            requester: requester)
     }
 }
 
