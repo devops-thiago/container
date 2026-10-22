@@ -922,29 +922,31 @@ public actor ContainersService {
             )
         }
 
+        guard Self.isInitProcess(id: id, processID: processID) else {
+            // An exec's start waits on the guest, which answers late or not at all while it is
+            // out of memory or busy. Under the engine-wide lock that wait would hold every
+            // create, start, stop and exec of every other container behind it. It changes
+            // nothing the lock guards, as its create, wait and kill do not, so it runs outside.
+            let client = try self._getContainerState(id: id).getClient()
+            try await client.startProcess(processID)
+            return
+        }
         try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)", "processId": "\(processID)"]) { context in
-            try await self.startProcessLocked(id: id, processID: processID, context: context)
+            try await self.startInitProcessLocked(id: id, context: context)
         }
         // As Docker's resolver does: by the time a start returns, its peers know the name.
-        if Self.isInitProcess(id: id, processID: processID) {
-            await self.settlePeerHosts()
-        }
+        await self.settlePeerHosts()
     }
 
-    private func startProcessLocked(id: String, processID: String, context: AsyncLock.Context) async throws {
+    private func startInitProcessLocked(id: String, context: AsyncLock.Context) async throws {
         var state = try self.getContainerState(id: id, context: context)
 
-        let isInit = Self.isInitProcess(id: id, processID: processID)
-        if state.snapshot.status == .running && isInit {
+        if state.snapshot.status == .running {
             return
         }
 
         let client = try state.getClient()
-        try await client.startProcess(processID)
-
-        guard isInit else {
-            return
-        }
+        try await client.startProcess(id)
 
         do {
             let log = self.log
@@ -1997,7 +1999,7 @@ public actor ContainersService {
             hostDirectoryBookmarks: [],
             askEmbedder: false,
             context: context)
-        try await self.startProcessLocked(id: id, processID: id, context: context)
+        try await self.startInitProcessLocked(id: id, context: context)
     }
 
     /// An engine-made start did not work: the container stays stopped with the reason, as
