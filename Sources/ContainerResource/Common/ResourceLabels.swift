@@ -126,4 +126,15 @@ public struct ResourcePluginValues {
 
     /// Indicates a container that is a node of a `container cluster`.
     public static let cluster = "cluster"
+
+    /// A Kubernetes node, as the `cluster` plugin labels it.
+    public static let kubernetes = cluster
+
+    /// A Kubernetes node made by an engine whose plugin was still named `k8s`, before 1.6.1.
+    public static let legacyKubernetes = "k8s"
+
+    /// Whether `plugin` marks a Kubernetes node, by its current or its earlier name.
+    public static func isKubernetes(_ plugin: String?) -> Bool {
+        plugin == kubernetes || plugin == legacyKubernetes
+    }
 }

@@ -73,6 +73,7 @@ struct BuilderStartTests {
             options: spec.dnsOptions
         )
         config.publishedSockets = spec.publishedSockets ?? []
+        config.writableSysfs = true
         edit(&config)
         return config
     }
@@ -133,6 +134,7 @@ struct BuilderStartTests {
             ("memory", { $0.resources.memoryInBytes = 1024 }),
             ("environment", { $0.initProcess.environment.append("NO_COLOR=true") }),
             ("ssh", { $0.ssh = true }),
+            ("read-only /sys", { $0.writableSysfs = false }),
         ]
         for (name, edit) in edits {
             #expect(spec.requiresRecreate(Self.existing(matching: spec, edit: edit)), "\(name)")

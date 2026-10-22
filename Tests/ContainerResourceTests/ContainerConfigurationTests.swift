@@ -194,3 +194,47 @@ struct ContainerCPUBoundTests {
         #expect(throws: Error.self) { try resources.validateCPUs() }
     }
 }
+
+struct ContainerConfigurationWritableSysfsTests {
+    /// `config` as an engine from before `writableSysfs` saved it.
+    static func savedWithoutTheKey(_ config: ContainerConfiguration) throws -> ContainerConfiguration {
+        let data = try JSONEncoder().encode(config)
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object.removeValue(forKey: "writableSysfs") != nil)
+        return try JSONDecoder().decode(ContainerConfiguration.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    @Test func aNewContainerIsReadOnly() {
+        #expect(makeTestConfiguration().writableSysfs == false)
+    }
+
+    @Test func roundTrips() throws {
+        var config = makeTestConfiguration()
+        config.writableSysfs = true
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: JSONEncoder().encode(config))
+        #expect(decoded.writableSysfs == true)
+    }
+
+    @Test(
+        "A container saved before the key keeps writable /sys only if the engine made it",
+        arguments: [
+            ([:], false),
+            (["com.example.app": "web"], false),
+            ([ResourceLabelKeys.role: ResourceRoleValues.builder, ResourceLabelKeys.plugin: "builder"], true),
+            ([ResourceLabelKeys.plugin: ResourcePluginValues.kubernetes, ResourceLabelKeys.role: "control-plane"], true),
+            ([ResourceLabelKeys.plugin: ResourcePluginValues.machine], true),
+            ([ResourceLabelKeys.plugin: "compose"], false),
+        ]
+    )
+    func savedWithoutTheKey(labels: [String: String], writable: Bool) throws {
+        let decoded = try Self.savedWithoutTheKey(makeTestConfiguration(labels: labels))
+        #expect(decoded.writableSysfs == writable)
+    }
+
+    @Test func aSavedValueWinsOverTheLabels() throws {
+        var config = makeTestConfiguration(labels: [ResourceLabelKeys.role: ResourceRoleValues.builder])
+        config.writableSysfs = false
+        let decoded = try JSONDecoder().decode(ContainerConfiguration.self, from: JSONEncoder().encode(config))
+        #expect(decoded.writableSysfs == false)
+    }
+}

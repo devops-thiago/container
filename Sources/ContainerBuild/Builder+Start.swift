@@ -150,8 +150,9 @@ extension Builder {
         /// Whether a builder created from `existing` needs replacing, and when.
         ///
         /// - ``Recreate/now``: it differs in image, CPUs, memory, managed environment, SSH
-        ///   forwarding or DNS. DNS compares the whole resolved configuration, so a builder whose
-        ///   DNS no longer matches the system defaults is recreated too.
+        ///   forwarding or DNS, or its `/sys` is read-only (BuildKit's runc writes cgroups).
+        ///   DNS compares the whole resolved configuration, so a builder whose DNS no longer
+        ///   matches the system defaults is recreated too.
         /// - ``Recreate/whenStopped``: it differs only in the sockets it publishes, as a builder
         ///   made before the BuildKit socket was published does. Nothing tells the engine
         ///   whether a build is running in it (buildx talks to BuildKit directly), so a running
@@ -193,7 +194,8 @@ extension Builder {
                     domain: dnsDomain,
                     searchDomains: dnsSearchDomains,
                     options: dnsOptions))
-            return imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged
+            let sysfsReadOnly = !existing.writableSysfs
+            return imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged || sysfsReadOnly
         }
     }
 
@@ -399,6 +401,7 @@ extension Builder {
             ResourceLabelKeys.role: ResourceRoleValues.builder,
         ]
         config.capAdd = ["ALL"]
+        config.writableSysfs = true
         config.publishedSockets = target.publishedSockets ?? []
         config.mounts = [
             .init(

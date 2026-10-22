@@ -731,6 +731,7 @@ extension MachineConfiguration {
         config.virtualization = virtualization
         config.readonlyPaths = []
         config.maskedPaths = []
+        config.writableSysfs = true
 
         config.rosetta = platform.architecture == "amd64" && Arch.hostArchitecture() == .arm64
 
