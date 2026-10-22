@@ -17,6 +17,7 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerLog
+import ContainerResource
 import ContainerizationError
 import Darwin
 import Dispatch
@@ -50,20 +51,37 @@ extension Application {
 
         public func run() async throws {
             let client = ContainerClient()
+            // Taken before the log is read: a run that ends while it is printed is still seen
+            // ending. As dockerd does, only a running container is followed, and only for as
+            // long as the run it is in: a stopped one's log is printed and the command ends.
+            let run = follow ? try await client.get(id: containerId) : nil
             let fhs = try await client.logs(id: containerId)
             let fileHandle = boot ? fhs[1] : fhs[0]
 
             try await Self.tail(
                 fh: fileHandle,
                 n: numLines,
-                follow: follow
+                runEnded: run.flatMap { run in
+                    guard run.hasLiveProcess else { return nil }
+                    return { try await Self.runEnded(run, client: client) }
+                }
             )
+        }
+
+        /// Whether the container has left the run `run` was taken in: stopped, waiting to
+        /// restart, started again, or deleted.
+        static func runEnded(_ run: ContainerSnapshot, client: ContainerClient) async throws -> Bool {
+            do {
+                return try await !client.get(id: run.id).isInRun(of: run)
+            } catch let error as ContainerizationError where error.isCode(.notFound) {
+                return true
+            }
         }
 
         static func tail(
             fh: FileHandle,
             n: Int?,
-            follow: Bool
+            runEnded: (@Sendable () async throws -> Bool)?
         ) async throws {
             if let n {
                 var buffer = Data()
@@ -97,14 +115,14 @@ extension Application {
             }
 
             fflush(stdout)
-            if follow {
+            if let runEnded {
                 setbuf(stdout, nil)
-                try await Self.followFile(fh: fh)
+                try await Self.followFile(fh: fh, runEnded: runEnded)
             }
         }
 
-        private static func followFile(fh: FileHandle) async throws {
-            try await LogFileFollow.follow(fh) { data in
+        private static func followFile(fh: FileHandle, runEnded: @escaping @Sendable () async throws -> Bool) async throws {
+            try await LogFileFollow.follow(fh, runEnded: runEnded) { data in
                 // Preserve raw stream bytes, including partial lines and UTF-8 scalars
                 // split between reads. Converting each chunk to String loses both.
                 FileHandle.standardOutput.write(data)

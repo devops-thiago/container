@@ -172,6 +172,89 @@ struct LogRouteTests {
         }
     }
 
+    @Test("follow ends at the exit when the container restarts, as dockerd's does, after what it wrote last", arguments: [true, false])
+    func followEndsAtRestart(waitingToRestart: Bool) async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try await h.server.withClient { client in
+            try await client.send("GET /v1.48/containers/term/logs?stdout=1&follow=1&tail=0 HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            _ = try await client.read(through: "\r\n\r\n")
+            try h.tools.appendLog("first run\n")
+            #expect(try await client.read(through: "first run\n").hasSuffix("first run\n"))
+            try h.tools.appendLog("last words\n")
+            // The policy's restart: waiting out its delay, or already running again.
+            h.tools.base.update(String(ToolHarness.ttyID.prefix(12))) {
+                if waitingToRestart {
+                    $0.status = .restarting
+                } else {
+                    $0.startedDate = Fixtures.now
+                }
+            }
+            let rest = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
+            #expect(rest.contains("last words\n"))
+        }
+    }
+
+    @Test("follow of a container waiting to restart sends its log and ends, as dockerd does for one not running")
+    func followOfRestartingContainerEnds() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try h.tools.appendLog("from the last run\n")
+        h.tools.base.update(String(ToolHarness.ttyID.prefix(12))) { $0.status = .restarting }
+        try await h.server.withClient { client in
+            try await client.send("GET /v1.48/containers/term/logs?stdout=1&follow=1 HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            let answer = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
+            #expect(answer.hasPrefix("HTTP/1.1 200 OK"))
+            #expect(answer.contains("from the last run\n"))
+        }
+    }
+
+    @Test("follow ends at once when the log is deleted with its container, after what was left in it")
+    func followEndsWhenDeleted() async throws {
+        // The container is not asked about for an hour: only the deletion can end this follow.
+        let options = DockerToolOptions(logPollInterval: .milliseconds(20), logStatusInterval: .seconds(3600), statsInterval: .milliseconds(50))
+        let h = try await ToolHarness.start(options: options)
+        defer { Task { try? await h.stop() } }
+        try await h.server.withClient { client in
+            try await client.send("GET /v1.48/containers/term/logs?stdout=1&follow=1&tail=0 HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            _ = try await client.read(through: "\r\n\r\n")
+            try h.tools.appendLog("running\n")
+            #expect(try await client.read(through: "running\n").hasSuffix("running\n"))
+            try h.tools.appendLog("final\n")
+            try FileManager.default.removeItem(at: h.tools.logFile)
+            let rest = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
+            #expect(rest.contains("final\n"))
+        }
+    }
+
+    @Test("follow does not send the log the next run rewrote, and does send a rollover in the run")
+    func followStopsAtNextRunsLog() async throws {
+        // The container is not asked about for an hour unless the file is rewritten.
+        let options = DockerToolOptions(logPollInterval: .milliseconds(20), logStatusInterval: .seconds(3600), statsInterval: .milliseconds(50))
+        let h = try await ToolHarness.start(options: options)
+        defer { Task { try? await h.stop() } }
+        func rewrite(_ text: String) throws {
+            let handle = try FileHandle(forWritingTo: h.tools.logFile)
+            defer { try? handle.close() }
+            try handle.truncate(atOffset: 0)
+            try handle.write(contentsOf: Data(text.utf8))
+        }
+        try await h.server.withClient { client in
+            try await client.send("GET /v1.48/containers/term/logs?stdout=1&follow=1&tail=0 HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            _ = try await client.read(through: "\r\n\r\n")
+            try h.tools.appendLog("first run\n")
+            #expect(try await client.read(through: "first run\n").hasSuffix("first run\n"))
+            // Control: the engine's rollover of a full log, in the same run, is sent on.
+            try rewrite("[container log rolled over]\nrolled\n")
+            #expect(try await client.read(through: "rolled\n").hasSuffix("rolled\n"))
+            // The restart: a new run, which starts the log again.
+            h.tools.base.update(String(ToolHarness.ttyID.prefix(12))) { $0.startedDate = Fixtures.now }
+            try rewrite("second run\n")
+            let rest = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
+            #expect(!rest.contains("second run"))
+        }
+    }
+
     @Test("a followed log stops looking for a client that has gone")
     func followReleasedOnDisconnect() async throws {
         let h = try await ToolHarness.start()

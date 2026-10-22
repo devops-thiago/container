@@ -143,3 +143,21 @@ public struct ContainerSnapshot: Codable, Sendable {
         oomKilled = try container.decodeIfPresent(Bool.self, forKey: .oomKilled)
     }
 }
+
+extension ContainerSnapshot {
+    /// Whether `self`, a later look at the container, still shows the run `run` was taken in.
+    ///
+    /// A followed log ends with its run, as Docker's does: dockerd closes a container's log
+    /// at every exit, one a restart policy follows included, and a follower ends once it has
+    /// read what was written before that. A container that is being stopped still writes, so it
+    /// is still in its run; one that has stopped, is waiting to restart, was started again since
+    /// (a new start time), or is another one made under the same ID (a new incarnation) is not.
+    public func isInRun(of run: ContainerSnapshot) -> Bool {
+        hasLiveProcess && run.hasLiveProcess && incarnation == run.incarnation && startedDate == run.startedDate
+    }
+
+    /// Its process runs, and may still write: running, or being stopped.
+    public var hasLiveProcess: Bool {
+        status == .running || status == .stopping
+    }
+}
