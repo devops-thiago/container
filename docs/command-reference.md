@@ -636,7 +636,7 @@ container copy [--debug] [--follow-link] [--archive] <source> <destination>
 
 **Ownership**
 
-As with `docker cp`, what is copied into a container keeps the owner its source names: a host file's uid and gid, or the owner each entry of a `-` tar archive names. With `-a`, the container's user owns it instead.
+As with `docker cp`, what is copied into a container keeps the owner and mode its source names: a host file's uid, gid and permissions, or those each entry of a `-` tar archive names, replacing a file already at the destination. With `-a`, the container's user owns it instead.
 
 **Path Format**
 

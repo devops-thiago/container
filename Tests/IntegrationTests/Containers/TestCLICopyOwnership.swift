@@ -92,6 +92,21 @@ struct TestCLICopyOwnership {
         }
     }
 
+    @Test func testCopiedFileKeepsItsModeOverAnExistingFile() async throws {
+        try await ContainerFixture.with { f in
+            try await f.withContainer(image: WarmupImage.alpine320.rawValue) { name in
+                let script = f.testDir.appending("entrypoint.sh")
+                try "#!/bin/sh\necho hi\n".write(toFile: script.string, atomically: true, encoding: .utf8)
+                #expect(chmod(script.string, 0o755) == 0)
+                try f.doExec(name, cmd: ["sh", "-c", "echo old > /tmp/entrypoint.sh && chmod 600 /tmp/entrypoint.sh"])
+                try f.run(["cp", script.string, "\(name):/tmp/entrypoint.sh"]).check()
+                try f.run(["cp", script.string, "\(name):/tmp/new.sh"]).check()
+                #expect(try f.doExec(name, cmd: ["stat", "-c", "%a", "/tmp/entrypoint.sh", "/tmp/new.sh"]) == "755\n755\n")
+                #expect(try f.doExec(name, cmd: ["/tmp/entrypoint.sh"]) == "hi\n")
+            }
+        }
+    }
+
     @Test func testArchiveModeWithoutAUserKeepsTheSourceOwner() async throws {
         try await ContainerFixture.with { f in
             try await f.withContainer(image: WarmupImage.alpine320.rawValue) { name in

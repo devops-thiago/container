@@ -133,7 +133,11 @@ extension Application {
                     throw ContainerizationError(.invalidArgument, message: "source path is not a directory: \(localPath)")
                 }
 
-                try await client.copyIn(id: id, source: srcPath.string, destination: path, createParents: true, copyUIDGID: archive)
+                // The file's own mode, as the Docker CLI puts it in the archive it sends: the
+                // copy replaces what is at the destination, mode and all.
+                var info = stat()
+                let mode = stat(srcPath.string, &info) == 0 ? UInt32(info.st_mode) & 0o7777 : 0o644
+                try await client.copyIn(id: id, source: srcPath.string, destination: path, mode: mode, createParents: true, copyUIDGID: archive)
                 let printedDest = path.hasSuffix("/") ? "\(id):\(path)\(lastComponent.string)" : "\(id):\(path)"
                 print(printedDest)
             case (.container, .container):
