@@ -88,6 +88,13 @@ public struct ContainerConfiguration: Sendable, Codable {
     /// default set is used. Set to `[]` to opt out, or provide a custom list
     /// to override the default entirely.
     public var readonlyPaths: [String]?
+    /// Whether `/sys` and the cgroup filesystem under it are mounted read-write.
+    ///
+    /// Docker mounts both read-only and makes them writable only for a privileged container.
+    /// This engine runs no user container privileged, so only its own builder, Kubernetes
+    /// nodes and machines set this: they run runc, a kubelet or systemd, which manage cgroups,
+    /// and they are the containers Docker would run privileged.
+    public var writableSysfs: Bool = false
     /// The time at which the container was created.
     public var creationDate: Date = Date()
 
@@ -120,6 +127,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         case stopSignal
         case maskedPaths
         case readonlyPaths
+        case writableSysfs
         case creationDate
     }
 
@@ -162,6 +170,9 @@ public struct ContainerConfiguration: Sendable, Codable {
         stopSignal = try container.decodeIfPresent(String.self, forKey: .stopSignal)
         maskedPaths = try container.decodeIfPresent([String].self, forKey: .maskedPaths)
         readonlyPaths = try container.decodeIfPresent([String].self, forKey: .readonlyPaths)
+        writableSysfs =
+            try container.decodeIfPresent(Bool.self, forKey: .writableSysfs)
+            ?? Self.engineManagesCgroups(labels: labels)
         creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate) ?? Date(timeIntervalSince1970: 0)
     }
 
@@ -299,5 +310,19 @@ public struct ContainerConfiguration: Sendable, Codable {
         self.id = id
         self.image = image
         self.initProcess = process
+    }
+
+    /// Whether a container saved before ``writableSysfs`` existed is one of the engine's own
+    /// that set it now: its builder, a Kubernetes node or a machine, told apart by the labels
+    /// the engine gave them. Read only for a saved configuration without the key, so a label
+    /// on a newer container does not make its `/sys` writable.
+    static func engineManagesCgroups(labels: [String: String]) -> Bool {
+        if labels[ResourceLabelKeys.role] == ResourceRoleValues.builder {
+            return true
+        }
+        guard let plugin = labels[ResourceLabelKeys.plugin] else {
+            return false
+        }
+        return ResourcePluginValues.isKubernetes(plugin) || plugin == ResourcePluginValues.machine
     }
 }

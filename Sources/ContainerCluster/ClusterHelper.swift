@@ -24,7 +24,7 @@ import Logging
 // MARK: - ClusterHelper
 
 public struct ClusterHelper {
-    public static let pluginName: String = "cluster"
+    public static let pluginName: String = ResourcePluginValues.kubernetes
     public static let defaultName: String = "cluster-dev"
     public static let controlPlaneRoleName: String = "control-plane"
     public static let workerRoleName: String = "worker"

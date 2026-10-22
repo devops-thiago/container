@@ -708,7 +708,7 @@ extension MachineConfiguration {
 
         config.platform = platform
         config.labels = [
-            ResourceLabelKeys.plugin: "machine"
+            ResourceLabelKeys.plugin: ResourcePluginValues.machine
         ]
         let domain = Self.defaultDNSDomain
         config.dns = ContainerConfiguration.DNSConfiguration(
@@ -731,6 +731,7 @@ extension MachineConfiguration {
         config.virtualization = virtualization
         config.readonlyPaths = []
         config.maskedPaths = []
+        config.writableSysfs = true
 
         config.rosetta = platform.architecture == "amd64" && Arch.hostArchitecture() == .arm64
 

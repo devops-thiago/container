@@ -140,8 +140,9 @@ extension Builder {
         /// Whether a builder created from `existing` needs replacing, and when.
         ///
         /// - ``Recreate/now``: it differs in image, CPUs, memory, managed environment, SSH
-        ///   forwarding or DNS. DNS compares only the first field this start sets, in the order
-        ///   nameservers, domain, search domains, options; a start that sets none keeps any DNS.
+        ///   forwarding or DNS, or its `/sys` is read-only (BuildKit's runc writes cgroups).
+        ///   DNS compares only the first field this start sets, in the order nameservers,
+        ///   domain, search domains, options; a start that sets none keeps any DNS.
         /// - ``Recreate/whenStopped``: it differs only in the sockets it publishes, as a builder
         ///   made before the BuildKit socket was published does. Nothing tells the engine
         ///   whether a build is running in it (buildx talks to BuildKit directly), so a running
@@ -176,6 +177,7 @@ extension Builder {
             let cpuChanged = existing.resources.cpus != resources.cpus
             let memChanged = existing.resources.memoryInBytes != resources.memoryInBytes
             let sshChanged = existing.ssh != ssh
+            let sysfsReadOnly = !existing.writableSysfs
             let existingDNS = existing.dns
             let dnsChanged = {
                 if !dnsNameservers.isEmpty {
@@ -192,7 +194,7 @@ extension Builder {
                 }
                 return false
             }()
-            return imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged
+            return imageChanged || cpuChanged || memChanged || envChanged || dnsChanged || sshChanged || sysfsReadOnly
         }
     }
 
@@ -398,6 +400,7 @@ extension Builder {
             ResourceLabelKeys.role: ResourceRoleValues.builder,
         ]
         config.capAdd = ["ALL"]
+        config.writableSysfs = true
         config.publishedSockets = target.publishedSockets ?? []
         config.mounts = [
             .init(

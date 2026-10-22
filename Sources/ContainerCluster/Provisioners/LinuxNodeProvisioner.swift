@@ -181,6 +181,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         )
         config.maskedPaths = []
         config.readonlyPaths = []
+        config.writableSysfs = true
 
         let client = ContainerClient()
         // Choose and retain the destructive identity before the request. If cancellation or

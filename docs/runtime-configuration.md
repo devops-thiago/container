@@ -82,6 +82,14 @@ Because values are processed in order, `NONE` can be followed by a custom set th
 container run --masked-path NONE --masked-path /run/secrets alpine sh
 ```
 
+`/sys` and the cgroup filesystem at `/sys/fs/cgroup` are mounted read-only, as Docker mounts them for a container that is not privileged. The workload can read its limits, such as `memory.max` and `cpu.max`, but not raise them, and `--read-only-path NONE` does not change that:
+
+```console
+% container run -m 512m alpine sh -c 'cat /sys/fs/cgroup/memory.max; echo 1g > /sys/fs/cgroup/memory.max'
+536870912
+sh: can't create /sys/fs/cgroup/memory.max: Read-only file system
+```
+
 The two flags are independent, so clearing the masked paths leaves the read-only defaults in place. The paths that a container was created with are visible in `container inspect` under `configuration.maskedPaths` and `configuration.readonlyPaths`; when neither flag is used, both are absent and the runtime defaults apply.
 
 ## Expose virtualization capabilities to a container
