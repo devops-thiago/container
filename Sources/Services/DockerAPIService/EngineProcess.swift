@@ -30,8 +30,9 @@ public protocol EngineProcess: Sendable {
 /// The container's ends of the pipes a bootstrap binds as its init process's stdio. A missing
 /// stream is not connected.
 ///
-/// The handles do not own their descriptors: the process table that made the pipes closes them
-/// once the engine holds its own copies, so a pipe's far end sees EOF when the process exits.
+/// The engine closes each descriptor it is given once it has sent it, as `XPCMessage.set` does,
+/// so these are copies (`StdioPipe.containerHandleForEngine()`): the pipe closes its own end
+/// once the engine holds its copies, and a pipe's far end sees EOF when the process exits.
 public struct DockerProcessStdio: Sendable {
     public let stdin: FileHandle?
     public let stdout: FileHandle?
@@ -84,9 +85,16 @@ final class StdioPipe {
         }
     }
 
-    /// The container's end as a handle that does not close it.
-    var containerHandle: FileHandle? {
-        container.map { FileHandle(fileDescriptor: $0, closeOnDealloc: false) }
+    /// A copy of the container's end for the engine to send. The engine's request closes the
+    /// descriptor it is given (`XPCMessage.set`), and this pipe still closes its own in
+    /// `closeContainerEnd()`. Handing over the pipe's own descriptor closed it twice: the second
+    /// close hit whatever had reused the number by then, such as another exec's stdin, and the
+    /// agent trapped on that descriptor. A copy the engine never sends stays open.
+    func containerHandleForEngine() throws -> FileHandle? {
+        guard let container else { return nil }
+        let copy = fcntl(container, F_DUPFD_CLOEXEC, 0)
+        guard copy >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return FileHandle(fileDescriptor: copy, closeOnDealloc: false)
     }
 
     /// Gives up the host end to a new owner, which closes it.

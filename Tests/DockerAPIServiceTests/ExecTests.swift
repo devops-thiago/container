@@ -259,6 +259,38 @@ struct ExecStreamTests {
         #expect(try await Self.exitCode(h, id) == 3)
     }
 
+    @Test("many attached execs at once each get their own stdio: none loses a descriptor to another's")
+    func concurrentExecs() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.program = { _ in FakePrograms.echo(3) }
+        let count = 16
+        var ids: [String] = []
+        for _ in 0..<count {
+            ids.append(try await Self.create(h, "box", #"{"Cmd":["sh"],"AttachStdin":true,"AttachStdout":true,"AttachStderr":true}"#))
+        }
+        let outputs = try await withThrowingTaskGroup(of: String.self) { group in
+            for (index, id) in ids.enumerated() {
+                group.addTask {
+                    var stdout = ""
+                    try await h.server.withClient { exec in
+                        try await exec.send(Self.startRequest(id, tty: false))
+                        _ = try await exec.read(through: "\r\n\r\n")
+                        try await exec.send("x\(index)")
+                        exec.closeWrite()
+                        stdout = try ToolHarness.demux(try await ToolHarness.readAll(exec)).stdout
+                    }
+                    return stdout
+                }
+            }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(Set(outputs) == Set((0..<count).map { "ready;got:x\($0);eof;" }))
+        for id in ids {
+            #expect(try await Self.exitCode(h, id) == 3)
+        }
+    }
+
     @Test("only the streams the exec asked for are bound")
     func onlyAskedStreams() async throws {
         let h = try await ToolHarness.start()

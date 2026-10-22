@@ -58,6 +58,9 @@ final class FakeProcess: EngineProcess, Sendable {
         let fds = stdio.handles.map { handle in handle.map { dup($0.fileDescriptor) } }
         state = Mutex(State(fds: fds))
         heldOutput = holdOutputOpen ? stdio.stdout.map { dup($0.fileDescriptor) } : nil
+        // As the engine's request does (`XPCMessage.set`): the descriptors handed over are its
+        // to close.
+        for handle in stdio.handles.compactMap({ $0 }) { close(handle.fileDescriptor) }
         self.onStart = onStart
         self.onExit = onExit
     }
