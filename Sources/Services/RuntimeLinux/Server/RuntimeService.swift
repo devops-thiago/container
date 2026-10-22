@@ -507,6 +507,7 @@ public actor RuntimeService {
                 if !container.interfaces.isEmpty {
                     try await self.startSocketForwarders(attachment: attachments[0], publishedPorts: config.publishedPorts)
                 }
+                self.copies.reopen()
                 await self.setState(.booted)
             } catch {
                 do {
@@ -1479,6 +1480,9 @@ public actor RuntimeService {
                 break
             }
 
+            // Copies that arrive from now on are refused rather than started against a
+            // container being torn down.
+            await setState(.stopping)
             do {
                 try await cleanUpContainer(containerInfo: ctrInfo, exitStatus: exitStatus)
             } catch {
