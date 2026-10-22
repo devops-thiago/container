@@ -114,7 +114,22 @@ final public class BuildConfig: Codable, Sendable {
 
 final public class ContainerConfig: Codable, Sendable {
     public static let defaultCPUs = 4
-    public static let defaultMemory = try! MemorySize("1g")
+
+    /// Half the Mac's memory, which is what Docker Desktop gives the VM its containers share.
+    ///
+    /// A Docker container with no memory limit can use all of that VM's memory, so a
+    /// container here gets as much. The guest's memory is taken from macOS only as the guest
+    /// touches it, so an idle container does not hold this much.
+    public static var defaultMemory: MemorySize {
+        defaultMemory(hostMemory: ProcessInfo.processInfo.physicalMemory)
+    }
+
+    /// Half of `hostMemory` in whole gigabytes, and never less than 1 GB.
+    public static func defaultMemory(hostMemory: UInt64) -> MemorySize {
+        let gigabyte: UInt64 = 1024 * 1024 * 1024
+        let half = max(hostMemory / 2, gigabyte)
+        return try! MemorySize("\(half / gigabyte)gb")
+    }
 
     public let cpus: Int
     public let memory: MemorySize
