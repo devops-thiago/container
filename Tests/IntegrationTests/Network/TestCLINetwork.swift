@@ -28,7 +28,7 @@ struct TestCLINetwork {
     @Test func testHostGatewayReachesHostHTTPAndOverridesPeer() async throws {
         try await ContainerFixture.with { f in
             let payload = "host-response-\(f.testID)"
-            // Bind to every host interface: the gateway does not forward host loopback.
+            // Bind to every host interface: the gateway reaches it without the loopback relay.
             let server = try LoopbackFileServer(serving: Data(payload.utf8), bindHost: "0.0.0.0")
             defer { server.shutdown() }
             let port = try #require(server.url.port)
@@ -45,6 +45,75 @@ struct TestCLINetwork {
                 "http://host.docker.internal:\(port)/payload", "http://\(peer):\(port)/payload",
             ]).check()
             #expect(result.output == payload + payload)
+        }
+    }
+
+    @available(macOS 26, *)
+    @Test func testHostDockerInternalReachesAHostLoopbackServiceOnEveryNetwork() async throws {
+        try await ContainerFixture.with { f in
+            let payload = "loopback-response-\(f.testID)"
+            // Bound to 127.0.0.1 alone, as Ollama and most dev servers are by default.
+            let server = try LoopbackFileServer(serving: Data(payload.utf8))
+            defer { server.shutdown() }
+            let port = try #require(server.url.port)
+            let net = "\(f.testID)-net"
+            f.addCleanup { f.doNetworkDeleteIfExists(net) }
+            try f.doNetworkCreate(net)
+            for network in ["default", net] {
+                let client = "\(f.testID)-\(network == net ? "user" : "default")"
+                f.addCleanup { try? f.doRemove(client, force: true) }
+                // The helper notices a new listener within a second; the loop allows for it.
+                let result = try f.run([
+                    "run", "--rm", "--name", client, "--network", network, WarmupImage.alpine320.rawValue,
+                    "sh", "-ec",
+                    "grep -w host.docker.internal /etc/hosts; grep -w gateway.docker.internal /etc/hosts; "
+                        + "for i in 1 2 3 4 5; do wget -T 5 -qO- \"$1\" && exit 0; sleep 1; done; exit 1", "--",
+                    "http://host.docker.internal:\(port)/payload",
+                ]).check()
+                #expect(result.output.hasSuffix(payload), "network \(network): \(result.output)")
+            }
+        }
+    }
+
+    @available(macOS 26, *)
+    @Test func testAnInternalNetworkGetsTheNamesButNoLoopbackRelay() async throws {
+        try await ContainerFixture.with { f in
+            let loopbackOnly = try LoopbackFileServer(serving: Data("loopback-\(f.testID)".utf8))
+            defer { loopbackOnly.shutdown() }
+            let everywhere = try LoopbackFileServer(serving: Data("everywhere-\(f.testID)".utf8), bindHost: "0.0.0.0")
+            defer { everywhere.shutdown() }
+            let loopbackPort = try #require(loopbackOnly.url.port)
+            let everywherePort = try #require(everywhere.url.port)
+            let net = "\(f.testID)-internal"
+            f.addCleanup { f.doNetworkDeleteIfExists(net) }
+            try f.doNetworkCreate(net, args: ["--internal"])
+            let client = "\(f.testID)-internal-client"
+            f.addCleanup { try? f.doRemove(client, force: true) }
+            // As with Docker's --internal, the gateway's own services answer and nothing else
+            // of the Mac does: the loopback-only one stays out of reach, however long it waits.
+            let result = try f.run([
+                "run", "--rm", "--name", client, "--network", net, WarmupImage.alpine320.rawValue,
+                "sh", "-c",
+                "grep -qw host.docker.internal /etc/hosts && echo NAMED; wget -T 5 -qO- \"$1\"; echo; "
+                    + "for i in 1 2 3; do wget -T 3 -qO- \"$2\" && exit 0; sleep 1; done; echo NO-RELAY", "--",
+                "http://host.docker.internal:\(everywherePort)/payload", "http://host.docker.internal:\(loopbackPort)/payload",
+            ]).check()
+            #expect(result.output.contains("NAMED"))
+            #expect(result.output.contains("everywhere-\(f.testID)"))
+            #expect(result.output.contains("NO-RELAY"))
+            #expect(!result.output.contains("loopback-\(f.testID)"))
+        }
+    }
+
+    @Test func testExplicitAddHostWinsOverHostDockerInternal() async throws {
+        try await ContainerFixture.with { f in
+            let client = "\(f.testID)-client"
+            f.addCleanup { try? f.doRemove(client, force: true) }
+            let result = try f.run([
+                "run", "--rm", "--name", client, "--add-host", "host.docker.internal:203.0.113.7", WarmupImage.alpine320.rawValue,
+                "sh", "-ec", "grep -w host.docker.internal /etc/hosts",
+            ]).check()
+            #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "203.0.113.7 host.docker.internal")
         }
     }
 
