@@ -135,7 +135,9 @@ extension ContainerToolRoutes.Routes {
                 defer { pipes.forEach { $0.closeContainerEnd() } }
                 process = try await engine.createProcess(
                     snapshot, id: id, configuration: spec.process,
-                    stdio: DockerProcessStdio(stdin: stdinPipe?.containerHandle, stdout: stdoutPipe?.containerHandle, stderr: stderrPipe?.containerHandle))
+                    stdio: DockerProcessStdio(
+                        stdin: try stdinPipe?.containerHandleForEngine(), stdout: try stdoutPipe?.containerHandleForEngine(),
+                        stderr: try stderrPipe?.containerHandleForEngine()))
             }
             session = try await DockerStdioSession.connect(stdin: stdinPipe?.takeHost(), stdout: stdoutPipe?.takeHost(), stderr: stderrPipe?.takeHost())
             do {
