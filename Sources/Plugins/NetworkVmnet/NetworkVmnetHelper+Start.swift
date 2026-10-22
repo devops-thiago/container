@@ -26,6 +26,7 @@ import ContainerizationError
 import ContainerizationExtras
 import Foundation
 import Logging
+import NIOPosix
 import SystemPackage
 
 enum Variant: String, ExpressibleByArgument {
@@ -98,6 +99,13 @@ extension NetworkVmnetHelper {
                     log: log
                 )
                 try await network.start()
+                // host.docker.internal is the gateway: relay the Mac's loopback services there.
+                if let status = await network.status {
+                    let forwarder = HostLoopbackForwarder(
+                        gateway: status.ipv4Gateway, subnet: status.ipv4Subnet,
+                        eventLoopGroup: MultiThreadedEventLoopGroup.singleton, log: log)
+                    Task { await forwarder.run() }
+                }
                 let service = try await DefaultNetworkService(network: network, log: log)
                 let harness = NetworkHarness(service: service)
                 log.info("starting XPC server")

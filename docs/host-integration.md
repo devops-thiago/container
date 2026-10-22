@@ -51,21 +51,26 @@ Cloning into 'some-private-repo'...
 
 ## Access a host service from a container
 
-The simplest way is a hosts entry that points a name at this Mac:
+Every container on a network resolves `host.docker.internal` (and `gateway.docker.internal`) to
+the gateway of its first network, as Docker Desktop does, with no `--add-host`:
 
 ```bash
-container run -it --rm --add-host host.docker.internal:host-gateway alpine/curl curl http://host.docker.internal:8000
+container run -it --rm alpine/curl curl http://host.docker.internal:8000
 ```
 
-`host-gateway` becomes the gateway address of the container's first network, which is where
-the host answers. The container reaches a host service only if it listens on every interface
-(`0.0.0.0`, or `::`); one bound to `127.0.0.1` alone does not, the same as Docker on Linux. A
-container created with `--network none` cannot use `host-gateway` and is refused during create,
+A service listening on every interface (`0.0.0.0`, or `::`) answers at the gateway directly. One
+bound to `127.0.0.1` or `::1` alone (Ollama and most dev servers by default) answers too: each
+network's helper follows the Mac's TCP listeners and, for every port a service listens on at
+loopback only, listens on that network's gateway address and relays the connection to the
+loopback port. It listens on the network's bridge address only, never on every interface, and
+serves only clients inside the network's subnet, so nothing is exposed to the local network. A
+service that starts listening is reachable within about a second. TCP only.
+
+An explicit `--add-host host.docker.internal:<address>` replaces the built-in entry, and
+`--add-host <name>:host-gateway` names the same gateway. A container created with
+`--network none` has neither name, and cannot use `host-gateway`: it is refused during create,
 before a stopped container is saved. Explicit `--add-host` names override matching peer aliases;
 the peer's other aliases remain available.
-
-The DNS route below reaches services bound to `127.0.0.1` as well, at the cost of a
-`sudo` and the constraints it lists.
 
 ### With a DNS domain
 

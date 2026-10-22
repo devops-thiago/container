@@ -30,18 +30,24 @@ public struct TCPForwarder: SocketForwarder {
 
     private let log: Logger?
 
+    /// Which clients may use the forwarder; any other is closed before the backend is dialled.
+    /// `nil` takes every client.
+    private let acceptsPeer: (@Sendable (SocketAddress) -> Bool)?
+
     public init(
         proxyAddress: SocketAddress,
         serverAddress: SocketAddress,
         eventLoopGroup: any EventLoopGroup,
         connectTimeout: TimeAmount = .seconds(10),
-        log: Logger? = nil
+        log: Logger? = nil,
+        acceptsPeer: (@Sendable (SocketAddress) -> Bool)? = nil
     ) throws {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
         self.eventLoopGroup = eventLoopGroup
         self.connectTimeout = connectTimeout
         self.log = log
+        self.acceptsPeer = acceptsPeer
     }
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
@@ -55,6 +61,10 @@ public struct TCPForwarder: SocketForwarder {
             .childChannelOption(ChannelOptions.autoRead, value: false)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    if let acceptsPeer = self.acceptsPeer, !(channel.remoteAddress.map(acceptsPeer) ?? false) {
+                        try channel.pipeline.syncOperations.addHandler(RefusedPeerHandler())
+                        return
+                    }
                     try channel.pipeline.syncOperations.addHandler(
                         ConnectHandler(serverAddress: self.serverAddress, connectTimeout: self.connectTimeout, log: log)
                     )
@@ -65,5 +75,14 @@ public struct TCPForwarder: SocketForwarder {
             bootstrap
             .bind(to: self.proxyAddress)
             .map { SocketForwarderResult(channel: $0) }
+    }
+}
+
+/// Closes a connection from a client the forwarder does not serve, as soon as it is up.
+final class RefusedPeerHandler: ChannelInboundHandler, Sendable {
+    typealias InboundIn = ByteBuffer
+
+    func channelActive(context: ChannelHandlerContext) {
+        context.close(promise: nil)
     }
 }

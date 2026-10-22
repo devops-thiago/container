@@ -25,6 +25,9 @@ public struct SocketForwarderResult: Sendable {
 
     public var proxyAddress: SocketAddress? { self.channel.localAddress }
 
+    /// Whether the listener is still open.
+    public var isActive: Bool { self.channel.isActive }
+
     public func close() {
         self.channel.eventLoop.execute {
             _ = channel.close()
