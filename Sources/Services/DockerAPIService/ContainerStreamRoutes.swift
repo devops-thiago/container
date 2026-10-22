@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import NIOHTTP1
 
 /// `attach`, `wait` and `resize`: the streams `docker run` and `docker start -a` drive.
@@ -80,12 +81,13 @@ extension ContainerRoutes.Routes {
         let framer = DockerLogFramer(multiplexed: multiplexed, stream: options.stdout ? .stdout : .stderr, timestamps: false)
         let logOptions = streams.logOptions
         let engine = self.engine
-        let engineID = container.engineID
+        let run = container.snapshot
         return .hijack(multiplexed: multiplexed) { stream in
             defer { try? handle.close() }
             try? await DockerLogPump.run(
                 file: start, end: end, framer: framer, options: logOptions,
-                stillRunning: { (try await engine.get(engineID)).map(ContainerViewMapper.isRunning) ?? false },
+                // dockerd ends an attach's streams at the exit, as it does a followed log.
+                stillRunning: { (try await engine.get(run.id)).map { $0.isInRun(of: run) } ?? false },
                 present: { await stream.peerConnected() },
                 write: { try await stream.outbound.write($0) })
             await stream.drain()

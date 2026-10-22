@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Darwin
 import Foundation
 import NIOCore
@@ -93,6 +94,20 @@ struct DockerLogFile {
         return Data(bytes.prefix(read))
     }
 
+    /// The file was rewritten from the start since the last read: the engine's rollover of a
+    /// full log, or the start of the container's next run.
+    func isRewritten() throws -> Bool {
+        let headChanged = try !readHead().starts(with: head)
+        return try size() < offset || headChanged
+    }
+
+    /// The file has no name left: its container was deleted.
+    func isDeleted() throws -> Bool {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return info.st_nlink == 0
+    }
+
     func size() throws -> UInt64 {
         var info = stat()
         guard fstat(fd, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -160,7 +175,8 @@ extension ContainerToolRoutes.Routes {
     /// or as stderr when only stderr is asked for. `timestamps` stamps each line with when this
     /// service read it, not when it was written. `since` and `until` are accepted and ignored:
     /// the file has no times to filter by. `follow` looks at the file for new output until the
-    /// container stops or the client leaves.
+    /// container's run ends (it stops, restarts or is deleted) and its last output is sent, or
+    /// the client leaves.
     func logs(_ reference: String, _ request: DockerRequest) async throws -> DockerResponse {
         let stdout = try request.bool("stdout")
         let stderr = try request.bool("stderr")
@@ -190,28 +206,33 @@ extension ContainerToolRoutes.Routes {
         let initialFramer = DockerLogFramer(multiplexed: multiplexed, stream: stdout ? .stdout : .stderr, timestamps: timestamps)
         let engine = self.engine
         let options = self.options
-        let engineID = container.engineID
+        let run = container.snapshot
         let contentType = multiplexed ? "application/vnd.docker.multiplexed-stream" : "application/vnd.docker.raw-stream"
         return .stream(status: .ok, contentType: contentType) { writer in
             defer { try? handle.close() }
             try await DockerLogPump.run(
-                file: start, end: end, framer: initialFramer, options: options, stillRunning: { try await Self.stillRunning(engine, engineID) },
+                file: start, end: end, framer: initialFramer, options: options, stillRunning: { try await Self.stillInRun(engine, run) },
                 write: { try await writer.write($0) })
         }
     }
 
-    static func stillRunning(_ engine: Engine, _ engineID: String) async throws -> Bool {
-        guard let snapshot = try await engine.get(engineID) else { return false }
-        return ContainerViewMapper.isRunning(snapshot)
+    /// Whether the container is still in the run `run` was taken in. dockerd closes a
+    /// container's log at every exit, a restart's included, and a follower ends there; so does
+    /// this one, and a container that is not running is not followed at all.
+    static func stillInRun(_ engine: Engine, _ run: ContainerSnapshot) async throws -> Bool {
+        guard let snapshot = try await engine.get(run.id) else { return false }
+        return snapshot.isInRun(of: run)
     }
 }
 
 /// Sends a container's log file on, framed, as `logs` and an output-only `attach` do.
 enum DockerLogPump {
     /// Writes what the file holds from where `file` is: up to `end` when it is given, else on
-    /// and on, looking for new output every `logPollInterval`, until the container has
-    /// stopped (`stillRunning`, asked every `logStatusInterval`) and its last output is sent,
-    /// or `write` or `present` says the client is gone.
+    /// and on, looking for new output every `logPollInterval`, until the container's run has
+    /// ended (`stillRunning`, asked every `logStatusInterval` and when the file is rewritten
+    /// from the start, or the file deleted with the container) and its last output is sent, or
+    /// `write` or `present` says the client is gone. A file rewritten by the next run's start
+    /// is not sent.
     static func run(
         file start: DockerLogFile, end: UInt64?, framer initialFramer: DockerLogFramer, options: DockerToolOptions,
         stillRunning: () async throws -> Bool, present: () async -> Bool = { true }, write: (ByteBuffer) async throws -> Void
@@ -226,6 +247,14 @@ enum DockerLogPump {
         }
         while true {
             if let end, file.offset >= end { return }
+            if follow, try file.isRewritten() {
+                // The engine's rollover goes on being sent; the next run's start does not.
+                if !stopped {
+                    lastLook = .now
+                    stopped = try await !stillRunning()
+                }
+                if stopped { return }
+            }
             let chunk = try file.next()
             if !chunk.isEmpty {
                 try await write(framer.frame(chunk, at: options.now()))
@@ -234,7 +263,10 @@ enum DockerLogPump {
             // Everything there is has been sent: the last read after a stop has been made.
             if stopped { return }
             try await Task.sleep(for: options.logPollInterval)
-            if lastLook.duration(to: .now) >= options.logStatusInterval {
+            if try file.isDeleted() {
+                // Deleted with its container: one more read, for what is left in it.
+                stopped = true
+            } else if lastLook.duration(to: .now) >= options.logStatusInterval {
                 lastLook = .now
                 // A client that went away while the container was quiet has nothing to read.
                 if await !present() { return }
