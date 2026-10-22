@@ -28,10 +28,14 @@ public struct ExitRecord: Codable, Sendable, Equatable {
     /// ``ContainerSnapshot/stopRequested`` says. Kept with the exit it explains, so an engine
     /// start reads the answer the run's end gave. Nil in a record written before it was kept.
     public let stopRequested: Bool?
+    /// Whether the OOM killer killed a process in the container during the run, as
+    /// ``ContainerSnapshot/oomKilled`` says. Nil in a record written before it was kept.
+    public let oomKilled: Bool?
 
-    public init(exitCode: Int32, exitedAt: Date, stopRequested: Bool? = nil) {
+    public init(exitCode: Int32, exitedAt: Date, stopRequested: Bool? = nil, oomKilled: Bool? = nil) {
         self.exitCode = exitCode
         self.exitedAt = exitedAt
         self.stopRequested = stopRequested
+        self.oomKilled = oomKilled
     }
 }
