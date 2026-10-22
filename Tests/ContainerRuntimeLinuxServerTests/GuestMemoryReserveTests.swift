@@ -46,8 +46,9 @@ struct GuestMemoryReserveTests {
         let vmMiB = GuestMemoryReserve.vmBytes(forLimit: limitMiB * Self.mib) / Self.mib
         #expect(vmMiB == limitMiB + reserve / Self.mib)
         #expect(reserve % Self.mib == 0)
-        let memTotalMiB = vmMiB - Self.kernelKeepsMiB(vmMiB: vmMiB)
-        #expect(memTotalMiB - limitMiB >= 200)
+        // Signed: a reserve too small must fail here, not trap.
+        let memTotalMiB = Int64(vmMiB) - Int64(Self.kernelKeepsMiB(vmMiB: vmMiB))
+        #expect(memTotalMiB - Int64(limitMiB) >= 200)
     }
 
     @Test(
@@ -60,11 +61,11 @@ struct GuestMemoryReserveTests {
             (8192, 8_669_916),
         ])
     func measuredSizes(limitMiB: UInt64, memTotalKB: UInt64) {
-        let memTotalMiB = memTotalKB / 1024
+        let memTotalMiB = Int64(memTotalKB / 1024)
         let vmMiB = GuestMemoryReserve.vmBytes(forLimit: limitMiB * Self.mib) / Self.mib
-        #expect(memTotalMiB - limitMiB >= 200)
+        #expect(memTotalMiB - Int64(limitMiB) >= 200)
         // The kernel kept no more than the model says, so the model's room is the least there is.
-        #expect(vmMiB - memTotalMiB <= Self.kernelKeepsMiB(vmMiB: vmMiB))
+        #expect(Int64(vmMiB) - memTotalMiB <= Int64(Self.kernelKeepsMiB(vmMiB: vmMiB)))
     }
 
     @Test(
@@ -74,7 +75,7 @@ struct GuestMemoryReserveTests {
             (UInt64(1024), UInt64(1_127_716))
         ])
     func oldReserveWasTooSmall(limitMiB: UInt64, memTotalKB: UInt64) {
-        #expect(memTotalKB / 1024 - limitMiB < 166)
+        #expect(Int64(memTotalKB / 1024) - Int64(limitMiB) < 166)
     }
 
     @Test("a limit that is not whole MiB still gets a reserve of whole MiB")
