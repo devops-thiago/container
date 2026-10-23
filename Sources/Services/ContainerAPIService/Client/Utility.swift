@@ -41,7 +41,14 @@ public struct Utility {
     }
 
     public static func isInfraImage(name: String, builderImage: String, initImage: String) -> Bool {
-        for infraImage in [builderImage, initImage] {
+        // An upgrade to the backported guest leaves the previous upstream images in
+        // the store. Keep those known infrastructure repositories hidden as well;
+        // matching a basename such as "vminit" would hide unrelated user images.
+        let guestRepositories = [
+            "ghcr.io/apple/containerization/vminit",
+            "ghcr.io/devops-thiago/containerization/vminit",
+        ]
+        for infraImage in [builderImage, initImage] + guestRepositories {
             if name == infraImage {
                 return true
             }
