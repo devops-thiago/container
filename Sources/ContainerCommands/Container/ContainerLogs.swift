@@ -19,8 +19,6 @@ import ContainerAPIClient
 import ContainerLog
 import ContainerResource
 import ContainerizationError
-import Darwin
-import Dispatch
 import Foundation
 
 extension Application {
@@ -51,80 +49,56 @@ extension Application {
 
         public func run() async throws {
             let client = ContainerClient()
-            // Taken before the log is read: a run that ends while it is printed is still seen
-            // ending. As dockerd does, only a running container is followed, and only for as
-            // long as the run it is in: a stopped one's log is printed and the command ends.
-            let run = follow ? try await client.get(id: containerId) : nil
+            // As dockerd does, only a running container is followed, and only for as long as the
+            // run it is in: a stopped one's log is printed and the command ends.
+            let first = follow ? try await client.get(id: containerId) : nil
             let fhs = try await client.logs(id: containerId)
-            let fileHandle = boot ? fhs[1] : fhs[0]
+            let handle = boot ? fhs[1] : fhs[0]
+            let id = containerId
+            let lines = numLines
+            // Placed on the log within the run it follows, so the next run's log is never taken
+            // for this one's.
+            let (run, reader) = try await ContainerSnapshot.startFollowing(first, look: { try await Self.look(id, client: client) }) {
+                var reader = try LogFileReader(handle: handle)
+                try reader.seek(tail: lines)
+                return reader
+            }
+            guard let run else {
+                try Self.printLog(from: reader)
+                return
+            }
+            try await LogFileFollow.follow(handle, from: reader, runEnded: { try await Self.runEnded(run, client: client) }) { data in
+                // Preserve raw stream bytes, including partial lines and UTF-8 scalars
+                // split between reads. Converting each chunk to String loses both.
+                FileHandle.standardOutput.write(data)
+            }
+        }
 
-            try await Self.tail(
-                fh: fileHandle,
-                n: numLines,
-                runEnded: run.flatMap { run in
-                    guard run.hasLiveProcess else { return nil }
-                    return { try await Self.runEnded(run, client: client) }
-                }
-            )
+        /// The container now, or nil when it is gone.
+        static func look(_ id: String, client: ContainerClient) async throws -> ContainerSnapshot? {
+            do {
+                return try await client.get(id: id)
+            } catch let error as ContainerizationError where error.isCode(.notFound) {
+                return nil
+            }
         }
 
         /// Whether the container has left the run `run` was taken in: stopped, waiting to
         /// restart, started again, or deleted.
         static func runEnded(_ run: ContainerSnapshot, client: ContainerClient) async throws -> Bool {
-            do {
-                return try await !client.get(id: run.id).isInRun(of: run)
-            } catch let error as ContainerizationError where error.isCode(.notFound) {
-                return true
-            }
+            try await !(look(run.id, client: client)?.isInRun(of: run) ?? false)
         }
 
-        private static func tail(
-            fh: FileHandle,
-            n: Int?,
-            runEnded: (@Sendable () async throws -> Bool)?
-        ) async throws {
-            if let n {
-                var buffer = Data()
-                let size = try fh.seekToEnd()
-                var offset = size
-                var lines: [String] = []
-
-                while offset > 0, lines.count < n {
-                    let readSize = min(1024, offset)
-                    offset -= readSize
-                    try fh.seek(toOffset: offset)
-
-                    let data = fh.readData(ofLength: Int(readSize))
-                    buffer.insert(contentsOf: data, at: 0)
-
-                    if let chunk = String(data: buffer, encoding: .utf8) {
-                        lines = chunk.components(separatedBy: .newlines)
-                        lines = lines.filter { !$0.isEmpty }
-                    }
-                }
-
-                lines = Array(lines.suffix(n))
-                for line in lines {
-                    print(line)
-                }
-            } else {
-                // Preserve raw bytes: a retained segment can start mid-line or mid-scalar.
-                // Empty logs must still enter follow mode and wait for the first output.
-                let data = try fh.readToEnd() ?? Data()
-                FileHandle.standardOutput.write(data)
-            }
-
-            fflush(stdout)
-            if let runEnded {
-                setbuf(stdout, nil)
-                try await Self.followFile(fh: fh, runEnded: runEnded)
-            }
-        }
-
-        private static func followFile(fh: FileHandle, runEnded: @escaping @Sendable () async throws -> Bool) async throws {
-            try await LogFileFollow.follow(fh, runEnded: runEnded) { data in
-                // Preserve raw stream bytes, including partial lines and UTF-8 scalars
-                // split between reads. Converting each chunk to String loses both.
+        /// What the log holds from where `start` is, as raw bytes: a retained segment can start
+        /// mid-line or mid-scalar, and blank lines are the container's output too. Up to the end it
+        /// had when the print began, so a container writing faster than this prints does not keep
+        /// it going.
+        private static func printLog(from start: LogFileReader) throws {
+            var reader = start
+            let end = try reader.size()
+            while reader.offset < end {
+                let data = try reader.next()
+                if data.isEmpty { break }
                 FileHandle.standardOutput.write(data)
             }
         }

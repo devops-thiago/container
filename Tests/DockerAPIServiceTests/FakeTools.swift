@@ -78,6 +78,8 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     var copyInGate: DockerLatch?
     /// The container's status at each copy in, in order.
     private(set) var copyInStatuses: [RuntimeStatus?] = []
+    /// Runs as the container's log is opened, before it is handed over.
+    var onLogOpen: (@Sendable () throws -> Void)?
 
     init(snapshots: [ContainerSnapshot]) throws {
         base = FakeEngine(snapshots: snapshots)
@@ -234,7 +236,9 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         guard let current = base.snapshot(container.id), ContainerViewMapper.hasRun(current) else {
             throw DockerAPIError.internalError("no log for container \(container.id)")
         }
-        return try FileHandle(forReadingFrom: logFile)
+        let handle = try FileHandle(forReadingFrom: logFile)
+        try lock.withLock { onLogOpen }?()
+        return handle
     }
 
     func stats(_ container: ContainerSnapshot) async throws -> ContainerStats {
