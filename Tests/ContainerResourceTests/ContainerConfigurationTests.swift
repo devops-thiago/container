@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import Foundation
 import Testing
 
@@ -192,6 +193,55 @@ struct ContainerCPUBoundTests {
         try resources.validateCPUs()
         resources.cpus += 1
         #expect(throws: Error.self) { try resources.validateCPUs() }
+    }
+}
+
+struct ContainerMemoryBoundTests {
+    private static let mib: UInt64 = 1024 * 1024
+    private static let vm: UInt64 = 32 << 30
+
+    @Test("limits whose VM fits are kept, up to the largest")
+    func keepsLimitsAVMCanHave() throws {
+        var resources = ContainerConfiguration.Resources()
+        for limit in [200 * Self.mib, 1 << 30, 16 << 30, 31_495 * Self.mib] {
+            resources.memoryInBytes = limit
+            try resources.validateMemory(virtualMemory: Self.vm)
+        }
+    }
+
+    @Test(
+        "a limit whose VM cannot fit is refused before it overflows the runtime",
+        arguments: [(31_495 << 20) + 1, 31_496 << 20, 32 << 30, UInt64(Int64.max), UInt64.max - 1, UInt64.max] as [UInt64])
+    func refusesLimitsNoVMCanHave(limit: UInt64) {
+        var resources = ContainerConfiguration.Resources()
+        resources.memoryInBytes = limit
+        let error = #expect(throws: ContainerizationError.self) { try resources.validateMemory(virtualMemory: Self.vm) }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("the most a container can have is 31495 MiB") == true)
+    }
+
+    @Test("a saved limit no VM can have is brought down to the largest, and the rest kept", arguments: [UInt64(64) << 30, UInt64.max])
+    func clampsSavedLimits(limit: UInt64) throws {
+        var resources = ContainerConfiguration.Resources()
+        resources.memoryInBytes = limit
+        resources.cpus = 3
+        let clamped = resources.clampedMemory(virtualMemory: Self.vm)
+        #expect(clamped.memoryInBytes == 31_495 * Self.mib)
+        #expect(clamped.cpus == 3)
+        try clamped.validateMemory(virtualMemory: Self.vm)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: clamped.memoryInBytes) <= Self.vm)
+    }
+
+    @Test("the production limit is Virtualization's")
+    func productionLimit() throws {
+        let maximum = ContainerConfiguration.Resources.maximumMemoryLimit()
+        #expect(maximum > 0)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: maximum) <= ContainerConfiguration.Resources.maximumVirtualMemory)
+        var resources = ContainerConfiguration.Resources()
+        resources.memoryInBytes = maximum
+        try resources.validateMemory()
+        resources.memoryInBytes = maximum + Self.mib
+        #expect(throws: ContainerizationError.self) { try resources.validateMemory() }
     }
 }
 

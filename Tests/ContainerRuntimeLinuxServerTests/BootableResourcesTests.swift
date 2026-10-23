@@ -52,6 +52,26 @@ struct BootableResourcesTests {
         #expect(bootable.memoryInBytes == 1_073_741_824)
     }
 
+    @Test(
+        "a saved memory limit no VM can have boots at the largest, sized without overflowing",
+        arguments: [UInt64(64) << 30, UInt64(Int64.max), UInt64.max])
+    func clampsSavedMemory(limit: UInt64) throws {
+        let json = #"{"cpus":2,"memoryInBytes":\#(limit),"cpuOverhead":1}"#
+        let resources = try JSONDecoder().decode(ContainerConfiguration.Resources.self, from: Data(json.utf8))
+        let vm: UInt64 = 32 << 30
+        let bootable = RuntimeService.bootableResources(resources, virtualMemory: vm)
+        #expect(bootable.memoryInBytes == ContainerConfiguration.Resources.maximumMemoryLimit(virtualMemory: vm))
+        #expect(bootable.cpus == 2)
+        let vmBytes = GuestMemoryReserve.vmBytes(forLimit: bootable.memoryInBytes)
+        #expect(vmBytes <= vm)
+        #expect(!vmBytes.addingReportingOverflow((1 << 20) - 1).overflow)
+    }
+
+    @Test("a saved memory limit a VM can have boots unchanged")
+    func keepsSavedMemory() throws {
+        #expect(RuntimeService.bootableResources(try saved(cpus: 2)).memoryInBytes == 1_073_741_824)
+    }
+
     @Test("every count a VM can have boots unchanged", arguments: [0, 1, 4, 63, 64])
     func keepsValidCounts(cpus: Int) throws {
         let bootable = RuntimeService.bootableResources(try saved(cpus: cpus))

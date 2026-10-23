@@ -443,6 +443,9 @@ struct PlanTests {
         #expect(failure("services:\n  a:\n    image: a\n    sysctls:\n      - no-equals-sign\n").count == 1)
         #expect(failure("services:\n  a:\n    image: a\n    extra_hosts:\n      - \"name:not an address\"\n").count == 1)
         #expect(failure("services:\n  a:\n    image: a\n    ulimits:\n      imaginary: 5\n").count == 1)
+        // A limit whose VM no Mac can give, and one too large to count.
+        #expect(failure("services:\n  a:\n    image: a\n    mem_limit: 100000g\n").first?.contains("the most a container can have is") == true)
+        #expect(failure("services:\n  a:\n    image: a\n    mem_limit: 99999999999999999999999999p\n").count == 1)
     }
 }
 

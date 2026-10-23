@@ -17,7 +17,7 @@
 import Foundation
 import Testing
 
-@testable import ContainerRuntimeLinuxServer
+@testable import ContainerResource
 
 /// The VM around a container's memory limit: the limit stays the container's `memory.max`,
 /// and the VM adds a reserve sized so the guest outside the container's cgroup keeps working
@@ -86,8 +86,44 @@ struct GuestMemoryReserveTests {
         #expect(reserve == 321 * Self.mib)
     }
 
-    @Test("a limit no VM could have saturates instead of trapping", arguments: [UInt64.max, UInt64.max - 1, UInt64.max - 255 * 1024 * 1024])
-    func saturates(limit: UInt64) {
-        #expect(GuestMemoryReserve.vmBytes(forLimit: limit) == UInt64.max)
+    @Test(
+        "no limit gives a VM size the VMMs' rounding overflows on",
+        arguments: [
+            UInt64.max, UInt64.max - 1, UInt64.max - 255 * 1024 * 1024, UInt64(Int64.max), UInt64(Int64.max) + 1, 1 << 62, (1 << 62) + 1,
+            UInt64.max / 33 * 32, 1024 * 1024 * 1024 + 1,
+        ] as [UInt64])
+    func neverOverflowsTheRounding(limit: UInt64) {
+        let vm = GuestMemoryReserve.vmBytes(forLimit: limit)
+        // Containerization's Virtualization rounding, `(memoryInBytes + mib - 1) & ~(mib - 1)`.
+        #expect(!vm.addingReportingOverflow(Self.mib - 1).overflow)
+        #expect(vm % Self.mib == 0)
+        // Its Cloud Hypervisor rounding, to 2 MiB.
+        #expect(!vm.addingReportingOverflow(2 * Self.mib - 1).overflow)
+        // Its cgroup limit, `Int64(memoryInBytes)`.
+        #expect(vm <= UInt64(Int64.max))
+        #expect(vm >= min(limit, GuestMemoryReserve.ceilingBytes))
+    }
+
+    @Test(
+        "the largest limit is the last whose VM fits",
+        arguments: [8 << 30, 32 << 30, 33 << 30, 64 << 30, 192 << 30, 1 << 40, UInt64.max] as [UInt64])
+    func largestLimit(vm: UInt64) {
+        let largest = GuestMemoryReserve.largestLimit(forVMBytes: vm)
+        #expect(largest % Self.mib == 0)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: largest) <= vm)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: largest + Self.mib) > vm || largest + Self.mib > GuestMemoryReserve.ceilingBytes)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: largest + 1) > vm || largest + Self.mib > GuestMemoryReserve.ceilingBytes)
+    }
+
+    @Test("a 32 GiB VM holds a container of up to 31,495 MiB")
+    func largestLimitFor32GiB() {
+        // 31_495 + 288 + ceil(31_495 / 32) = 31_495 + 288 + 985 = 32_768 MiB; one more MiB is 32_769.
+        #expect(GuestMemoryReserve.largestLimit(forVMBytes: 32 << 30) == 31_495 * Self.mib)
+        #expect(GuestMemoryReserve.vmBytes(forLimit: 31_496 * Self.mib) == 32_769 * Self.mib)
+    }
+
+    @Test("a VM too small for the reserve holds no container")
+    func largestLimitBelowTheReserve() {
+        #expect(GuestMemoryReserve.largestLimit(forVMBytes: 200 * Self.mib) == 0)
     }
 }

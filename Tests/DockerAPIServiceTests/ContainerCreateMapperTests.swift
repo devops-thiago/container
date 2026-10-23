@@ -447,6 +447,21 @@ struct ContainerCreateMapperTests {
         #expect(errorMessage { _ = try Fixtures.plan(#"{"Image":"a","HostConfig":{"NanoCpus":1000000000,"CpuCount":2}}"#) }?.status == .badRequest)
     }
 
+    @Test("a memory limit whose VM cannot fit is refused the way Docker's minimum is", arguments: [Int64(31_496 << 20), 64 << 30, Int64.max])
+    func memoryUpperBound(memory: Int64) throws {
+        func memoryInBytes(_ memory: Int64) throws -> UInt64 {
+            let host = try JSONDecoder().decode(DockerHostConfig.self, from: Data(#"{"Memory":\#(memory)}"#.utf8))
+            return try ContainerCreateMapper.resources(host, defaults: Fixtures.defaults, virtualMemory: 32 << 30).memoryInBytes
+        }
+        #expect(errorMessage { _ = try memoryInBytes(memory) } == .badRequest("Maximum memory limit allowed is 31495MB, as a container's VM can have at most 32768MB"))
+        #expect(try memoryInBytes(31_495 << 20) == 31_495 << 20)
+    }
+
+    @Test("an absurd memory limit is refused on any Mac")
+    func memoryFarPastAnyVM() {
+        #expect(errorMessage { _ = try Fixtures.plan(#"{"Image":"a","HostConfig":{"Memory":9223372036854775807}}"#) }?.status == .badRequest)
+    }
+
     @Test("extra hosts take host-gateway and either separator; a bad address is refused")
     func extraHosts() throws {
         let hosts = try Fixtures.plan(#"{"Image":"a","HostConfig":{"ExtraHosts":["host.docker.internal:host-gateway","db=10.0.0.5","v6:::1"]}}"#)

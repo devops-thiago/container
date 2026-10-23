@@ -56,7 +56,11 @@ public struct MemorySize: Codable, Sendable, Equatable, CustomStringConvertible 
 }
 
 extension MemorySize {
+    /// The size in `unit`, saturating at `UInt64.max` for one no count can hold, so a size
+    /// that was saved or typed too large is refused where it is checked instead of trapping.
     public func toUInt64(unit: UnitInformationStorage) -> UInt64 {
-        UInt64(self.measurement.converted(to: unit).value.rounded())
+        let value = self.measurement.converted(to: unit).value.rounded()
+        guard !value.isNaN, value > 0 else { return 0 }
+        return value < 0x1p64 ? UInt64(value) : UInt64.max
     }
 }
