@@ -1345,9 +1345,12 @@ public actor ContainersService {
 
     /// Copy a file or directory from the container to the host.
     ///
-    /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
+    /// - Parameters:
+    ///   - requester: who asked for the copy, which a folder-permission panel names.
+    ///   - recordOwners: keep each copied file's owner in the container on it
+    ///     (`CopyOwner.record(_:at:)`).
     public func copyOut(
-        id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil
+        id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil, recordOwners: Bool = false
     ) async throws {
         self.log.debug("\(#function)")
 
@@ -1359,7 +1362,8 @@ public actor ContainersService {
         let bookmark = try await Self.copyHostDirectoryBookmark(for: destination, verb: "write") {
             await HostDirectoryGrants.shared.lend($0, requester: requester)
         }
-        try await client.copyOut(source: source, destination: destination, createParents: createParents, hostDirectoryBookmark: bookmark)
+        try await client.copyOut(
+            source: source, destination: destination, createParents: createParents, recordOwners: recordOwners, hostDirectoryBookmark: bookmark)
     }
 
     /// Whether a copy in can reach the container's filesystem: while it runs, and between its

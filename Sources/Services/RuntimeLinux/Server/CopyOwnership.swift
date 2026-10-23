@@ -230,3 +230,77 @@ enum CopyArchive {
         ContainerizationError(.internalError, message: "copyIn: \(call) failed for '\(path)': \(String(cString: strerror(errno)))")
     }
 }
+
+/// The owners a copy out of a container keeps on its copy, for an archive of it that carries
+/// them, as dockerd's archive of a container path carries each file's own uid and gid.
+///
+/// The agent sends a directory as a gzipped pax archive whose entries name their owners in the
+/// container, and containerization's `extractContents` gives each file it unpacks that owner
+/// with `fchown`, which fails unseen for an engine that is not root. So the owners go on the
+/// copy the way a copy in keeps them, in `CopyOwner`'s extended attribute.
+enum CopyOutOwners {
+    /// Unpacks the archive on `input` into `destination` with containerization's
+    /// `extractContents`, then records on each entry it unpacked the owner the archive names.
+    /// The archive is read twice, so it is spooled first.
+    static func unpack(_ input: FileHandle, into destination: URL) throws {
+        let spool = FileManager.default.temporaryDirectory.appending(path: "copy-out-\(UUID().uuidString).tar.gz")
+        let spoolPath = spool.path(percentEncoded: false)
+        guard FileManager.default.createFile(atPath: spoolPath, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+            throw ContainerizationError(.internalError, message: "copyOut: could not store the archive at '\(spoolPath)'")
+        }
+        defer { try? FileManager.default.removeItem(at: spool) }
+        let output = try FileHandle(forWritingTo: spool)
+        do {
+            while let chunk = try input.read(upToCount: VminitdCopyAgent.chunkSize), !chunk.isEmpty {
+                try output.write(contentsOf: chunk)
+            }
+            try output.close()
+        } catch {
+            try? output.close()
+            throw error
+        }
+        let rejected = Set(try ArchiveReader(format: .pax, filter: .gzip, file: spool).extractContents(to: destination))
+        let reader = try ArchiveReader(format: .pax, filter: .gzip, file: spool)
+        let root = destination.path(percentEncoded: false)
+        for (entry, _) in reader.makeStreamingIterator() {
+            guard let name = entry.path, !rejected.contains(FilePath(name).string), let uid = entry.owner, let gid = entry.group,
+                let path = confined(name, under: root)
+            else { continue }
+            // An owner that cannot be noted leaves the file as the host has it, as before.
+            try? record(CopyOwner(uid: uid, gid: gid), at: path)
+        }
+        try reader.throwIfStreamFailed()
+    }
+
+    /// The path of the entry `name` under `root`, when every directory on the way is one
+    /// `extractContents` made: never through a symlink, never out with `..`.
+    static func confined(_ name: String, under root: String) -> String? {
+        var path = root
+        let components = name.split(separator: "/").filter { $0 != "." }
+        for (index, component) in components.enumerated() {
+            guard component != ".." else { return nil }
+            if index > 0 {
+                var info = stat()
+                guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return nil }
+            }
+            path += "/" + component
+        }
+        return path
+    }
+
+    /// `CopyOwner.record`, on a file whose mode does not let its owner write it too: macOS
+    /// asks for write access to set an extended attribute, so the mode is opened for the
+    /// owner while it is set and put back after.
+    static func record(_ owner: CopyOwner, at path: String) throws {
+        do {
+            try CopyOwner.record(owner, at: path)
+        } catch let error as POSIXError where error.code == .EACCES {
+            var info = stat()
+            guard lstat(path, &info) == 0, info.st_mode & S_IFMT != S_IFLNK else { throw error }
+            let mode = info.st_mode & 0o7777
+            guard chmod(path, mode | S_IRUSR | S_IWUSR) == 0 else { throw error }
+            defer { chmod(path, mode) }
+            try CopyOwner.record(owner, at: path)
+        }
+    }
+}
