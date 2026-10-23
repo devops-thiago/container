@@ -19,6 +19,7 @@ import Containerization
 import ContainerizationArchive
 import ContainerizationError
 import Foundation
+import GRPCCore
 import Synchronization
 import SystemPackage
 
@@ -29,10 +30,10 @@ protocol GuestCopyAgent: Sendable {
     func identity(root: String, path: String) async throws -> GuestFileIdentity?
     /// Copy `source` on the host to `path` under `root`. The agent resolves `path` confined to
     /// `root` (openat2 with `RESOLVE_IN_ROOT`): a symlink or `..` in the image is followed as
-    /// if `root` were `/`, so the write can never land outside it. Both go as an archive the
-    /// agent unpacks, which gives each entry the owner it names (`CopyArchive`): a directory's
-    /// at `path`, a file's as the one entry at `path`, replacing what is there. `owner`, when
-    /// given, owns everything copied (`copyUIDGID`).
+    /// if `root` were `/`, so the write can never land outside it. Directories travel as an
+    /// archive; files travel as bytes with their owner in the RPC. The guest opens the file
+    /// without replacing a directory or final symlink. `owner`, when given, owns everything
+    /// copied (`copyUIDGID`).
     func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws
     /// Copy `path` under `root` to `destination` on the host: a directory's contents into
     /// `destination`, a regular file as `destination`. The agent resolves `path` confined to
@@ -96,6 +97,7 @@ enum PrestartCopy {
 struct VminitdCopyAgent: GuestCopyAgent {
     let agent: Vminitd
     let vm: any VirtualMachineInstance
+    var noOverwriteDirNonDir = false
 
     /// Host vsock ports for these copies: a range of their own, apart from containerization's
     /// per-container allocator (which starts at 0x1000_0000), taken in turn.
@@ -114,49 +116,60 @@ struct VminitdCopyAgent: GuestCopyAgent {
     }
 
     func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws {
-        let unpack = Self.unpackPoint(for: path, isDirectory: isDirectory)
-        if !isDirectory, !createParents {
-            // The agent makes the directory an archive is unpacked in: a file copy that may
-            // not make its parents fails here instead, as the agent fails a file it cannot open.
-            guard try await identity(root: root, path: unpack.directory)?.isDirectory == true else {
-                throw ContainerizationError(.notFound, message: "copyIn: no directory '\(unpack.directory)' to copy '\(path)' into")
-            }
-        }
+        let fileOwner = isDirectory ? nil : try Self.fileOwner(source, override: owner)
         let port = Self.port()
         let listener = try vm.listen(port)
         defer { try? listener.finish() }
         try await Self.runCopyTasks(
             rpc: {
                 try await Self.requestCopy(
-                    agent: agent, root: root, path: unpack.directory, port: port, mode: mode, createParents: createParents)
+                    agent: agent, root: root, path: path, port: port, mode: mode, createParents: createParents,
+                    isDirectory: isDirectory, owner: fileOwner, noOverwriteDirNonDir: noOverwriteDirNonDir)
             },
             transfer: {
                 guard let connection = await listener.first(where: { _ in true }) else {
                     throw ContainerizationError(.internalError, message: "copyIn: the VM did not connect for the copy")
                 }
                 try listener.finish()
-                try await Self.send(source, isDirectory: isDirectory, name: unpack.name, mode: mode, owner: owner, to: connection)
+                try await Self.send(source, isDirectory: isDirectory, name: ".", mode: mode, owner: owner, to: connection)
             },
             closeListener: { try? listener.finish() })
     }
 
-    /// Where the agent unpacks the archive for a copy to `path`, and the name a file's one
-    /// entry has in it: a directory's archive at `path` itself, a file's in `path`'s parent.
-    static func unpackPoint(for path: String, isDirectory: Bool) -> (directory: String, name: String) {
-        guard !isDirectory else { return (path, ".") }
-        let file = FilePath(path)
-        let parent = file.removingLastComponent()
-        return (parent.isEmpty ? "/" : parent.string, file.lastComponent?.string ?? path)
+    static func fileOwner(_ source: URL, override: CopyOwner?) throws -> CopyOwner {
+        var info = stat()
+        guard stat(source.path, &info) == 0 else {
+            throw ContainerizationError(.notFound, message: "copyIn: cannot stat source '\(source.path)'")
+        }
+        return CopyArchive.owner(of: source.path, info: info, override: override)
     }
 
-    /// Every copy in is an archive, so that the agent gives what it writes the owner the
-    /// archive names: the agent writes a payload sent as a plain file as root, and keeps the
-    /// owner of a file it overwrites. The RPC and the payload must agree: otherwise the guest
-    /// writes the archive bytes as a regular file. Keep this at the real Vminitd boundary so
-    /// tests can decode the request.
-    static func requestCopy(agent: Vminitd, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool) async throws {
-        try await agent.copy(
-            direction: .copyIn, root: root, path: path, vsockPort: port, mode: mode, createParents: createParents, isArchive: true)
+    /// The separate owned-file operation makes an old guest reject the request before any
+    /// write. Never fall back to a plain copy that silently loses the requested ownership.
+    static func requestCopy(
+        agent: Vminitd, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool,
+        isDirectory: Bool, owner: CopyOwner?, noOverwriteDirNonDir: Bool = false
+    ) async throws {
+        guard isDirectory || owner != nil else {
+            throw ContainerizationError(.invalidArgument, message: "copyIn: file ownership is required")
+        }
+        let direction: Com_Apple_Containerization_Sandbox_V3_CopyRequest.Direction =
+            isDirectory ? (noOverwriteDirNonDir ? .copyInCheckedArchive : .copyIn) : .copyInOwnedFile
+        do {
+            try await agent.copy(
+                direction: direction, root: root, path: path, vsockPort: port,
+                mode: mode, createParents: createParents, isArchive: isDirectory,
+                ownerUID: owner?.uid, ownerGID: owner?.gid)
+        } catch let error as RPCError
+            where error.code == .invalidArgument
+            && error.message == "copy: unrecognized direction \(direction.rawValue)"
+        {
+            throw ContainerizationError(
+                .unsupported,
+                message:
+                    "This container's guest agent needs an update for safe copies. Stop it, run 'container system upgrade-guest <container>', then start it again. This replaces the guest agent and preserves workload data.",
+                cause: error)
+        }
     }
 
     static func runCopyTasks(
@@ -224,11 +237,19 @@ struct VminitdCopyAgent: GuestCopyAgent {
             closeListener: { try? listener.finish() })
     }
 
-    /// Writes `source` to `connection` off the cooperative pool as the archive `CopyArchive`
-    /// makes of it, and closes it.
+    /// Streams files as bytes and directories as archives, off the cooperative pool.
     static func send(_ source: URL, isDirectory: Bool, name: String, mode: UInt32, owner: CopyOwner?, to connection: FileHandle) async throws {
         try await transfer(over: connection) { fd in
-            try CopyArchive.write(source, isDirectory: isDirectory, name: name, mode: mode, owner: owner, to: fd)
+            if isDirectory {
+                try CopyArchive.write(source, isDirectory: true, name: name, mode: mode, owner: owner, to: fd)
+            } else {
+                let input = try FileHandle(forReadingFrom: source)
+                defer { try? input.close() }
+                let output = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+                while let chunk = try input.read(upToCount: chunkSize), !chunk.isEmpty {
+                    try output.write(contentsOf: chunk)
+                }
+            }
         }
     }
 

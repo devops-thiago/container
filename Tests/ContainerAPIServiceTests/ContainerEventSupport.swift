@@ -141,6 +141,7 @@ final class FakeRuntime: Sendable {
         var closed = false
         /// Copies in and starts, in the order they came.
         var calls: [String] = []
+        var noOverwritePolicies: [Bool] = []
         /// What the runtime says of the OOM killer in its state: nil, as a runtime that does
         /// not say, until the test sets it.
         var oomKilled: Bool?
@@ -230,6 +231,7 @@ final class FakeRuntime: Sendable {
                 let source = URL(fileURLWithPath: message.string(key: RuntimeKeys.sourcePath.rawValue) ?? "")
                 let destination = message.string(key: RuntimeKeys.destinationPath.rawValue) ?? ""
                 let content = (try? String(contentsOf: source, encoding: .utf8)) ?? "?"
+                shared.state.withLock { $0.noOverwritePolicies.append(message.bool(key: RuntimeKeys.noOverwriteDirNonDir.rawValue)) }
                 shared.state.withLock { $0.calls.append("copyIn \(source.lastPathComponent)=\(content) \(destination)") }
                 if behavior.copyInFailures.contains(source.lastPathComponent) {
                     throw ContainerizationError(.internalError, message: "disk full")
@@ -257,6 +259,8 @@ final class FakeRuntime: Sendable {
         let server = XPCServer(connection: listener, routes: routes, log: Logger(label: "FakeRuntime"))
         listening = Task { try? await server.listen() }
     }
+
+    var noOverwritePolicies: [Bool] { shared.state.withLock { $0.noOverwritePolicies } }
 
     /// A client of this runtime, as the service makes one for a container.
     func client(id: String, runtime: String) -> RuntimeClient {
@@ -330,6 +334,8 @@ final class EventServiceFixture: Sendable {
     /// Makes the next start fail at its launch, as a helper that cannot be registered does.
     let failNextLaunch = Mutex(false)
     let deregistered = Mutex<[String]>([])
+    let guestImage = Mutex<Filesystem?>(nil)
+    let beforeGuestFetch = Mutex<(@Sendable () async throws -> Void)?>(nil)
 
     init(limits: ContainerEventHub.Limits = .init()) {
         hub = ContainerEventHub(processNonce: UUID().uuidString, limits: limits, log: Logger(label: "ContainerEventTests"))
@@ -404,8 +410,9 @@ final class EventServiceFixture: Sendable {
                 return runtime.client(id: configuration.id, runtime: configuration.runtimeHandler)
             },
             deregister: { [self] label in deregistered.withLock { $0.append(label) } },
-            initFilesystem: { _, _ in
-                .block(format: "ext4", source: "/dev/null", destination: "/", options: ["ro"])
+            initFilesystem: { [self] _, _ in
+                if let before = beforeGuestFetch.withLock({ $0 }) { try await before() }
+                return guestImage.withLock { $0 } ?? .block(format: "ext4", source: "/dev/null", destination: "/", options: ["ro"])
             })
     }
 

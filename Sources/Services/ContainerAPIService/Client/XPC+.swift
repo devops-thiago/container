@@ -231,6 +231,7 @@ public enum XPCRoute: String {
     /// A subscription to container events: the reply carries the read end of a pipe of them.
     case containerEvent
     /// Set labels on a container, of the keys the server allows to change.
+    case containerUpgradeGuest
     case containerUpdateLabels
     case containerStats
     case containerDiskUsage

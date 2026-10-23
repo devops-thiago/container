@@ -412,6 +412,17 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    @Sendable
+    public func upgradeGuest(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id), ManagedContainer.nameValid(id),
+            let incarnation = message.string(key: .expectedIncarnation), !incarnation.isEmpty
+        else {
+            throw ContainerizationError(.invalidArgument, message: "guest upgrade requires a container ID and incarnation")
+        }
+        try await service.upgradeGuest(id: id, expectedIncarnation: incarnation)
+        return message.reply()
+    }
+
     /// Set labels on a container, of the keys the service lets change.
     @Sendable
     public func updateLabels(_ message: XPCMessage) async throws -> XPCMessage {

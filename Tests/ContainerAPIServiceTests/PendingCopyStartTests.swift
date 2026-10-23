@@ -41,6 +41,52 @@ struct PendingCopyStartTests {
         ((try? FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false))) ?? []).sorted()
     }
 
+    @Test("held no-overwrite policy survives disk reload and reaches the actual runtime RPC")
+    func noOverwritePolicyOnReplay() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        let queue = PendingCopyQueue(appRoot: f.root)
+        let upload = try queue.stage()
+        let root = PendingCopyQueue.root(of: upload)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("payload".utf8).write(to: root.appending(path: "entry"))
+        let record = PendingCopyQueue.Record(
+            destination: "/data", entries: [.init(name: "entry", isDirectory: false, mode: 0o640)],
+            requester: nil, noOverwriteDirNonDir: true)
+        #expect(record.version == 2)
+        try queue.commit(upload, record: record, container: configuration.id)
+        try await f.start(service, configuration.id)
+        let runtime = try #require(f.lastRuntime)
+        #expect(runtime.noOverwritePolicies == [true])
+        #expect(runtime.calls == ["copyIn entry=payload /data", "start"])
+        #expect(!queue.holds(configuration.id))
+    }
+
+    @Test("version two cannot lose its required no-overwrite policy", arguments: [false, true])
+    func requiredPolicyCannotDisappear(missing: Bool) async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        let queue = PendingCopyQueue(appRoot: f.root)
+        let upload = try Self.hold(queue, configuration.id, [("keep", "sentinel")])
+        let recordPath = queue.directory.appending(path: "pending/\(configuration.id)/\(upload)/\(PendingCopyQueue.recordName)")
+        var object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: recordPath)) as? [String: Any])
+        object["version"] = 2
+        if missing { object.removeValue(forKey: "noOverwriteDirNonDir") } else { object["noOverwriteDirNonDir"] = false }
+        let before = try JSONSerialization.data(withJSONObject: object)
+        try before.write(to: recordPath)
+        await #expect(throws: (any Error).self) { try await f.start(service, configuration.id) }
+        #expect(f.lastRuntime?.calls == [])
+        #expect(try Data(contentsOf: recordPath) == before)
+        #expect(queue.holds(configuration.id))
+        #expect(!queue.isTaken(configuration.id))
+    }
+
     @Test("a start copies in what is held, in the order it was uploaded, before the container's process starts")
     func appliedBeforeProcess() async throws {
         let f = EventServiceFixture()

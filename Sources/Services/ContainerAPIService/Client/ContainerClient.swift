@@ -433,6 +433,14 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Update the guest agent of the exact stopped container the caller observed.
+    public func upgradeGuest(id: String, expectedIncarnation: String) async throws {
+        let request = XPCMessage(route: .containerUpgradeGuest)
+        request.set(key: .id, value: id)
+        request.set(key: .expectedIncarnation, value: expectedIncarnation)
+        try await xpcClient.send(request, responseTimeout: .seconds(300))
+    }
+
     /// Set labels on a container. The server lets only some keys change (its
     /// `ContainerLabelPolicy`); any other is refused, and nothing is changed.
     ///

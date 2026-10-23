@@ -236,8 +236,8 @@ extension ContainerToolRoutes.Routes {
     /// A container that is not running has no filesystem to copy into until its VM is up: what
     /// it is sent is unpacked and checked now, and copied in at its next start
     /// (`DockerPendingCopies`). Its paths cannot be looked at before then, so `path` is not
-    /// checked to be a directory and `noOverwriteDirNonDir` is not applied; the copy makes a
-    /// missing `path`. An upload that finds a start has taken the queue before it is copied in
+    /// checked to be a directory until replay; `noOverwriteDirNonDir` is stored with the
+    /// upload and enforced by the guest when replayed. The copy makes a missing `path`. An upload that finds a start has taken the queue before it is copied in
     /// here, into the container that start is starting, the same way.
     ///
     /// Each file goes in owned as the archive says, as dockerd unpacks it; `copyUIDGID`
@@ -289,7 +289,7 @@ extension ContainerToolRoutes.Routes {
         if heldForStart {
             let record = PendingCopyQueue.Record(
                 destination: path, entries: entries.map { PendingCopyQueue.Entry(name: $0.name, isDirectory: $0.isDirectory, mode: $0.mode) },
-                requester: request.peer?.requester, copyUIDGID: copyUIDGID)
+                requester: request.peer?.requester, copyUIDGID: copyUIDGID, noOverwriteDirNonDir: noOverwriteDirNonDir)
             // Once held, the staged directory is no longer where it was, and this removes nothing.
             switch try await streams.copies.hold(scratch, record: record, engineID: container.engineID) {
             case .held, .takenByStart:
@@ -297,6 +297,7 @@ extension ContainerToolRoutes.Routes {
             case .takenBack(let upload):
                 // Started meanwhile, past the point of copying in what is held: into it now.
                 defer { try? FileManager.default.removeItem(at: upload) }
+                if noOverwriteDirNonDir { try await requireMatchingEntryKinds(entries, in: path, of: container) }
                 try await copyIn(
                     entries, from: PendingCopyQueue.root(of: upload), into: path, of: container, reference: reference, copyUIDGID: copyUIDGID,
                     requester: request.peer?.requester)
@@ -304,20 +305,24 @@ extension ContainerToolRoutes.Routes {
             }
         }
         if noOverwriteDirNonDir {
-            for entry in entries {
-                let target = (path.hasSuffix("/") ? path : path + "/") + entry.name
-                guard case .found(let existing) = try await probe(container, target, follow: false) else { continue }
-                if existing.isDirectory && !entry.isDirectory {
-                    throw DockerAPIError.internalError("cannot overwrite directory \"\(target)\" with non-directory \"\(entry.name)\"")
-                }
-                if !existing.isDirectory && entry.isDirectory {
-                    throw DockerAPIError.internalError("cannot overwrite non-directory \"\(target)\" with directory \"\(entry.name)\"")
-                }
-            }
+            try await requireMatchingEntryKinds(entries, in: path, of: container)
         }
         try await copyIn(
             entries, from: root, into: path, of: container, reference: reference, copyUIDGID: copyUIDGID, requester: request.peer?.requester)
         return .empty(.ok)
+    }
+
+    private func requireMatchingEntryKinds(_ entries: [DockerExtractedEntry], in path: String, of container: DockerContainer) async throws {
+        for entry in entries {
+            let target = (path.hasSuffix("/") ? path : path + "/") + entry.name
+            guard case .found(let existing) = try await probe(container, target, follow: false) else { continue }
+            if existing.isDirectory && !entry.isDirectory {
+                throw DockerAPIError.internalError("cannot overwrite directory \"\(target)\" with non-directory \"\(entry.name)\"")
+            }
+            if !existing.isDirectory && entry.isDirectory {
+                throw DockerAPIError.internalError("cannot overwrite non-directory \"\(target)\" with directory \"\(entry.name)\"")
+            }
+        }
     }
 
     /// Copies each of `entries`, unpacked in `root`, into the directory `path` in `container`.

@@ -527,6 +527,7 @@ extension APIServer {
             routes[XPCRoute.containerExport] = XPCServer.route(harness.export)
             routes[XPCRoute.containerClean] = XPCServer.route(harness.clean)
             routes[XPCRoute.containerEvent] = XPCServer.route(harness.events)
+            routes[XPCRoute.containerUpgradeGuest] = XPCServer.route(harness.upgradeGuest)
             routes[XPCRoute.containerUpdateLabels] = XPCServer.route(harness.updateLabels)
 
             return service

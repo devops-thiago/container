@@ -921,6 +921,7 @@ public actor RuntimeService {
             let mode = UInt32(message.uint64(key: RuntimeKeys.fileMode.rawValue))
             let createParents = message.bool(key: RuntimeKeys.createParents.rawValue)
             let copyUIDGID = message.bool(key: RuntimeKeys.copyUIDGID.rawValue)
+            let noOverwrite = message.bool(key: RuntimeKeys.noOverwriteDirNonDir.rawValue)
 
             let access = try Self.copyHostAccess(bookmark: message.dataNoCopy(key: RuntimeKeys.hostDirectoryBookmark.rawValue), path: source)
             defer { access?.stopAccessingSecurityScopedResource() }
@@ -937,7 +938,7 @@ public actor RuntimeService {
             try await copies.run {
                 try await headroom.withLifted(VminitdMemory(container: container)) {
                     try await RunningCopy.withAgent(of: container) { vminitd, vm in
-                        let agent = VminitdCopyAgent(agent: vminitd, vm: vm)
+                        let agent = VminitdCopyAgent(agent: vminitd, vm: vm, noOverwriteDirNonDir: noOverwrite)
                         let owner = copyUIDGID ? try await CopyUser.owner(of: user, rootfs: rootfs, agent: agent) : nil
                         if booted {
                             try await PrestartCopy.copyIn(
