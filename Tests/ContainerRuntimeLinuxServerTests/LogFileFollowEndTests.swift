@@ -150,12 +150,40 @@ struct LogFileFollowEndTests {
         try fixture.append("first run\n")
         try await fixture.waitFor("first run\n")
         // Control: the engine's rollover of a full log, in the same run, is read on.
-        try fixture.rewrite("[container log rolled over]\nrolled\n")
+        let rollover = "[container log rolled over: \(UUID())]\nrolled\n"
+        try fixture.rewrite(rollover)
         try await fixture.waitFor("rolled\n")
         // The exit, then the restart's new log.
         ended.withLock { $0 = true }
         try fixture.rewrite("second run\n")
         try await Self.ended(follow)
-        #expect(fixture.text == "first run\n[container log rolled over]\nrolled\n")
+        #expect(fixture.text == "first run\n" + rollover)
+    }
+
+    @Test("a run that rolls its log over and exits before the follow looks again still has the rolled-over output read")
+    func rolloverOfEndedRunIsRead() async throws {
+        let fixture = try Fixture()
+        let rollover = "[container log rolled over: \(UUID())]\nfinal words\n"
+        let exiting = Mutex(false)
+        let handle = try FileHandle(forReadingFrom: fixture.path)
+        let follow = Task { [fixture] in
+            try await LogFileFollow.follow(
+                handle, statusInterval: .milliseconds(30),
+                runEnded: {
+                    guard exiting.withLock({ $0 }) else { return false }
+                    // The rollover and the exit both land while the follow waits on this
+                    // answer: it next looks at a log rewritten by the rollover, of a run that
+                    // has ended.
+                    try fixture.rewrite(rollover)
+                    return true
+                }
+            ) { data in fixture.received.withLock { $0.append(data) } }
+        }
+        try await fixture.started()
+        try fixture.append("first run\n")
+        try await fixture.waitFor("first run\n")
+        exiting.withLock { $0 = true }
+        try await Self.ended(follow)
+        #expect(fixture.text == "first run\n" + rollover)
     }
 }

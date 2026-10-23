@@ -67,27 +67,38 @@ extension ContainerRoutes.Routes {
     ) async throws -> DockerResponse {
         guard let tools = streams.tools else { throw DockerAPIError.internalError("the engine has no container log to read") }
         let handle = try await tools.log(container.snapshot)
+        let engine = self.engine
+        let run: ContainerSnapshot?
         let start: DockerLogFile
         let end: UInt64?
         do {
-            var file = try DockerLogFile(fd: handle.fileDescriptor)
-            try file.seek(tail: fromStart ? nil : 0)
-            start = file
-            end = follow ? nil : try file.size()
+            // Placed on the log within the run it follows, so the next run's log is never sent
+            // as this one's.
+            (run, start) = try await ContainerSnapshot.startFollowing(
+                follow ? container.snapshot : nil, look: { try await engine.get(container.snapshot.id) }
+            ) {
+                try DockerLogPump.readingLog {
+                    var file = try DockerLogFile(fd: handle.fileDescriptor)
+                    try file.seek(tail: fromStart ? nil : 0)
+                    return file
+                }
+            }
+            end = follow ? nil : try DockerLogPump.readingLog { try start.size() }
         } catch {
             try? handle.close()
-            throw DockerAPIError.internalError("could not read the container's log: \(error)")
+            throw error
         }
         let framer = DockerLogFramer(multiplexed: multiplexed, stream: options.stdout ? .stdout : .stderr, timestamps: false)
         let logOptions = streams.logOptions
-        let engine = self.engine
-        let run = container.snapshot
         return .hijack(multiplexed: multiplexed) { stream in
             defer { try? handle.close() }
             try? await DockerLogPump.run(
                 file: start, end: end, framer: framer, options: logOptions,
                 // dockerd ends an attach's streams at the exit, as it does a followed log.
-                stillRunning: { (try await engine.get(run.id)).map { $0.isInRun(of: run) } ?? false },
+                stillRunning: {
+                    guard let run else { return false }
+                    return (try await engine.get(run.id)).map { $0.isInRun(of: run) } ?? false
+                },
                 present: { await stream.peerConnected() },
                 write: { try await stream.outbound.write($0) })
             await stream.drain()
