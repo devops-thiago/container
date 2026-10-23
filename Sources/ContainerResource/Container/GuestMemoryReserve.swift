@@ -59,10 +59,35 @@ public enum GuestMemoryReserve {
     }
 
     /// The VM memory for a container limited to `limitBytes`: the limit plus the reserve,
-    /// saturating rather than trapping on a limit no VM could have.
+    /// rounded up to whole MiB as Virtualization takes it. A limit no VM could have gives
+    /// ``ceilingBytes`` rather than trapping, so the rounding the VMMs apply after it cannot
+    /// overflow either; create refuses such a limit (see
+    /// `ContainerConfiguration.Resources.validateMemory`) before a VM is ever sized from it.
     public static func vmBytes(forLimit limitBytes: UInt64) -> UInt64 {
         let (total, overflow) = limitBytes.addingReportingOverflow(bytes(forLimit: limitBytes))
-        return overflow ? UInt64.max : total
+        guard !overflow, total <= ceilingBytes else { return ceilingBytes }
+        return min(roundUpToMiB(total), ceilingBytes)
+    }
+
+    /// Where ``vmBytes(forLimit:)`` saturates: far past any VM Virtualization allows, a
+    /// multiple of the 1 MiB Virtualization and the 2 MiB Cloud Hypervisor round to, below
+    /// `Int64.max`, and with room above it for either rounding to add.
+    public static let ceilingBytes: UInt64 = (1 << 63) - (2 * mib)
+
+    /// The largest limit, in whole MiB, whose VM fits in `vmBytes`; 0 when not even the
+    /// reserve does.
+    public static func largestLimit(forVMBytes maximum: UInt64) -> UInt64 {
+        var low: UInt64 = 0
+        var high = min(maximum, ceilingBytes) / mib
+        while low < high {
+            let middle = high - (high - low) / 2
+            if vmBytes(forLimit: middle * mib) <= maximum {
+                low = middle
+            } else {
+                high = middle - 1
+            }
+        }
+        return vmBytes(forLimit: low * mib) <= maximum ? low * mib : 0
     }
 
     private static let mib: UInt64 = 1024 * 1024

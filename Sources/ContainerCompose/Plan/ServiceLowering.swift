@@ -322,7 +322,7 @@ enum ServiceLowering {
             { _ = try values("--restart").first.map(Parser.restartPolicy) },
             { _ = try Parser.capabilities(capAdd: values("--cap-add"), capDrop: values("--cap-drop")) },
             { _ = try Parser.rlimits(values("--ulimit")) },
-            { _ = try values("--memory").first.map(Parser.memoryStringAsMiB) },
+            { _ = try values("--memory").first.map(Parser.memoryLimit) },
             { _ = try values("--shm-size").first.map(Parser.memoryStringAsBytes) },
         ]
         for check in checks {
