@@ -43,13 +43,17 @@ public struct DockerPathStat: Sendable, Equatable {
     public var mode: UInt32
     public var mtime: Date
     public var linkTarget: String
+    /// The owner in the container, when `stat` there said. The header does not carry it; an
+    /// archive's root entry does.
+    public var owner: CopyOwner?
 
-    public init(name: String, size: Int64, mode: UInt32, mtime: Date, linkTarget: String = "") {
+    public init(name: String, size: Int64, mode: UInt32, mtime: Date, linkTarget: String = "", owner: CopyOwner? = nil) {
         self.name = name
         self.size = size
         self.mode = mode
         self.mtime = mtime
         self.linkTarget = linkTarget
+        self.owner = owner
     }
 
     public var isDirectory: Bool { mode & Self.goDirectory != 0 }
@@ -108,13 +112,22 @@ public struct DockerPathStat: Sendable, Equatable {
             mtime: Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec)), linkTarget: target)
     }
 
-    /// Reads `stat -c '%f %s %Y'`: the raw mode in hex, the size and the modification time.
+    /// What `probe` asks `stat` for: the raw mode in hex, the size, the modification time, and
+    /// the owner's uid and gid.
+    static let statFormat = "%f %s %Y %u %g"
+
+    /// Reads `stat -c` output in `statFormat`. Without the owner's fields the stat has no owner.
     static func parse(statOutput: String, name: String) -> DockerPathStat? {
         let fields = statOutput.split(whereSeparator: \.isWhitespace)
         guard fields.count >= 3, let raw = UInt32(fields[0], radix: 16), let size = Int64(fields[1]), let seconds = Int64(fields[2]) else {
             return nil
         }
-        return DockerPathStat(name: name, size: size, mode: goMode(posix: raw), mtime: Date(timeIntervalSince1970: TimeInterval(seconds)))
+        var owner: CopyOwner?
+        if fields.count >= 5, let uid = UInt32(fields[3]), let gid = UInt32(fields[4]) {
+            owner = CopyOwner(uid: uid, gid: gid)
+        }
+        return DockerPathStat(
+            name: name, size: size, mode: goMode(posix: raw), mtime: Date(timeIntervalSince1970: TimeInterval(seconds)), owner: owner)
     }
 }
 

@@ -36,8 +36,16 @@ protocol GuestCopyAgent: Sendable {
     func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws
     /// Copy `path` under `root` to `destination` on the host: a directory's contents into
     /// `destination`, a regular file as `destination`. The agent resolves `path` confined to
-    /// `root` and refuses anything else.
-    func copyOut(root: String, path: String, to destination: URL) async throws
+    /// `root` and refuses anything else. `recordOwners` keeps each file's owner in the
+    /// container on its copy (`CopyOwner.record(_:at:)`), which the host's own ownership
+    /// cannot hold: the engine is not root.
+    func copyOut(root: String, path: String, to destination: URL, recordOwners: Bool) async throws
+}
+
+extension GuestCopyAgent {
+    func copyOut(root: String, path: String, to destination: URL) async throws {
+        try await copyOut(root: root, path: path, to: destination, recordOwners: false)
+    }
 }
 
 /// Copies into a container whose VM is up and whose root filesystem is mounted, but whose init
@@ -178,7 +186,7 @@ struct VminitdCopyAgent: GuestCopyAgent {
         }
     }
 
-    func copyOut(root: String, path: String, to destination: URL) async throws {
+    func copyOut(root: String, path: String, to destination: URL, recordOwners: Bool) async throws {
         let port = Self.port()
         let listener = try vm.listen(port)
         defer { try? listener.finish() }
@@ -205,7 +213,13 @@ struct VminitdCopyAgent: GuestCopyAgent {
                     throw ContainerizationError(.internalError, message: "copyOut: the VM did not connect for the copy")
                 }
                 try listener.finish()
-                try await Self.receive(to: destination, isArchive: metadata.isArchive, from: connection)
+                try await Self.receive(to: destination, isArchive: metadata.isArchive, recordOwners: recordOwners, from: connection)
+                if recordOwners, !metadata.isArchive, let info = try? await agent.stat(root: root, path: path) {
+                    // A file comes as its bytes alone: its owner is the agent's stat of it. As
+                    // for an archive's entries, an owner that cannot be noted leaves the copy,
+                    // already whole, as the host has it.
+                    try? CopyOutOwners.record(CopyOwner(uid: info.uid, gid: info.gid), at: destination.path(percentEncoded: false))
+                }
             },
             closeListener: { try? listener.finish() })
     }
@@ -220,13 +234,19 @@ struct VminitdCopyAgent: GuestCopyAgent {
 
     /// Reads what the guest sends on `connection` into `destination` off the cooperative pool,
     /// and closes it: an archive is unpacked into `destination`, a file's bytes replace it.
-    static func receive(to destination: URL, isArchive: Bool, from connection: FileHandle) async throws {
+    /// With `recordOwners`, each entry of an archive keeps the owner it names
+    /// (`CopyOutOwners.unpack`).
+    static func receive(to destination: URL, isArchive: Bool, recordOwners: Bool = false, from connection: FileHandle) async throws {
         try await transfer(over: connection) { fd in
             if isArchive {
                 try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
                 let input = FileHandle(fileDescriptor: dup(fd), closeOnDealloc: true)
-                let reader = try ArchiveReader(format: .pax, filter: .gzip, fileHandle: input)
-                _ = try reader.extractContents(to: destination)
+                if recordOwners {
+                    try CopyOutOwners.unpack(input, into: destination)
+                } else {
+                    let reader = try ArchiveReader(format: .pax, filter: .gzip, fileHandle: input)
+                    _ = try reader.extractContents(to: destination)
+                }
             } else {
                 let output = open(destination.path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o644)
                 guard output != -1 else {

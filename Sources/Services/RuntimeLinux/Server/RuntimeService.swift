@@ -990,6 +990,7 @@ public actor RuntimeService {
             }
 
             let createParents = message.bool(key: RuntimeKeys.createParents.rawValue)
+            let recordOwners = message.bool(key: RuntimeKeys.recordCopyOwners.rawValue)
 
             let access = try Self.copyHostAccess(bookmark: message.dataNoCopy(key: RuntimeKeys.hostDirectoryBookmark.rawValue), path: destination)
             defer { access?.stopAccessingSecurityScopedResource() }
@@ -1003,7 +1004,7 @@ public actor RuntimeService {
                 try await RunningCopy.withAgent(of: container) { vminitd, vm in
                     try await RunningCopy.copyOut(
                         from: source, to: URL(fileURLWithPath: destination), createParents: createParents, rootfs: rootfs,
-                        agent: VminitdCopyAgent(agent: vminitd, vm: vm))
+                        recordOwners: recordOwners, agent: VminitdCopyAgent(agent: vminitd, vm: vm))
                 }
             }
 

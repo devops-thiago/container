@@ -54,7 +54,7 @@ package enum ContainerPathArchive {
         let name = DockerPathStat.baseName(path)
         let run: DockerCapturedRun
         do {
-            run = try await DockerContainerCommand.run(tools, in: container, ["stat"] + (follow ? ["-L"] : []) + ["-c", "%f %s %Y", path])
+            run = try await DockerContainerCommand.run(tools, in: container, ["stat"] + (follow ? ["-L"] : []) + ["-c", DockerPathStat.statFormat, path])
         } catch is DockerContainerCommand.Unavailable {
             return .unavailable
         }

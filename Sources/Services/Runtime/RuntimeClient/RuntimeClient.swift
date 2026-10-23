@@ -329,11 +329,14 @@ extension RuntimeClient {
         }
     }
 
-    public func copyOut(source: String, destination: String, createParents: Bool = true, hostDirectoryBookmark: Data? = nil) async throws {
+    public func copyOut(
+        source: String, destination: String, createParents: Bool = true, recordOwners: Bool = false, hostDirectoryBookmark: Data? = nil
+    ) async throws {
         let request = XPCMessage(route: RuntimeRoutes.copyOut.rawValue)
         request.set(key: RuntimeKeys.sourcePath.rawValue, value: source)
         request.set(key: RuntimeKeys.destinationPath.rawValue, value: destination)
         request.set(key: RuntimeKeys.createParents.rawValue, value: createParents)
+        request.set(key: RuntimeKeys.recordCopyOwners.rawValue, value: recordOwners)
         if let hostDirectoryBookmark {
             request.set(key: RuntimeKeys.hostDirectoryBookmark.rawValue, value: hostDirectoryBookmark)
         }

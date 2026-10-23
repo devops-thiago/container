@@ -47,7 +47,9 @@ protocol VminitdMemoryControl: Sendable {
 /// putting the limit back only drops clean page cache and never leaves vminitd over its limit
 /// with dirty pages, where the kernel would make it wait. A sync that takes longer than
 /// `syncLimit` leaves the limit lifted and tries again after another `settleDelay`, so a copy
-/// that arrives meanwhile is never kept waiting behind it for long.
+/// that arrives meanwhile is never kept waiting behind it for long. The sync is not started
+/// again while the one before is still running: the next try waits for that one, so a guest
+/// that never ends a sync holds one agent connection, not one more every `settleDelay`.
 actor CopyMemoryHeadroom {
     /// vminitd's cgroup, created by vminitd at boot.
     static let memoryHighPath = "/sys/fs/cgroup/vminitd/memory.high"
@@ -73,6 +75,20 @@ actor CopyMemoryHeadroom {
     private var restoreTimer: Task<Void, Never>?
     /// Putting the limit back, once started.
     private var restoring: Task<Void, Never>?
+    /// The guest's sync, from its start until it ends, which can be after the restore that
+    /// started it stopped waiting for it.
+    private var syncing: (id: UUID, copiesEndedBefore: Int, task: Task<Void, Never>)?
+    /// The restores waiting for `syncing` to end, each until it ends or that restore's time
+    /// limit passes.
+    private var syncWaiters: [UUID: AsyncStream<SyncEvent>.Continuation] = [:]
+    /// How many copies have ended: a sync that began before the last of them may not have
+    /// written that copy back.
+    private var copiesEnded = 0
+
+    enum SyncEvent: Sendable {
+        case ended(Result<Void, any Error>)
+        case timedOut
+    }
 
     init(
         settleDelay: Duration = defaultSettleDelay, syncLimit: Duration = defaultSyncLimit,
@@ -97,6 +113,7 @@ actor CopyMemoryHeadroom {
         restoreTimer = nil
         defer {
             active -= 1
+            copiesEnded += 1
             if active == 0 { scheduleRestore(control) }
         }
         await lift(control)
@@ -144,22 +161,30 @@ actor CopyMemoryHeadroom {
         }
     }
 
-    /// Forget the lifted limit without putting it back: the VM is going away.
+    /// Forget the lifted limit without putting it back: the VM is going away, and a sync still
+    /// running ends with it.
     func discard() {
         restoreTimer?.cancel()
         restoreTimer = nil
         saved = nil
+        // The next VM's restore starts a sync of its own, never waiting on this VM's.
+        syncing?.task.cancel()
+        syncing = nil
     }
+
+    /// Whether a sync the guest was asked for has not ended yet.
+    var syncRunning: Bool { syncing != nil }
+
+    /// Whether a restore waits for its settle delay.
+    var restoreScheduled: Bool { restoreTimer != nil }
 
     /// Put the limit back unless a copy started meanwhile.
     private func restore(_ control: some VminitdMemoryControl) async {
         restoreTimer = nil
         guard active == 0, let value = saved, restoring == nil else { return }
-        let limit = syncLimit
-        let sleep = self.sleep
         let step = Task {
             do {
-                guard try await Self.within(limit, sleep: sleep, { try await control.sync() }) else {
+                guard try await self.synced(control) else {
                     self.log?.warning("the sync before putting vminitd's memory limit back is slow; trying again later")
                     return
                 }
@@ -182,39 +207,61 @@ actor CopyMemoryHeadroom {
         }
     }
 
-    /// Whether `operation` finished within `limit`. One that did not is cancelled and left to
-    /// end on its own: a sync the guest is still carrying out need not end when asked to.
-    static func within(
-        _ limit: Duration, sleep: @escaping Sleep, _ operation: @escaping @Sendable () async throws -> Void
-    ) async throws -> Bool {
-        let (events, continuation) = AsyncStream<Result<Bool, any Error>>.makeStream()
-        let work = Task {
-            do {
-                try await operation()
-                continuation.yield(.success(true))
-            } catch {
-                continuation.yield(.failure(error))
-            }
+    /// Whether the guest's pages are written back: a sync that began after the last copy
+    /// ended within `syncLimit`. A sync is started only when none is running; while one an
+    /// earlier try gave up on is still running, this waits for it instead. One that ends in
+    /// time but began before the last copy ended counts as not done, and the next try starts
+    /// a sync of its own.
+    private func synced(_ control: some VminitdMemoryControl) async throws -> Bool {
+        let (events, continuation) = AsyncStream<SyncEvent>.makeStream()
+        let waiter = UUID()
+        syncWaiters[waiter] = continuation
+        defer {
+            syncWaiters[waiter] = nil
+            continuation.finish()
         }
+        if syncing == nil {
+            let id = UUID()
+            syncing = (
+                id, copiesEnded,
+                Task {
+                    do {
+                        try await control.sync()
+                        await self.syncEnded(id, .success(()))
+                    } catch {
+                        await self.syncEnded(id, .failure(error))
+                    }
+                }
+            )
+        }
+        guard let copiesEndedBefore = syncing?.copiesEndedBefore else { return false }
+        let limit = syncLimit
+        let sleep = self.sleep
         let timer = Task {
             do {
                 try await sleep(limit)
-                continuation.yield(.success(false))
+                continuation.yield(.timedOut)
             } catch {}
         }
-        defer {
-            timer.cancel()
-            continuation.finish()
-        }
-        var first: Result<Bool, any Error> = .success(false)
+        defer { timer.cancel() }
         for await event in events {
-            first = event
-            break
+            switch event {
+            case .timedOut:
+                return false
+            case .ended(let result):
+                try result.get()
+                return copiesEndedBefore == copiesEnded
+            }
         }
-        if case .success(false) = first {
-            work.cancel()
+        return false
+    }
+
+    private func syncEnded(_ id: UUID, _ result: Result<Void, any Error>) {
+        guard syncing?.id == id else { return }
+        syncing = nil
+        for waiter in syncWaiters.values {
+            waiter.yield(.ended(result))
         }
-        return try first.get()
     }
 }
 

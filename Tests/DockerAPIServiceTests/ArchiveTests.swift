@@ -74,10 +74,12 @@ struct TarBuilder {
         bytes += block + data + DockerTar.padding(data.count)
     }
 
-    /// A pax extended header holding `records` as they are.
-    mutating func pax(_ records: [UInt8]) {
+    /// A pax extended header holding `records` as they are: for the next entry, or with
+    /// `global`, a global one.
+    mutating func pax(_ records: [UInt8], global: Bool = false) {
         bytes += DockerTar.ustar(
-            name: "PaxHeaders/x", prefix: "", type: .paxExtended, mode: 0o644, size: UInt64(records.count), mtime: Fixtures.now, link: "")
+            name: global ? "GlobalHead.0.0" : "PaxHeaders/x", prefix: "", type: global ? .paxGlobal : .paxExtended, mode: 0o644,
+            size: UInt64(records.count), mtime: Fixtures.now, link: "")
         bytes += records + DockerTar.padding(records.count)
     }
 
@@ -282,6 +284,30 @@ struct TarGuardTests {
         #expect(throws: DockerTarRejection.self) { try Scratch().extract(huge.archive) }
     }
 
+    @Test("a global pax header's owner applies to no entry, as dockerd ignores the header; its records must still parse")
+    func globalPaxOwnerIgnored() throws {
+        let scratch = try Scratch()
+        var tar = TarBuilder()
+        tar.pax(DockerTar.paxRecords([("uid", "1234"), ("gid", "5678")]), global: true)
+        tar.file("plain.txt", "plain\n")
+        tar.file("owned.txt", "owned\n", uid: 42, gid: 43)
+        // A per-entry header before a global one belongs to the global one, as Go reads it.
+        tar.pax(DockerTar.paxRecords([("uid", "70000"), ("path", "elsewhere.txt")]))
+        tar.pax(DockerTar.paxRecords([("comment", "x")]), global: true)
+        tar.file("last.txt", "last\n")
+        let entries = try scratch.extract(tar.archive)
+        let root = scratch.root.path
+        #expect(entries.map(\.name).sorted() == ["last.txt", "owned.txt", "plain.txt"])
+        #expect(CopyOwner.recorded(at: root + "/plain.txt") == CopyOwner(uid: 0, gid: 0))
+        #expect(CopyOwner.recorded(at: root + "/owned.txt") == CopyOwner(uid: 42, gid: 43))
+        #expect(CopyOwner.recorded(at: root + "/last.txt") == CopyOwner(uid: 0, gid: 0))
+
+        var malformed = TarBuilder()
+        malformed.pax(Array("99 uid=1\n".utf8), global: true)
+        malformed.file("x", "x\n")
+        #expect(throws: DockerTarRejection.self) { try Scratch().extract(malformed.archive) }
+    }
+
     @Test("ustar's prefix field joins the name")
     func ustarPrefix() throws {
         let scratch = try Scratch()
@@ -448,12 +474,15 @@ struct PathStatTests {
         #expect(!stat.headerValue.contains("-") && !stat.headerValue.contains("_"))
     }
 
-    @Test("stat -c '%f %s %Y' output reads as a stat; anything else does not")
+    @Test("stat -c '%f %s %Y %u %g' output reads as a stat with its owner; without the owner's fields it has none; anything else is not a stat")
     func parseStat() {
-        let stat = DockerPathStat.parse(statOutput: "41ed 4096 1800000000\n", name: "etc")
+        #expect(DockerPathStat.statFormat == "%f %s %Y %u %g")
+        let stat = DockerPathStat.parse(statOutput: "41ed 4096 1800000000 1000 1001\n", name: "etc")
         #expect(stat?.isDirectory == true)
         #expect(stat?.size == 4096)
         #expect(stat?.mtime == Fixtures.now)
+        #expect(stat?.owner == CopyOwner(uid: 1000, gid: 1001))
+        #expect(DockerPathStat.parse(statOutput: "41ed 4096 1800000000\n", name: "etc")?.owner == nil)
         #expect(DockerPathStat.parse(statOutput: "stat: can't stat", name: "x") == nil)
     }
 }
@@ -543,6 +572,23 @@ struct ArchiveRouteTests {
         #expect((try Self.stat(directory)["mode"] as? Int).map { UInt32($0) & (1 << 31) } == 1 << 31)
         // Every scratch copy is gone once its answer has been sent.
         #expect(await StreamHarness.eventually { ((try? FileManager.default.contentsOfDirectory(atPath: h.tools.scratch.path)) ?? ["?"]).isEmpty })
+    }
+
+    @Test("GET gives each entry its own numeric owner in the container, as dockerd's archive does")
+    func downloadOwners() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try FileManager.default.createDirectory(at: h.tools.root.appending(path: "srv"), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: h.tools.root.appending(path: "srv/f"))
+        h.tools.with { $0.owners = ["/srv": CopyOwner(uid: 101, gid: 102), "/srv/f": CopyOwner(uid: 1234, gid: 5678)] }
+        let body = try await h.request("GET", "/containers/box/archive?path=/srv").body
+        // The directory's header, then the file's.
+        #expect(DockerTarExtractor.ustarName(Array(body[0..<512])) == "srv/")
+        #expect(try DockerTarExtractor.number(body[108..<116]) == 101)
+        #expect(try DockerTarExtractor.number(body[116..<124]) == 102)
+        #expect(DockerTarExtractor.ustarName(Array(body[512..<1024])) == "srv/f")
+        #expect(try DockerTarExtractor.number(body[620..<628]) == 1234)
+        #expect(try DockerTarExtractor.number(body[628..<636]) == 5678)
     }
 
     @Test("HEAD answers the stat header alone, from stat in the container, with a link's target")

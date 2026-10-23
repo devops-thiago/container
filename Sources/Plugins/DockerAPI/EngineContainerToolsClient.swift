@@ -54,7 +54,8 @@ extension EngineContainersClient: EngineContainerTools {
     func copyOut(_ container: ContainerSnapshot, source: String, destination: URL, requester: String?) async throws {
         try await Self.translatedTool {
             try await ContainerClient().copyOut(
-                id: container.id, source: source, destination: destination.path(percentEncoded: false), requester: requester)
+                id: container.id, source: source, destination: destination.path(percentEncoded: false), requester: requester,
+                recordOwners: true)
         }
     }
 

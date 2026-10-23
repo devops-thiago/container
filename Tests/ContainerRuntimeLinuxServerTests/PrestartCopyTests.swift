@@ -54,10 +54,10 @@ struct PrestartCopyTests {
             copies.append(Copy(isDirectory: isDirectory, root: root, path: path, mode: mode, createParents: createParents, owner: owner))
         }
 
-        private(set) var copiesOut: [(root: String, path: String, destination: URL)] = []
+        private(set) var copiesOut: [(root: String, path: String, destination: URL, recordOwners: Bool)] = []
 
-        func copyOut(root: String, path: String, to destination: URL) async throws {
-            copiesOut.append((root, path, destination))
+        func copyOut(root: String, path: String, to destination: URL, recordOwners: Bool) async throws {
+            copiesOut.append((root, path, destination, recordOwners))
         }
     }
 

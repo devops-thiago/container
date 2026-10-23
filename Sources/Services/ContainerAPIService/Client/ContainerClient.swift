@@ -540,14 +540,20 @@ public struct ContainerClient: Sendable {
 
     /// Copy a file or directory from the container to the host.
     ///
-    /// - Parameter requester: who this copy is for, as `create` takes it.
-    public func copyOut(id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil) async throws {
+    /// - Parameters:
+    ///   - requester: who this copy is for, as `create` takes it.
+    ///   - recordOwners: keep each copied file's owner in the container on it, as
+    ///     `CopyOwner.recorded(at:)` reads it, for an archive of the copy that carries them.
+    public func copyOut(
+        id: String, source: String, destination: String, createParents: Bool = true, requester: String? = nil, recordOwners: Bool = false
+    ) async throws {
         let request = XPCMessage(route: .containerCopyOut)
         Self.setRequester(requester, on: request)
         request.set(key: .id, value: id)
         request.set(key: .sourcePath, value: source)
         request.set(key: .destinationPath, value: destination)
         request.set(key: .createParents, value: createParents)
+        request.set(key: .recordCopyOwners, value: recordOwners)
 
         do {
             try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))

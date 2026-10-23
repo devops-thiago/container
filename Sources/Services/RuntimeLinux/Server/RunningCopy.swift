@@ -50,12 +50,15 @@ enum RunningCopy {
     }
 
     /// Copy `source` in the container to `destination` on the host: a directory as its
-    /// contents at `destination`, a file as `destination`.
-    static func copyOut(from source: String, to destination: URL, createParents: Bool, rootfs: String, agent: some GuestCopyAgent) async throws {
+    /// contents at `destination`, a file as `destination`. `recordOwners` keeps each file's
+    /// owner in the container on its copy (`CopyOwner.record(_:at:)`).
+    static func copyOut(
+        from source: String, to destination: URL, createParents: Bool, rootfs: String, recordOwners: Bool = false, agent: some GuestCopyAgent
+    ) async throws {
         if createParents {
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         }
-        try await agent.copyOut(root: rootfs, path: source, to: destination)
+        try await agent.copyOut(root: rootfs, path: source, to: destination, recordOwners: recordOwners)
     }
 
     /// Where a copy in lands, as containerization's `copyIn` decides it. The destination is

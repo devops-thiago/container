@@ -26,13 +26,17 @@ struct CopyMemoryHeadroomTests {
         let calls = Mutex<[String]>([])
         let before: String?
         let failLift: Bool
-        let slowSync: Bool
+        /// Whether a sync ends only once `release` is set, ignoring cancellation.
+        let heldSync: Bool
+        let released = Mutex(false)
 
-        init(before: String? = "83886080\n", failLift: Bool = false, slowSync: Bool = false) {
+        init(before: String? = "83886080\n", failLift: Bool = false, heldSync: Bool = false) {
             self.before = before
             self.failLift = failLift
-            self.slowSync = slowSync
+            self.heldSync = heldSync
         }
+
+        func release() { released.withLock { $0 = true } }
 
         func memoryHigh() async throws -> String {
             calls.withLock { $0.append("read") }
@@ -47,7 +51,10 @@ struct CopyMemoryHeadroomTests {
 
         func sync() async throws {
             calls.withLock { $0.append("sync") }
-            if slowSync { try await Task.sleep(for: .seconds(3600)) }
+            while heldSync && !released.withLock({ $0 }) {
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(2))
+            }
         }
 
         var recorded: [String] { calls.withLock { $0 } }
@@ -180,7 +187,7 @@ struct CopyMemoryHeadroomTests {
     func slowSync() async throws {
         let clock = ManualClock()
         let headroom = CopyMemoryHeadroom(sleep: clock.sleep)
-        let control = FakeControl(slowSync: true)
+        let control = FakeControl(heldSync: true)
         try await headroom.withLifted(control) {}
         try await clock.waitForSleeps(1)
         clock.advance()
@@ -199,25 +206,70 @@ struct CopyMemoryHeadroomTests {
         let ran = try await headroom.withLifted(control) { true }
         #expect(ran)
         #expect(control.recorded == Self.lift + ["sync"])
+        control.release()
     }
 
-    @Test("the sync's time limit holds even when the sync does not end on cancellation", .timeLimit(.minutes(1)))
-    func boundedEvenIfUncancellable() async throws {
-        let clock = ManualClock()
-        let release = Mutex(false)
-        let outcome = Task {
-            try await CopyMemoryHeadroom.within(.seconds(10), sleep: clock.sleep) {
-                // A sync that ignores cancellation and ends only when released.
-                while !release.withLock({ $0 }) {
-                    await Task.yield()
-                    try? await Task.sleep(for: .milliseconds(2))
-                }
-            }
+    /// Wait until the headroom waits out a settle delay again, and nothing else sleeps.
+    static func waitForSettle(_ headroom: CopyMemoryHeadroom, _ clock: ManualClock) async throws {
+        while await !headroom.restoreScheduled || clock.pending != 1 {
+            try await Task.sleep(for: .milliseconds(2))
         }
+    }
+
+    @Test("a sync that never ends is asked for once, however many times the restore tries again", .timeLimit(.minutes(1)))
+    func hungSyncIsNotRepeated() async throws {
+        let clock = ManualClock()
+        let headroom = CopyMemoryHeadroom(sleep: clock.sleep)
+        let control = FakeControl(heldSync: true)
+        try await headroom.withLifted(control) {}
+        for _ in 0..<4 {
+            // The settle delay, then the sync's time limit, which runs out.
+            try await Self.waitForSettle(headroom, clock)
+            clock.advance()
+            try await Self.waitForCalls(control, 3)
+            try await clock.waitForSleeps(1)
+            clock.advance()
+        }
+        try await Self.waitForSettle(headroom, clock)
+        #expect(control.recorded == Self.lift + ["sync"])
+        #expect(await headroom.lifted)
+        #expect(await headroom.syncRunning)
+        // Once it ends, the next try asks for a sync of its own and puts the limit back.
+        control.release()
+        while await headroom.syncRunning {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        clock.advance()
+        try await Self.waitForCalls(control, 5)
+        #expect(control.recorded == Self.lift + ["sync", "sync", "memory.high=83886080"])
+        #expect(await !headroom.lifted)
+    }
+
+    @Test("a sync that began before the last copy ended does not count for that copy", .timeLimit(.minutes(1)))
+    func staleSyncDoesNotCount() async throws {
+        let clock = ManualClock()
+        let headroom = CopyMemoryHeadroom(sleep: clock.sleep)
+        let control = FakeControl(heldSync: true)
+        try await headroom.withLifted(control) {}
+        try await Self.waitForSettle(headroom, clock)
+        clock.advance()
+        try await Self.waitForCalls(control, 3)
         try await clock.waitForSleeps(1)
         clock.advance()
-        #expect(try await outcome.value == false)
-        release.withLock { $0 = true }
+        // The sync ran out of time and is still running when another copy comes and goes.
+        try await Self.waitForSettle(headroom, clock)
+        try await headroom.withLifted(control) {}
+        try await Self.waitForSettle(headroom, clock)
+        clock.advance()
+        // The restore waits for the running sync, which then ends in time.
+        try await clock.waitForSleeps(1)
+        control.release()
+        try await Self.waitForSettle(headroom, clock)
+        #expect(control.recorded == Self.lift + ["sync"])
+        #expect(await headroom.lifted)
+        clock.advance()
+        try await Self.waitForCalls(control, 5)
+        #expect(control.recorded == Self.lift + ["sync", "sync", "memory.high=83886080"])
     }
 
     @Test("a copy runs even when the limit cannot be lifted, and nothing is put back", .timeLimit(.minutes(1)))

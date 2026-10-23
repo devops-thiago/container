@@ -50,6 +50,9 @@ public enum RuntimeKeys: String {
     case createParents
     /// Whether a copy in is owned by the container's user, as `docker cp -a` has it.
     case copyUIDGID
+    /// Whether a copy out keeps each file's owner in the container on the copy
+    /// (`CopyOwner.record(_:at:)`), for an archive of it that carries the owners.
+    case recordCopyOwners
     /// The app-issued host folder grant, consumed by the runtime for this copy.
     case hostDirectoryBookmark
     /// Image path for snapshot operations
