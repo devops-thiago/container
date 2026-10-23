@@ -523,9 +523,12 @@ public struct ContainerClient: Sendable {
     ///     it; otherwise each file keeps the owner its source names.
     ///   - noOverwriteDirNonDir: have the guest refuse replacing a directory with a
     ///     non-directory or the reverse, including entries inside an archive.
+    ///   - copyAsArchive: preserve explicit archive-upload replacement semantics.
+    ///     Native file copies default to protecting directories and final symlinks.
     ///   - requester: who this copy is for, as `create` takes it.
     public func copyIn(
         id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, copyUIDGID: Bool = false, noOverwriteDirNonDir: Bool = false,
+        copyAsArchive: Bool = false,
         requester: String? = nil
     ) async throws {
         let request = XPCMessage(route: .containerCopyIn)
@@ -537,6 +540,7 @@ public struct ContainerClient: Sendable {
         request.set(key: .createParents, value: createParents)
         request.set(key: .copyUIDGID, value: copyUIDGID)
         request.set(key: .noOverwriteDirNonDir, value: noOverwriteDirNonDir)
+        request.set(key: .copyAsArchive, value: copyAsArchive)
 
         do {
             try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))

@@ -32,8 +32,9 @@ protocol GuestCopyAgent: Sendable {
     /// `root` (openat2 with `RESOLVE_IN_ROOT`): a symlink or `..` in the image is followed as
     /// if `root` were `/`, so the write can never land outside it. Directories travel as an
     /// archive; files travel as bytes with their owner in the RPC. The guest opens the file
-    /// without replacing a directory or final symlink. `owner`, when given, owns everything
-    /// copied (`copyUIDGID`).
+    /// without replacing a directory or final symlink. Explicit archive uploads retain
+    /// archive replacement semantics and enforce their requested type-protection policy.
+    /// `owner`, when given, owns everything copied (`copyUIDGID`).
     func copy(from source: URL, isDirectory: Bool, root: String, path: String, mode: UInt32, createParents: Bool, owner: CopyOwner?) async throws
     /// Copy `path` under `root` to `destination` on the host: a directory's contents into
     /// `destination`, a regular file as `destination`. The agent resolves `path` confined to
@@ -98,6 +99,7 @@ struct VminitdCopyAgent: GuestCopyAgent {
     let agent: Vminitd
     let vm: any VirtualMachineInstance
     var noOverwriteDirNonDir = false
+    var copyAsArchive = false
 
     /// Host vsock ports for these copies: a range of their own, apart from containerization's
     /// per-container allocator (which starts at 0x1000_0000), taken in turn.
@@ -124,14 +126,16 @@ struct VminitdCopyAgent: GuestCopyAgent {
             rpc: {
                 try await Self.requestCopy(
                     agent: agent, root: root, path: path, port: port, mode: mode, createParents: createParents,
-                    isDirectory: isDirectory, owner: fileOwner, noOverwriteDirNonDir: noOverwriteDirNonDir)
+                    isDirectory: isDirectory, owner: fileOwner, noOverwriteDirNonDir: noOverwriteDirNonDir, copyAsArchive: copyAsArchive)
             },
             transfer: {
                 guard let connection = await listener.first(where: { _ in true }) else {
                     throw ContainerizationError(.internalError, message: "copyIn: the VM did not connect for the copy")
                 }
                 try listener.finish()
-                try await Self.send(source, isDirectory: isDirectory, name: ".", mode: mode, owner: owner, to: connection)
+                try await Self.send(
+                    source, isDirectory: isDirectory, name: isDirectory ? "." : (FilePath(path).lastComponent?.string ?? source.lastPathComponent),
+                    mode: mode, owner: owner, copyAsArchive: copyAsArchive, to: connection)
             },
             closeListener: { try? listener.finish() })
     }
@@ -148,18 +152,20 @@ struct VminitdCopyAgent: GuestCopyAgent {
     /// write. Never fall back to a plain copy that silently loses the requested ownership.
     static func requestCopy(
         agent: Vminitd, root: String, path: String, port: UInt32, mode: UInt32, createParents: Bool,
-        isDirectory: Bool, owner: CopyOwner?, noOverwriteDirNonDir: Bool = false
+        isDirectory: Bool, owner: CopyOwner?, noOverwriteDirNonDir: Bool = false, copyAsArchive: Bool = false
     ) async throws {
         guard isDirectory || owner != nil else {
             throw ContainerizationError(.invalidArgument, message: "copyIn: file ownership is required")
         }
+        let archive = isDirectory || copyAsArchive
+        let destination = copyAsArchive && !isDirectory ? FilePath(path).removingLastComponent().string : path
         let direction: Com_Apple_Containerization_Sandbox_V3_CopyRequest.Direction =
-            isDirectory ? (noOverwriteDirNonDir ? .copyInCheckedArchive : .copyIn) : .copyInOwnedFile
+            archive ? (noOverwriteDirNonDir ? .copyInCheckedArchive : .copyIn) : .copyInOwnedFile
         do {
             try await agent.copy(
-                direction: direction, root: root, path: path, vsockPort: port,
-                mode: mode, createParents: createParents, isArchive: isDirectory,
-                ownerUID: owner?.uid, ownerGID: owner?.gid)
+                direction: direction, root: root, path: destination, vsockPort: port,
+                mode: mode, createParents: createParents, isArchive: archive,
+                ownerUID: archive ? nil : owner?.uid, ownerGID: archive ? nil : owner?.gid)
         } catch let error as RPCError
             where error.code == .invalidArgument
             && error.message == "copy: unrecognized direction \(direction.rawValue)"
@@ -237,11 +243,12 @@ struct VminitdCopyAgent: GuestCopyAgent {
             closeListener: { try? listener.finish() })
     }
 
-    /// Streams files as bytes and directories as archives, off the cooperative pool.
-    static func send(_ source: URL, isDirectory: Bool, name: String, mode: UInt32, owner: CopyOwner?, to connection: FileHandle) async throws {
+    /// Streams native files as bytes; directories and explicit archive uploads retain
+    /// archive entries and ownership, off the cooperative pool.
+    static func send(_ source: URL, isDirectory: Bool, name: String, mode: UInt32, owner: CopyOwner?, copyAsArchive: Bool = false, to connection: FileHandle) async throws {
         try await transfer(over: connection) { fd in
-            if isDirectory {
-                try CopyArchive.write(source, isDirectory: true, name: name, mode: mode, owner: owner, to: fd)
+            if isDirectory || copyAsArchive {
+                try CopyArchive.write(source, isDirectory: isDirectory, name: name, mode: mode, owner: owner, to: fd)
             } else {
                 let input = try FileHandle(forReadingFrom: source)
                 defer { try? input.close() }

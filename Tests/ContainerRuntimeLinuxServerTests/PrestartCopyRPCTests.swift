@@ -88,16 +88,21 @@ struct PrestartCopyRPCTests {
                 try await VminitdCopyAgent.requestCopy(
                     agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true,
                     isDirectory: true, owner: nil, noOverwriteDirNonDir: true)
+                for strict in [false, true] {
+                    try await VminitdCopyAgent.requestCopy(
+                        agent: agent, root: "/run/container/test/rootfs", path: "/smoke/config", port: 12345, mode: 0o640, createParents: true,
+                        isDirectory: false, owner: CopyOwner(uid: 1234, gid: 5678), noOverwriteDirNonDir: strict, copyAsArchive: true)
+                }
             } catch {
                 try? await agent.close()
                 throw error
             }
             try await agent.close()
             let requests = receiver.requests.withLock { $0 }
-            #expect(requests.map(\.isArchive) == [true, false, true])
-            #expect(requests.map(\.direction) == [.copyIn, .copyInOwnedFile, .copyInCheckedArchive])
-            #expect(requests.map(\.hasOwnerUid) == [false, true, false])
-            #expect(requests.map(\.hasOwnerGid) == [false, true, false])
+            #expect(requests.map(\.isArchive) == [true, false, true, true, true])
+            #expect(requests.map(\.direction) == [.copyIn, .copyInOwnedFile, .copyInCheckedArchive, .copyIn, .copyInCheckedArchive])
+            #expect(requests.map(\.hasOwnerUid) == [false, true, false, false, false])
+            #expect(requests.map(\.hasOwnerGid) == [false, true, false, false, false])
             #expect(requests[1].ownerUid == 1234)
             #expect(requests[1].ownerGid == 5678)
             for request in requests {
@@ -174,6 +179,37 @@ struct PrestartCopyRPCTests {
         try await VminitdCopyAgent.send(
             source.file, isDirectory: false, name: "config", mode: 0o640, owner: nil, to: FileHandle(forWritingTo: payload))
         #expect(try Data(contentsOf: payload) == expected)
+    }
+
+    @Test("explicit archive uploads preserve replacement semantics and enforce a requested type policy", arguments: [false, true])
+    func explicitFileArchive(strict: Bool) async throws {
+        let source = try PrestartCopyTests.Source()
+        try Data("uploaded contents".utf8).write(to: source.file)
+        let payload = source.top.appending(path: "explicit.tar.gz")
+        FileManager.default.createFile(atPath: payload.path, contents: nil)
+        try await VminitdCopyAgent.send(
+            source.file, isDirectory: false, name: "config", mode: 0o640,
+            owner: CopyOwner(uid: getuid(), gid: getgid()), copyAsArchive: true, to: FileHandle(forWritingTo: payload))
+        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: payload))
+        #expect(entries.count == 1)
+        let entry = try #require(entries.first?.0)
+        #expect(entry.path == "config")
+        #expect(entry.owner == getuid())
+        #expect(entry.group == getgid())
+        let destination = source.top.appending(path: "destination")
+        let directory = destination.appending(path: "config")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let sentinel = directory.appending(path: "keep")
+        try Data("preserved".utf8).write(to: sentinel)
+        let reader = try ArchiveReader(format: .pax, filter: .gzip, file: payload)
+        if strict {
+            #expect(throws: (any Error).self) { try reader.extractContents(to: destination, noOverwriteDirNonDir: true) }
+            #expect(try String(contentsOf: sentinel, encoding: .utf8) == "preserved")
+        } else {
+            #expect(try reader.extractContents(to: destination).isEmpty)
+            #expect(try String(contentsOf: directory, encoding: .utf8) == "uploaded contents")
+            #expect(!FileManager.default.fileExists(atPath: sentinel.path))
+        }
     }
 
     @Test("a large single-file transfer preserves the exact length and contents")

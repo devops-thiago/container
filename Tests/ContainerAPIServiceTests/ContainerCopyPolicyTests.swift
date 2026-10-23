@@ -24,8 +24,8 @@ import XPC
 @testable import ContainerAPIService
 
 struct ContainerCopyPolicyTests {
-    @Test("running copies keep their policy through client, API server, and runtime XPC", arguments: [false, true])
-    func runningCopyPolicy(strict: Bool) async throws {
+    @Test("running copies keep their policy through client, API server, and runtime XPC", arguments: [false, true], [false, true])
+    func runningCopyPolicy(strict: Bool, archive: Bool) async throws {
         let f = EventServiceFixture()
         defer { f.cleanup() }
         let service = try f.service()
@@ -52,7 +52,8 @@ struct ContainerCopyPolicyTests {
         let xpc = XPCClient(endpoint: xpc_endpoint_create(listener), label: "copy-policy-test")
         defer { xpc.close() }
         try await ContainerClient(xpcClient: xpc).copyIn(
-            id: configuration.id, source: source.path, destination: "/tmp", noOverwriteDirNonDir: strict)
+            id: configuration.id, source: source.path, destination: "/tmp", noOverwriteDirNonDir: strict, copyAsArchive: archive)
         #expect(f.lastRuntime?.noOverwritePolicies == [strict])
+        #expect(f.lastRuntime?.archiveCopies == [archive])
     }
 }

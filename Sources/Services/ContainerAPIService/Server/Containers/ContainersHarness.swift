@@ -470,7 +470,8 @@ public struct ContainersHarness: Sendable {
 
         try await service.copyIn(
             id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents,
-            copyUIDGID: message.bool(key: .copyUIDGID), noOverwriteDirNonDir: message.bool(key: .noOverwriteDirNonDir), requester: Self.requester(of: message, peerPID: peerPID))
+            copyUIDGID: message.bool(key: .copyUIDGID), noOverwriteDirNonDir: message.bool(key: .noOverwriteDirNonDir), copyAsArchive: message.bool(key: .copyAsArchive),
+            requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 

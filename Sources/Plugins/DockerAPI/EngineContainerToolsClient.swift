@@ -63,7 +63,7 @@ extension EngineContainersClient: EngineContainerTools {
         try await Self.translatedTool {
             try await ContainerClient().copyIn(
                 id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, copyUIDGID: copyUIDGID,
-                noOverwriteDirNonDir: noOverwriteDirNonDir,
+                noOverwriteDirNonDir: noOverwriteDirNonDir, copyAsArchive: true,
                 requester: requester)
         }
     }

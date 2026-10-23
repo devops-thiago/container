@@ -61,6 +61,7 @@ struct PendingCopyStartTests {
         try await f.start(service, configuration.id)
         let runtime = try #require(f.lastRuntime)
         #expect(runtime.noOverwritePolicies == [true])
+        #expect(runtime.archiveCopies == [true])
         #expect(runtime.calls == ["copyIn entry=payload /data", "start"])
         #expect(!queue.holds(configuration.id))
     }

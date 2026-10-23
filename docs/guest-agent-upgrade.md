@@ -4,6 +4,8 @@ New containers use the guest agent shipped with this engine. Existing containers
 
 Docker uploads with `noOverwriteDirNonDir` pass that policy to the guest for running containers, queued prestart copies, and uploads that race with Start. The guest checks each archive entry as it writes; a host-side preflight alone cannot protect nested entries or prevent a destination changing between the check and the copy.
 
+Native file copies refuse a same-named directory and follow a confined final file symlink. Explicit archive uploads keep their existing archive semantics: when no type-protection policy was requested, archive entries may replace a directory or a symlink. The engine carries that distinction through both running and queued uploads instead of silently changing the Docker archive API's behavior.
+
 To update an existing container, stop it and run:
 
 ```sh

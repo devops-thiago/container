@@ -99,7 +99,7 @@ struct ClientContainerTools: EngineContainerTools {
     func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, noOverwriteDirNonDir: Bool, requester: String?) async throws {
         try await ContainerClient().copyIn(
             id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, copyUIDGID: copyUIDGID,
-            noOverwriteDirNonDir: noOverwriteDirNonDir, requester: requester)
+            noOverwriteDirNonDir: noOverwriteDirNonDir, copyAsArchive: true, requester: requester)
     }
 }
 

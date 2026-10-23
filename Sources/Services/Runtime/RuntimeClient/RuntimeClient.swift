@@ -307,7 +307,7 @@ extension RuntimeClient {
     /// owner its source names.
     public func copyIn(
         source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false, hostDirectoryBookmark: Data? = nil,
-        noOverwriteDirNonDir: Bool = false
+        noOverwriteDirNonDir: Bool = false, copyAsArchive: Bool = false
     ) async throws {
         let request = XPCMessage(route: RuntimeRoutes.copyIn.rawValue)
         request.set(key: RuntimeKeys.sourcePath.rawValue, value: source)
@@ -316,6 +316,7 @@ extension RuntimeClient {
         request.set(key: RuntimeKeys.createParents.rawValue, value: createParents)
         request.set(key: RuntimeKeys.copyUIDGID.rawValue, value: copyUIDGID)
         request.set(key: RuntimeKeys.noOverwriteDirNonDir.rawValue, value: noOverwriteDirNonDir)
+        request.set(key: RuntimeKeys.copyAsArchive.rawValue, value: copyAsArchive)
         if let hostDirectoryBookmark {
             request.set(key: RuntimeKeys.hostDirectoryBookmark.rawValue, value: hostDirectoryBookmark)
         }
