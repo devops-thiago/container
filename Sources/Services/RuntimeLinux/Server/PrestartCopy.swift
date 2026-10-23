@@ -214,10 +214,11 @@ struct VminitdCopyAgent: GuestCopyAgent {
                 }
                 try listener.finish()
                 try await Self.receive(to: destination, isArchive: metadata.isArchive, recordOwners: recordOwners, from: connection)
-                if recordOwners, !metadata.isArchive {
-                    // A file comes as its bytes alone: its owner is the agent's stat of it.
-                    let info = try await agent.stat(root: root, path: path)
-                    try CopyOutOwners.record(CopyOwner(uid: info.uid, gid: info.gid), at: destination.path(percentEncoded: false))
+                if recordOwners, !metadata.isArchive, let info = try? await agent.stat(root: root, path: path) {
+                    // A file comes as its bytes alone: its owner is the agent's stat of it. As
+                    // for an archive's entries, an owner that cannot be noted leaves the copy,
+                    // already whole, as the host has it.
+                    try? CopyOutOwners.record(CopyOwner(uid: info.uid, gid: info.gid), at: destination.path(percentEncoded: false))
                 }
             },
             closeListener: { try? listener.finish() })
