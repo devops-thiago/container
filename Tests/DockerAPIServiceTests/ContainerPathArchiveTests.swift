@@ -63,6 +63,32 @@ struct ContainerPathArchiveTests {
             try await ContainerPathArchive.extract(tools, container: container, from: handle, into: path, reference: "box", requester: nil)
         }
 
+        /// What `write` streams for `path`: each entry's name and its numeric owner, from its
+        /// ustar fields or the pax header before it.
+        func owners(_ path: String) async throws -> [String: CopyOwner] {
+            _ = try await archive(path)
+            let bytes = Array(try Data(contentsOf: out))
+            var owners: [String: CopyOwner] = [:]
+            var pax: [String: String] = [:]
+            var offset = 0
+            while offset + DockerTar.blockSize <= bytes.count {
+                let block = Array(bytes[offset..<offset + DockerTar.blockSize])
+                if block.allSatisfy({ $0 == 0 }) { break }
+                let size = Int(try DockerTarExtractor.number(block[124..<136]))
+                let body = offset + DockerTar.blockSize
+                if block[156] == DockerTar.EntryType.paxExtended.rawValue {
+                    pax = try DockerTarExtractor.paxRecords(Array(bytes[body..<body + size]))
+                } else {
+                    let uid = try pax["uid"].map { try #require(UInt32($0)) } ?? UInt32(try DockerTarExtractor.number(block[108..<116]))
+                    let gid = try pax["gid"].map { try #require(UInt32($0)) } ?? UInt32(try DockerTarExtractor.number(block[116..<124]))
+                    owners[DockerTarExtractor.ustarName(block)] = CopyOwner(uid: uid, gid: gid)
+                    pax = [:]
+                }
+                offset = body + DockerTar.blockSize * ((size + 511) / 512)
+            }
+            return owners
+        }
+
         static func entries(_ bytes: [UInt8]) throws -> [String] {
             var names: [String] = []
             var offset = 0
@@ -100,6 +126,30 @@ struct ContainerPathArchiveTests {
         #expect(try await setup.archive("/dlink") == ["dlink -> /data"])
         #expect(try await setup.archive("/data/link", followLink: true) == ["a.txt"])
         #expect(try await setup.archive("/dlink", followLink: true).first == "data/")
+    }
+
+    @Test("each entry carries its own numeric owner in the container, as dockerd's archive does; ids past ustar's field go in pax")
+    func owners() async throws {
+        let setup = try Setup()
+        setup.tools.with {
+            $0.owners = [
+                "/data": CopyOwner(uid: 1000, gid: 1001), "/data/a.txt": CopyOwner(uid: 1234, gid: 5678),
+                "/data/link": CopyOwner(uid: 33, gid: 34), "/data/sub/b.txt": CopyOwner(uid: 3_000_000, gid: 3_000_001),
+                "/file": CopyOwner(uid: 70000, gid: 70001),
+            ]
+        }
+        #expect(
+            try await setup.owners("/data") == [
+                "data/": CopyOwner(uid: 1000, gid: 1001), "data/a.txt": CopyOwner(uid: 1234, gid: 5678),
+                "data/link": CopyOwner(uid: 33, gid: 34), "data/sub/": CopyOwner(uid: 0, gid: 0),
+                "data/sub/b.txt": CopyOwner(uid: 3_000_000, gid: 3_000_001),
+            ])
+        #expect(try await setup.owners("/file") == ["file": CopyOwner(uid: 70000, gid: 70001)])
+        // A root link is staged on the host, not copied: its owner is the container's stat.
+        #expect(try await setup.owners("/data/link") == ["link": CopyOwner(uid: 33, gid: 34)])
+        // Without stat in the image, the root's owner is the one the copy out recorded.
+        setup.tools.with { $0.available.remove("stat") }
+        #expect(try await setup.owners("/data/a.txt") == ["a.txt": CopyOwner(uid: 1234, gid: 5678)])
     }
 
     @Test("a path the container does not have is dockerd's not found")
