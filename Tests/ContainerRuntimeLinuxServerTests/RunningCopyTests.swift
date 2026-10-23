@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import ContainerizationError
 import Darwin
 import Foundation
@@ -84,6 +85,11 @@ struct RunningCopyTests {
         #expect(asked.first?.root == Self.rootfs)
         #expect(asked.first?.path == "/var/log/app.log")
         #expect(asked.first?.destination == destination)
+        #expect(asked.first?.recordOwners == false)
+
+        try await RunningCopy.copyOut(
+            from: "/srv", to: destination, createParents: true, rootfs: Self.rootfs, recordOwners: true, agent: agent)
+        #expect(await agent.copiesOut.last?.recordOwners == true)
     }
 
     @Test("a stop cancels the running copies and waits for each to end", .timeLimit(.minutes(1)))
@@ -229,5 +235,62 @@ struct RunningCopyTests {
         try await sent
         try await unpacked
         #expect(try String(contentsOf: directoryOut.appending(path: "inner.txt"), encoding: .utf8) == "nested contents\n")
+    }
+
+    @Test("a copy out that records owners keeps on each entry it unpacks the owner the archive names, read-only ones and links too")
+    func receiveRecordsOwners() async throws {
+        let source = try PrestartCopyTests.Source()
+        let directory = source.directory.path
+        try Data("a\n".utf8).write(to: source.directory.appending(path: "a.txt"))
+        try FileManager.default.createDirectory(at: source.directory.appending(path: "sub"), withIntermediateDirectories: true)
+        try Data("b\n".utf8).write(to: source.directory.appending(path: "sub/b.txt"))
+        try FileManager.default.createSymbolicLink(atPath: directory + "/link", withDestinationPath: "a.txt")
+        // The archive the agent sends names these owners, as `CopyArchive` takes them from here.
+        let owners: [String: CopyOwner] = [
+            "": CopyOwner(uid: 10, gid: 11), "/a.txt": CopyOwner(uid: 1234, gid: 5678), "/sub": CopyOwner(uid: 70000, gid: 70001),
+            "/sub/b.txt": CopyOwner(uid: 33, gid: 34), "/link": CopyOwner(uid: 7, gid: 8),
+        ]
+        for (path, owner) in owners { try CopyOwner.record(owner, at: directory + path) }
+        #expect(chmod(directory + "/sub/b.txt", 0o444) == 0)
+
+        let sourceDirectory = source.directory
+        let top = source.top
+        func receive(recordOwners: Bool) async throws -> String {
+            let (sendEnd, receiveEnd) = try Self.connection()
+            let out = top.appending(path: "out-\(recordOwners)")
+            async let sent: Void = VminitdCopyAgent.send(sourceDirectory, isDirectory: true, name: ".", mode: 0, owner: nil, to: sendEnd)
+            async let unpacked: Void = VminitdCopyAgent.receive(to: out, isArchive: true, recordOwners: recordOwners, from: receiveEnd)
+            try await sent
+            try await unpacked
+            return out.path
+        }
+        let recorded = try await receive(recordOwners: true)
+        for (path, owner) in owners {
+            #expect(CopyOwner.recorded(at: recorded + path) == owner, "\(path)")
+        }
+        #expect(try String(contentsOf: URL(fileURLWithPath: recorded + "/sub/b.txt"), encoding: .utf8) == "b\n")
+        var info = stat()
+        #expect(lstat(recorded + "/sub/b.txt", &info) == 0 && info.st_mode & 0o777 == 0o444)
+
+        // A copy out for anything else leaves the host's files as they are.
+        let plain = try await receive(recordOwners: false)
+        for path in owners.keys {
+            #expect(CopyOwner.recorded(at: plain + path) == nil, "\(path)")
+        }
+    }
+
+    @Test("an entry is recorded only where the unpacked tree leads, never through a link or out of it")
+    func ownerPathsStayInside() throws {
+        let source = try PrestartCopyTests.Source()
+        let root = source.directory.path
+        try FileManager.default.createDirectory(atPath: root + "/dir", withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(atPath: root + "/out", withDestinationPath: source.top.path)
+        #expect(CopyOutOwners.confined("./", under: root) == root)
+        #expect(CopyOutOwners.confined("dir/f", under: root) == root + "/dir/f")
+        #expect(CopyOutOwners.confined("./dir/./f", under: root) == root + "/dir/f")
+        #expect(CopyOutOwners.confined("out", under: root) == root + "/out")
+        #expect(CopyOutOwners.confined("out/hello.txt", under: root) == nil)
+        #expect(CopyOutOwners.confined("../hello.txt", under: root) == nil)
+        #expect(CopyOutOwners.confined("dir/../../hello.txt", under: root) == nil)
     }
 }

@@ -48,7 +48,13 @@ enum DockerTar {
         var size: UInt64 = 0
         var mtime: Date
         var linkTarget: String = ""
+        /// The numeric owner, as dockerd writes it: no user or group names
+        /// (moby's `FileInfoHeaderNoLookups`).
+        var owner = CopyOwner(uid: 0, gid: 0)
     }
+
+    /// The largest id ustar's 8-byte octal field holds; a larger one goes in a pax record.
+    static let maxOctalID: UInt32 = 0o7777777
 
     /// The header blocks for `entry`: a pax header first when ustar's fields cannot hold it.
     static func header(_ entry: Entry) -> [UInt8] {
@@ -72,6 +78,12 @@ enum DockerTar {
         if entry.size > maxOctalSize {
             pax.append(("size", String(entry.size)))
         }
+        if entry.owner.uid > maxOctalID {
+            pax.append(("uid", String(entry.owner.uid)))
+        }
+        if entry.owner.gid > maxOctalID {
+            pax.append(("gid", String(entry.owner.gid)))
+        }
         var blocks: [UInt8] = []
         if !pax.isEmpty {
             let records = paxRecords(pax)
@@ -82,7 +94,8 @@ enum DockerTar {
             blocks += padding(records.count)
         }
         blocks += ustar(
-            name: name, prefix: prefix, type: entry.type, mode: entry.mode, size: min(entry.size, maxOctalSize), mtime: entry.mtime, link: link)
+            name: name, prefix: prefix, type: entry.type, mode: entry.mode, size: min(entry.size, maxOctalSize), mtime: entry.mtime, link: link,
+            uid: entry.owner.uid > maxOctalID ? 0 : entry.owner.uid, gid: entry.owner.gid > maxOctalID ? 0 : entry.owner.gid)
         return blocks
     }
 
@@ -114,7 +127,9 @@ enum DockerTar {
         return out
     }
 
-    static func ustar(name: String, prefix: String, type: EntryType, mode: UInt32, size: UInt64, mtime: Date, link: String) -> [UInt8] {
+    static func ustar(
+        name: String, prefix: String, type: EntryType, mode: UInt32, size: UInt64, mtime: Date, link: String, uid: UInt32 = 0, gid: UInt32 = 0
+    ) -> [UInt8] {
         var block = [UInt8](repeating: 0, count: blockSize)
         func put(_ text: String, at offset: Int, length: Int) {
             for (index, byte) in text.utf8.prefix(length).enumerated() {
@@ -129,8 +144,8 @@ enum DockerTar {
         }
         put(name, at: 0, length: 100)
         octal(UInt64(mode & 0o7777), at: 100, length: 8)
-        octal(0, at: 108, length: 8)
-        octal(0, at: 116, length: 8)
+        octal(UInt64(uid), at: 108, length: 8)
+        octal(UInt64(gid), at: 116, length: 8)
         octal(size, at: 124, length: 12)
         octal(UInt64(max(mtime.timeIntervalSince1970, 0)), at: 136, length: 12)
         block[156] = type.rawValue
@@ -163,6 +178,14 @@ struct DockerTarWriter {
     /// What the root entry says about itself: the container's own stat, when there is one,
     /// since a copy out of the container does not keep a single file's mode or time.
     var rootStat: DockerPathStat?
+
+    /// The owner an entry gets, as dockerd's archive gives each file its own uid and gid: the
+    /// container's stat for the root, else what the copy out recorded on the copy
+    /// (`CopyOwner.recorded(at:)`), else root, as a copy with nothing recorded cannot say.
+    func owner(at path: String, isRoot: Bool) -> CopyOwner {
+        if isRoot, let owner = rootStat?.owner { return owner }
+        return CopyOwner.recorded(at: path) ?? CopyOwner(uid: 0, gid: 0)
+    }
 
     /// Writes the archive to `write`, a chunk at a time, each written before the next is read.
     func write(_ root: URL, as name: String, to write: (ByteBuffer) async throws -> Void) async throws {
@@ -197,15 +220,17 @@ struct DockerTarWriter {
             mode = rootStat.mode & 0o777 | DockerPathStat.posixSpecialBits(rootStat.mode)
             mtime = rootStat.mtime
         }
+        let owner = owner(at: path, isRoot: isRoot)
         switch info.st_mode & S_IFMT {
         case S_IFDIR:
-            try await write(ByteBuffer(bytes: DockerTar.header(.init(name: name + "/", type: .directory, mode: mode, mtime: mtime))))
+            try await write(ByteBuffer(bytes: DockerTar.header(.init(name: name + "/", type: .directory, mode: mode, mtime: mtime, owner: owner))))
         case S_IFLNK:
             let target = try FileManager.default.destinationOfSymbolicLink(atPath: path)
-            try await write(ByteBuffer(bytes: DockerTar.header(.init(name: name, type: .symlink, mode: mode, mtime: mtime, linkTarget: target))))
+            try await write(
+                ByteBuffer(bytes: DockerTar.header(.init(name: name, type: .symlink, mode: mode, mtime: mtime, linkTarget: target, owner: owner))))
         case S_IFREG:
             let size = UInt64(info.st_size)
-            try await write(ByteBuffer(bytes: DockerTar.header(.init(name: name, type: .file, mode: mode, size: size, mtime: mtime))))
+            try await write(ByteBuffer(bytes: DockerTar.header(.init(name: name, type: .file, mode: mode, size: size, mtime: mtime, owner: owner))))
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
             defer { try? handle.close() }
             var left = size
@@ -317,6 +342,20 @@ struct DockerTarExtractor {
                     paxPath = Self.string(data[...])
                 case .gnuLongLink:
                     paxLink = Self.string(data[...])
+                case .paxGlobal:
+                    // dockerd ignores a global header: Go's archive/tar returns it as an entry
+                    // of its own and "does not currently support persisting the global state
+                    // across files" (src/archive/tar/common.go, TypeXGlobalHeader), and moby's
+                    // unpack skips that entry ("PAX Global Extended Headers found and ignored",
+                    // github.com/moby/go-archive archive.go). So its uid, gid or path apply to
+                    // nothing here either. As there, its records must still parse, and the
+                    // per-entry headers read before it belonged to it, not to the next entry.
+                    _ = try Self.paxRecords(data)
+                    paxPath = nil
+                    paxLink = nil
+                    paxSize = nil
+                    paxUID = nil
+                    paxGID = nil
                 default:
                     break
                 }
