@@ -17,6 +17,7 @@
 import ContainerResource
 import Foundation
 import NIOCore
+import Synchronization
 import Testing
 
 @testable import DockerAPIService
@@ -245,13 +246,76 @@ struct LogRouteTests {
             try h.tools.appendLog("first run\n")
             #expect(try await client.read(through: "first run\n").hasSuffix("first run\n"))
             // Control: the engine's rollover of a full log, in the same run, is sent on.
-            try rewrite("[container log rolled over]\nrolled\n")
+            try rewrite("[container log rolled over: \(UUID())]\nrolled\n")
             #expect(try await client.read(through: "rolled\n").hasSuffix("rolled\n"))
             // The restart: a new run, which starts the log again.
             h.tools.base.update(String(ToolHarness.ttyID.prefix(12))) { $0.startedDate = Fixtures.now }
             try rewrite("second run\n")
             let rest = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
             #expect(!rest.contains("second run"))
+        }
+    }
+
+    @Test("a run that rolls its log over and exits before the follow looks again still has the rolled-over output sent")
+    func followSendsRolloverOfEndedRun() async throws {
+        let (url, handle) = try LogFileTests.file("first run\n")
+        defer {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: url)
+        }
+        let rollover = "[container log rolled over: \(UUID())]\nfinal words\n"
+        let asked = Mutex(0)
+        let sent = Mutex(Data())
+        let options = DockerToolOptions(logPollInterval: .milliseconds(10), logStatusInterval: .milliseconds(20), statsInterval: .milliseconds(50))
+        try await DockerLogPump.run(
+            file: DockerLogFile(fd: handle.fileDescriptor), end: nil,
+            framer: DockerLogFramer(multiplexed: false, stream: .stdout, timestamps: false), options: options,
+            stillRunning: {
+                // Asked first as the follow begins, then after the first run's output was sent.
+                guard
+                    asked.withLock({
+                        $0 += 1
+                        return $0
+                    }) > 1
+                else { return true }
+                // The rollover and the exit both land while the follow waits on this answer: it
+                // next looks at a log rewritten by the rollover, of a run that has ended.
+                let writer = try FileHandle(forWritingTo: url)
+                defer { try? writer.close() }
+                try writer.truncate(atOffset: 0)
+                try writer.write(contentsOf: Data(rollover.utf8))
+                return false
+            },
+            write: { buffer in sent.withLock { $0.append(contentsOf: buffer.readableBytesView) } })
+        #expect(String(decoding: sent.withLock { $0 }, as: UTF8.self) == "first run\n" + rollover)
+    }
+
+    @Test("a follow begun as the container restarts follows the new run to its end, rather than sending its log as the old run's last")
+    func followBegunAcrossRestart() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        try h.tools.appendLog("first run\n")
+        let tools = h.tools
+        tools.with {
+            $0.onLogOpen = {
+                // Between the route's look at the container and its open of the log: the run
+                // exits and the policy starts the next, which starts the log again.
+                tools.base.update(String(ToolHarness.ttyID.prefix(12))) { $0.startedDate = Fixtures.now }
+                let writer = try FileHandle(forWritingTo: tools.logFile)
+                defer { try? writer.close() }
+                try writer.truncate(atOffset: 0)
+                try writer.write(contentsOf: Data("second run\n".utf8))
+            }
+        }
+        try await h.server.withClient { client in
+            try await client.send("GET /v1.48/containers/term/logs?stdout=1&follow=1 HTTP/1.1\r\nHost: d\r\nConnection: close\r\n\r\n")
+            #expect(try await client.read(through: "second run\n").hasSuffix("second run\n"))
+            // Still followed: the run it follows is the one whose log it read.
+            try h.tools.appendLog("more of the second run\n")
+            #expect(try await client.read(through: "more of the second run\n").hasSuffix("more of the second run\n"))
+            h.tools.base.update(String(ToolHarness.ttyID.prefix(12))) { $0.status = .stopped }
+            let rest = String(decoding: try await ToolHarness.readAll(client), as: UTF8.self)
+            #expect(!rest.contains("first run"))
         }
     }
 
