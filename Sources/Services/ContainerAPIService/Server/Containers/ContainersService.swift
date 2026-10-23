@@ -1573,6 +1573,28 @@ public actor ContainersService {
         await self.settlePeerHosts()
     }
 
+    /// A one-time, explicit adoption of a stopped managed container, without recreating it.
+    /// The lifecycle lock and incarnation check bind consent to the exact observed object.
+    public func adoptWritableSysfs(id: String, expectedIncarnation: String, role: ManagedSysfsRole) async throws {
+        guard !expectedIncarnation.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "adoption requires the observed container incarnation")
+        }
+        try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            var state = try await self.getContainerState(id: id, context: context)
+            try Self.require(labels: role.requiredLabels, incarnation: expectedIncarnation, on: state, id: id)
+            guard !state.snapshot.configuration.writableSysfs else { return }
+            guard state.snapshot.status == .stopped else {
+                throw ContainerizationError(.invalidState, message: "stop \(id) before adopting it")
+            }
+            try Task.checkCancellation()
+            var configuration = state.snapshot.configuration
+            configuration.writableSysfs = true
+            try await self.persist(configuration, for: id)
+            state.snapshot.configuration = configuration
+            await self.setContainerState(id, state, context: context)
+        }
+    }
+
     /// Set labels on a container, of the keys `labelPolicy` lets change: in memory, in the
     /// bundle, and in the configuration its runtime helper reads at its first start, so the
     /// change outlives the engine. A change of the name label is a `rename` event.

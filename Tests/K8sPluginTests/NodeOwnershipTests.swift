@@ -33,6 +33,12 @@ struct NodeOwnershipTests {
         #expect(labels[ResourceLabelKeys.role] == role)
     }
 
+    @Test("legacy adoption is an explicit CLI option")
+    func legacyAdoptionOption() throws {
+        #expect(try K8sStart.parse([]).adoptLegacy == false)
+        #expect(try K8sStart.parse(["--adopt-legacy"]).adoptLegacy)
+    }
+
     @Test("Kubernetes ownership options are repeatable and optional")
     func commandOptions() throws {
         #expect(try K8sCreate.parse([]).labels.isEmpty)
