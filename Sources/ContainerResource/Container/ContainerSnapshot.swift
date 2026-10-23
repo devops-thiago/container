@@ -160,4 +160,28 @@ extension ContainerSnapshot {
     public var hasLiveProcess: Bool {
         status == .running || status == .stopping
     }
+
+    /// The run a follow of a container's log follows, and the cursor `start` placed on the log
+    /// while the container was in it.
+    ///
+    /// The engine starts a run's log again in place, so a cursor placed after `run` ended may
+    /// already be on the next run's log. `start` is placed between `run` and a `look` that shows
+    /// the container still in that run, so what it reads first is that run's own. A run that
+    /// changed in between is the one followed instead, as dockerd follows the run whose log is
+    /// current when it opens it, and is looked at again, `attempts` times at most. A container
+    /// with no live process, or whose runs keep changing, is not followed: the run is nil, and
+    /// the cursor is what is there.
+    public static func startFollowing<Cursor>(
+        _ run: ContainerSnapshot?, look: () async throws -> ContainerSnapshot?, attempts: Int = 3,
+        start: () throws -> Cursor
+    ) async throws -> (run: ContainerSnapshot?, cursor: Cursor) {
+        var run = run
+        for _ in 0..<attempts {
+            guard let current = run, current.hasLiveProcess else { break }
+            let cursor = try start()
+            run = try await look()
+            if let after = run, after.isInRun(of: current) { return (current, cursor) }
+        }
+        return (nil, try start())
+    }
 }

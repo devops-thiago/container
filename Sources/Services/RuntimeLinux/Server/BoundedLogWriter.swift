@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerLog
 import Containerization
 import Foundation
 import Synchronization
@@ -22,7 +23,6 @@ import Synchronization
 /// inode so readers holding an XPC-transferred descriptor can keep following it.
 final class BoundedLogWriter: Sendable {
     static let defaultMaximumBytes = 10 * 1024 * 1024
-    static let markerPrefix = "[container log rolled over: "
 
     struct Operations: Sendable {
         var write: @Sendable (FileHandle, Data) throws -> Void = { try $0.write(contentsOf: $1) }
@@ -66,7 +66,7 @@ final class BoundedLogWriter: Sendable {
             guard !data.isEmpty else { return }
             do {
                 if data.count > maximumBytes - state.bytes {
-                    let marker = Data("\(Self.markerPrefix)\(UUID().uuidString)]\n".utf8)
+                    let marker = Data("\(LogRollover.markerPrefix)\(UUID().uuidString)]\n".utf8)
                     try operations.truncate(handle)
                     try handle.seek(toOffset: 0)
                     state.bytes = 0
