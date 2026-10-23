@@ -521,9 +521,11 @@ public struct ContainerClient: Sendable {
     /// - Parameters:
     ///   - copyUIDGID: what is copied belongs to the container's user, as `docker cp -a` has
     ///     it; otherwise each file keeps the owner its source names.
+    ///   - noOverwriteDirNonDir: have the guest refuse replacing a directory with a
+    ///     non-directory or the reverse, including entries inside an archive.
     ///   - requester: who this copy is for, as `create` takes it.
     public func copyIn(
-        id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, copyUIDGID: Bool = false,
+        id: String, source: String, destination: String, mode: UInt32 = 0o644, createParents: Bool = true, copyUIDGID: Bool = false, noOverwriteDirNonDir: Bool = false,
         requester: String? = nil
     ) async throws {
         let request = XPCMessage(route: .containerCopyIn)
@@ -534,6 +536,7 @@ public struct ContainerClient: Sendable {
         request.set(key: .fileMode, value: UInt64(mode))
         request.set(key: .createParents, value: createParents)
         request.set(key: .copyUIDGID, value: copyUIDGID)
+        request.set(key: .noOverwriteDirNonDir, value: noOverwriteDirNonDir)
 
         do {
             try await xpcSend(message: request, timeout: Self.grantAwareTimeout + .seconds(300))

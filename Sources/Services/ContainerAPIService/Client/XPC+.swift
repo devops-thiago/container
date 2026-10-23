@@ -209,6 +209,7 @@ public enum XPCKeys: String {
     case createParents
     /// Whether a copy in is owned by the container's user, as `docker cp -a` has it.
     case copyUIDGID
+    case noOverwriteDirNonDir
     /// Whether a copy out keeps each file's owner in the container on the copy
     /// (`CopyOwner.record(_:at:)`), for an archive of it that carries the owners.
     case recordCopyOwners

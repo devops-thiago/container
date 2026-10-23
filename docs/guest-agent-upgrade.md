@@ -2,6 +2,8 @@
 
 New containers use the guest agent shipped with this engine. Existing containers retain their guest filesystem, including any customizations. A copy that requires the new owned-file or checked-archive operation fails before writing when the installed guest does not support it. The engine does not retry the unsafe archive operation.
 
+Docker uploads with `noOverwriteDirNonDir` pass that policy to the guest for running containers, queued prestart copies, and uploads that race with Start. The guest checks each archive entry as it writes; a host-side preflight alone cannot protect nested entries or prevent a destination changing between the check and the copy.
+
 To update an existing container, stop it and run:
 
 ```sh

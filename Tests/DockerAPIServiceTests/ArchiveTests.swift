@@ -838,6 +838,18 @@ struct ArchiveRouteTests {
         #expect(h.tools.copyCalls == ["in ok.txt / 644"])
     }
 
+    @Test("running uploads carry the no-overwrite policy to the engine, including nested archives", arguments: [false, true])
+    func runningNoOverwriteReachesGuest(strict: Bool) async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        var tar = TarBuilder()
+        tar.directory("nested")
+        tar.file("nested/entry", "payload")
+        let answer = try await h.request("PUT", "/containers/box/archive?path=/&noOverwriteDirNonDir=\(strict)", body: tar.archive)
+        #expect(answer.status == 200)
+        #expect(h.tools.copyNoOverwriteCalls == [strict])
+    }
+
     @Test("noOverwriteDirNonDir refuses replacing a directory with a file; without it the copy goes ahead")
     func noOverwrite() async throws {
         let h = try await ToolHarness.start()

@@ -300,6 +300,7 @@ extension ContainerToolRoutes.Routes {
                 if noOverwriteDirNonDir { try await requireMatchingEntryKinds(entries, in: path, of: container) }
                 try await copyIn(
                     entries, from: PendingCopyQueue.root(of: upload), into: path, of: container, reference: reference, copyUIDGID: copyUIDGID,
+                    noOverwriteDirNonDir: noOverwriteDirNonDir,
                     requester: request.peer?.requester)
                 return .empty(.ok)
             }
@@ -308,7 +309,8 @@ extension ContainerToolRoutes.Routes {
             try await requireMatchingEntryKinds(entries, in: path, of: container)
         }
         try await copyIn(
-            entries, from: root, into: path, of: container, reference: reference, copyUIDGID: copyUIDGID, requester: request.peer?.requester)
+            entries, from: root, into: path, of: container, reference: reference, copyUIDGID: copyUIDGID, noOverwriteDirNonDir: noOverwriteDirNonDir,
+            requester: request.peer?.requester)
         return .empty(.ok)
     }
 
@@ -327,13 +329,14 @@ extension ContainerToolRoutes.Routes {
 
     /// Copies each of `entries`, unpacked in `root`, into the directory `path` in `container`.
     func copyIn(
-        _ entries: [DockerExtractedEntry], from root: URL, into path: String, of container: DockerContainer, reference: String, copyUIDGID: Bool,
+        _ entries: [DockerExtractedEntry], from root: URL, into path: String, of container: DockerContainer, reference: String, copyUIDGID: Bool, noOverwriteDirNonDir: Bool,
         requester: String?
     ) async throws {
         for entry in entries {
             do {
                 try await engine.copyIn(
                     container.snapshot, source: root.appending(path: entry.name), destination: path, mode: entry.mode, copyUIDGID: copyUIDGID,
+                    noOverwriteDirNonDir: noOverwriteDirNonDir,
                     requester: requester)
             } catch {
                 throw DockerAPIError.internalError("could not copy \(entry.name) into \(path) in container \(reference): \(DockerContainerProcesses.message(error))")

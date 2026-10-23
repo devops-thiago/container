@@ -59,10 +59,11 @@ extension EngineContainersClient: EngineContainerTools {
         }
     }
 
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, requester: String?) async throws {
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, noOverwriteDirNonDir: Bool, requester: String?) async throws {
         try await Self.translatedTool {
             try await ContainerClient().copyIn(
                 id: container.id, source: source.path(percentEncoded: false), destination: destination, mode: mode, copyUIDGID: copyUIDGID,
+                noOverwriteDirNonDir: noOverwriteDirNonDir,
                 requester: requester)
         }
     }

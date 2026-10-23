@@ -1326,7 +1326,7 @@ public actor ContainersService {
     ///
     /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
     public func copyIn(
-        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false,
+        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false, noOverwriteDirNonDir: Bool = false,
         requester: String? = nil
     ) async throws {
         self.log.debug("\(#function)")
@@ -1341,7 +1341,7 @@ public actor ContainersService {
         }
         try await client.copyIn(
             source: source, destination: destination, mode: mode, createParents: createParents, copyUIDGID: copyUIDGID,
-            hostDirectoryBookmark: bookmark)
+            hostDirectoryBookmark: bookmark, noOverwriteDirNonDir: noOverwriteDirNonDir)
     }
 
     /// Copy a file or directory from the container to the host.
