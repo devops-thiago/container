@@ -60,7 +60,7 @@ struct BoundedLogWriterTests {
         try log.write(data)
         let stored = try fixture.data()
         #expect(stored.count == 256)
-        #expect(String(decoding: stored, as: UTF8.self).hasPrefix(BoundedLogWriter.markerPrefix))
+        #expect(String(decoding: stored, as: UTF8.self).hasPrefix(LogRollover.markerPrefix))
         #expect(stored.suffix(7) == Data("RECENT\n".utf8))
     }
 
@@ -174,16 +174,16 @@ struct BoundedLogWriterTests {
         var previous = Data()
         for _ in 0..<10 {
             try log.write(Data(repeating: 65, count: 512))
-            let current = try reader.nextChunk()
+            let current = try reader.next()
             #expect(current.count == 256)
             #expect(current != previous)
-            #expect(try reader.nextChunk().isEmpty)
+            #expect(try reader.next().isEmpty)
             previous = current
         }
         let reconnect = try FileHandle(forReadingFrom: fixture.path)
         defer { try? reconnect.close() }
         var freshReader = try LogFileReader(handle: reconnect)
-        #expect(try freshReader.nextChunk() == previous)
+        #expect(try freshReader.next() == previous)
     }
 
     @Test func restartTruncationIsVisibleAndNewWriterGetsFreshBudget() throws {
@@ -193,16 +193,16 @@ struct BoundedLogWriterTests {
         var reader = try LogFileReader(handle: handle)
         let oldLog = try BoundedLogWriter(handle: fixture.handle(), maximumBytes: 256)
         try oldLog.write(Data(repeating: 65, count: 256))
-        #expect(try reader.nextChunk().count == 256)
+        #expect(try reader.next().count == 256)
         try oldLog.close()
         let restartHandle = try fixture.handle()
         try restartHandle.truncate(atOffset: 0)
         let newLog = try BoundedLogWriter(handle: restartHandle, maximumBytes: 256)
         defer { try? newLog.close() }
         try newLog.write(Data("restarted\n".utf8))
-        #expect(try reader.nextChunk() == Data("restarted\n".utf8))
+        #expect(try reader.next() == Data("restarted\n".utf8))
         try newLog.write(Data(repeating: 66, count: 512))
-        #expect(try reader.nextChunk().count == 256)
+        #expect(try reader.next().count == 256)
     }
 
     @Test func followerReceivesRolloverAndStopsOnCancellation() async throws {
