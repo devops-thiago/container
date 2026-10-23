@@ -488,7 +488,7 @@ public struct ContainersHarness: Sendable {
 
         try await service.copyOut(
             id: id, source: sourcePath, destination: destinationPath, createParents: createParents,
-            requester: Self.requester(of: message, peerPID: peerPID))
+            requester: Self.requester(of: message, peerPID: peerPID), recordOwners: message.bool(key: .recordCopyOwners))
         return message.reply()
     }
 
