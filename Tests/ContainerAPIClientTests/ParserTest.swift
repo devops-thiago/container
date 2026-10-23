@@ -1530,6 +1530,40 @@ struct ParserTest {
         }
     }
 
+    @Test(arguments: ["100000g", "1048576g", "20000000000000g", "99999999999999999999999999p"])
+    func testResourcesRefuseMemoryNoVMCanHave(memory: String) throws {
+        // The two larger ones trapped converting to bytes before the bound was ever checked.
+        let error = #expect(throws: ContainerizationError.self) {
+            _ = try Parser.resources(cpus: nil, memory: memory, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+        }
+        #expect(error?.code == .invalidArgument)
+    }
+
+    @Test func testResourcesKeepTheLargestMemoryAVMCanHave() throws {
+        let maximum = ContainerConfiguration.Resources.maximumMemoryLimit()
+        let mib = maximum >> 20
+        #expect(try Parser.resources(cpus: nil, memory: "\(mib)m", defaultCPUs: 4, defaultMemory: MemorySize("1g")).memoryInBytes == maximum)
+        let error = #expect(throws: ContainerizationError.self) {
+            _ = try Parser.resources(cpus: nil, memory: "\(mib + 1)m", defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+        }
+        #expect(error?.message.contains("the most a container can have is \(mib) MiB") == true)
+    }
+
+    @Test(arguments: ["100000g", "20000000000000g", "99999999999999999999999999p"])
+    func testResourcesClampADefaultMemory(defaultMemory: String) throws {
+        // A system property is not the user's to correct at every command, as with CPUs.
+        let result = try Parser.resources(cpus: nil, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize(defaultMemory))
+        #expect(result.memoryInBytes == ContainerConfiguration.Resources.maximumMemoryLimit())
+    }
+
+    @Test func testMemoryStringsTooLargeToCountAreRefused() throws {
+        // Past `Int64.max` MiB, and past `UInt64.max` bytes: both trapped converting.
+        #expect(throws: ContainerizationError.self) { _ = try Parser.memoryStringAsMiB("99999999999999999999999999p") }
+        #expect(throws: ContainerizationError.self) { _ = try Parser.memoryStringAsBytes("20000000000000g") }
+        #expect(try Parser.memoryStringAsMiB("20000000000000g") == 20_000_000_000_000 * 1024)
+        #expect(try Parser.memoryStringAsBytes("64m") == 64 << 20)
+    }
+
     @Test func testResourcesBuildPropertyLookup() async throws {
         let content = """
             [build]

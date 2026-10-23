@@ -178,6 +178,7 @@ public actor MachinesService {
 
     public func create(configuration: MachineConfiguration, resources: MachineResources?, bootConfig: MachineConfig) async throws {
         self.log.debug("\(#function)")
+        try Self.validateMemory(of: bootConfig)
 
         try await self.lock.withLock { context in
             guard await self.machines[configuration.id] == nil else {
@@ -267,6 +268,7 @@ public actor MachinesService {
 
     public func setConfig(id: String, bootConfig: MachineConfig) async throws {
         self.log.debug("\(#function)")
+        try Self.validateMemory(of: bootConfig)
         try await self.lock.withLock { context in
             var state = try await self._getMachineState(id: id)
             let path = try self.bundlePath(id: id)
@@ -276,6 +278,16 @@ public actor MachinesService {
             state.snapshot.bootConfig = bootConfig
             await self.setMachineState(id, state, context: context)
         }
+    }
+
+    /// Refuses a machine memory no VM can have: the machine's container is limited to it, and
+    /// its VM is that plus the guest's reserve, which Virtualization caps.
+    static func validateMemory(
+        of bootConfig: MachineConfig, virtualMemory: UInt64 = ContainerConfiguration.Resources.maximumVirtualMemory
+    ) throws {
+        var resources = ContainerConfiguration.Resources()
+        resources.memoryInBytes = bootConfig.memory.toUInt64(unit: .bytes)
+        try resources.validateMemory(virtualMemory: virtualMemory)
     }
 
     private func _getMachineState(id: String) throws -> MachineState {
