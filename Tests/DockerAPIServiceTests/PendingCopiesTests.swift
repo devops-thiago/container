@@ -160,6 +160,36 @@ struct PendingCopiesTests {
         #expect((try again.json()["message"] as? String)?.contains(damaged) == true)
     }
 
+    @Test("an unknown record version is retained unchanged across restart and never replayed")
+    func unsupportedVersion() async throws {
+        let tools = try FakeTools(snapshots: ToolHarness.snapshots())
+        defer { tools.cleanup() }
+        tools.with { $0.copyBeforeStart = true }
+        let first = try await ToolHarness.start(tools: tools)
+        #expect(try await first.request("PUT", Self.upload, body: Self.tar([("keep.txt", "keep these bytes")])).status == 200)
+        try await first.stop(keepEngine: true)
+        let queue = tools.queue.directory.appending(path: "pending/\(Self.stopped)")
+        let name = try #require(Self.names(in: queue).first)
+        let upload = queue.appending(path: name)
+        let recordURL = upload.appending(path: PendingCopyQueue.recordName)
+        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: recordURL)) as? [String: Any])
+        object["version"] = 2
+        let record = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try record.write(to: recordURL)
+        let payloadURL = PendingCopyQueue.root(of: upload).appending(path: "keep.txt")
+        let payload = try Data(contentsOf: payloadURL)
+        for _ in 0..<2 {
+            let service = try await ToolHarness.start(tools: tools, copies: DockerPendingCopies(queue: tools.queue))
+            let response = try await service.request("POST", "/containers/off/start")
+            #expect(response.status == 500)
+            #expect(((try? response.json())?["message"] as? String)?.contains("unsupported pending-copy record version 2") == true)
+            #expect(tools.copyCalls.isEmpty)
+            #expect((try? Data(contentsOf: recordURL)) == record)
+            #expect((try? Data(contentsOf: payloadURL)) == payload)
+            try await service.stop(keepEngine: true)
+        }
+    }
+
     @Test("an entry that cannot be copied in fails the start naming it; it and what follows stay held, and the next start copies them in")
     func partialFailure() async throws {
         let tools = try FakeTools(snapshots: ToolHarness.snapshots())

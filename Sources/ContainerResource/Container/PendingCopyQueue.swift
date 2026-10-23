@@ -208,6 +208,13 @@ public struct PendingCopyQueue: Sendable {
                 release(container)
                 throw Failure(upload: upload, message: "could not read the copy held in \(upload.path(percentEncoded: false)): \(error)")
             }
+            guard record.version == 1 else {
+                release(container)
+                let held = pending(container).appending(path: upload.lastPathComponent)
+                throw Failure(
+                    upload: held,
+                    message: "unsupported pending-copy record version \(record.version) in \(held.path(percentEncoded: false)); the upload is preserved for a compatible engine")
+            }
             // Whether the record on disk names nothing that is in.
             var recorded = true
             while let entry = record.entries.first {
