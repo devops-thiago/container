@@ -89,9 +89,9 @@ public actor DockerContainerProcesses {
             stdinPipe = stdinOpen && claimed.contains { $0.options.stdin } ? try StdioPipe(.intoContainer) : nil
             stdoutPipe = claimed.contains { $0.options.stdout } ? try StdioPipe(.outOfContainer) : nil
             stderrPipe = !tty && claimed.contains { $0.options.stderr } ? try StdioPipe(.outOfContainer) : nil
-            stdio = DockerProcessStdio(
-                stdin: try stdinPipe?.containerHandleForEngine(), stdout: try stdoutPipe?.containerHandleForEngine(),
-                stderr: try stderrPipe?.containerHandleForEngine())
+            stdio = try DockerProcessStdio.duplicating(
+                stdin: stdinPipe, stdout: stdoutPipe,
+                stderr: stderrPipe)
         } catch {
             await attaches.complete(tickets, .released)
             throw DockerAPIError.internalError("could not make the container's stdio: \(error)")
