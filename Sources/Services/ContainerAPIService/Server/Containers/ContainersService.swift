@@ -463,6 +463,7 @@ public actor ContainersService {
         // Validate before allocating snapshots, starting a runtime, or persisting a
         // stopped container that can never boot. This also covers non-CLI clients.
         try configuration.resources.validateCPUs()
+        try configuration.resources.validateMemory()
         if configuration.networks.isEmpty,
             let host = configuration.extraHosts.first(where: { $0.address == ContainerConfiguration.ExtraHost.hostGateway })
         {

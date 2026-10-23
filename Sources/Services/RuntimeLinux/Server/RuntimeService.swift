@@ -1500,9 +1500,13 @@ public actor RuntimeService {
     /// The resources a saved configuration boots with. One saved before create refused CPU
     /// counts no VM can have may hold one, which would overflow the VM's CPU count and the CPU
     /// quota (`cpus * 100_000`) and trap this helper; it boots clamped instead, with the VM it
-    /// always had, the runtime giving a VM at most the host's CPUs.
-    static func bootableResources(_ resources: ContainerConfiguration.Resources) -> ContainerConfiguration.Resources {
-        resources.clampedCPUs()
+    /// always had, the runtime giving a VM at most the host's CPUs. A memory limit no VM can
+    /// have, saved before create refused it, never booted at all (its VM was past
+    /// Virtualization's limit, or overflowed being sized); it boots at the largest one.
+    static func bootableResources(
+        _ resources: ContainerConfiguration.Resources, virtualMemory: UInt64 = ContainerConfiguration.Resources.maximumVirtualMemory
+    ) -> ContainerConfiguration.Resources {
+        resources.clampedCPUs().clampedMemory(virtualMemory: virtualMemory)
     }
 
     /// The guest's sysctls: the caller's, plus two defaults for the keys it left unset.

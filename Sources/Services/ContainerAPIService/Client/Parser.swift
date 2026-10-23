@@ -55,16 +55,22 @@ public enum VolumeOrFilesystem {
 }
 
 public struct Parser {
+    /// `memory` in whole MiB, refusing a size no count of MiB can hold rather than trapping.
     public static func memoryStringAsMiB(_ memory: String) throws -> Int64 {
-        let ram = try Measurement.parse(parsing: memory)
-        let mb = ram.converted(to: .mebibytes)
-        return Int64(mb.value)
+        let mib = try Measurement.parse(parsing: memory).converted(to: .mebibytes).value
+        guard mib.isFinite, mib >= 0, mib < 0x1p63 else {
+            throw ContainerizationError(.invalidArgument, message: "invalid memory size '\(memory)': too large")
+        }
+        return Int64(mib)
     }
 
+    /// `memory` in bytes, refusing a size no count of bytes can hold rather than trapping.
     public static func memoryStringAsBytes(_ memory: String) throws -> UInt64 {
-        let ram = try Measurement.parse(parsing: memory)
-        let mb = ram.converted(to: .bytes)
-        return UInt64(mb.value)
+        let bytes = try Measurement.parse(parsing: memory).converted(to: .bytes).value
+        guard bytes.isFinite, bytes >= 0, bytes < 0x1p64 else {
+            throw ContainerizationError(.invalidArgument, message: "invalid memory size '\(memory)': too large")
+        }
+        return UInt64(bytes)
     }
 
     public static func user(
@@ -156,8 +162,11 @@ public struct Parser {
         var resource = ContainerConfiguration.Resources()
         // A default from the system properties is not the user's to correct here: one no VM
         // can have is brought into range, as the runtime always gave the VM the host's at most.
+        // A default memory no VM can have, which never booted, is brought down to the largest.
         resource.cpus = ContainerConfiguration.Resources.clampedCPUCount(defaultCPUs)
-        resource.memoryInBytes = Int64(defaultMemory.measurement.converted(to: .mebibytes).value).mib()
+        let defaultMiB = defaultMemory.measurement.converted(to: .mebibytes).value
+        resource.memoryInBytes = defaultMiB.isNaN || defaultMiB <= 0 ? 0 : wholeMiBAsBytes(saturating: defaultMiB)
+        resource = resource.clampedMemory()
 
         if let cpus {
             resource.cpus = Int(cpus)
@@ -165,10 +174,27 @@ public struct Parser {
         }
 
         if let memory {
-            resource.memoryInBytes = try Parser.memoryStringAsMiB(memory).mib()
+            resource.memoryInBytes = try memoryLimit(memory)
         }
 
         return resource
+    }
+
+    /// A `--memory` value as the container's limit in bytes, in whole MiB as `container run`
+    /// takes it, refusing one whose VM no Mac can give.
+    public static func memoryLimit(_ memory: String) throws -> UInt64 {
+        let mib = try memoryStringAsMiB(memory)
+        let (bytes, overflow) = UInt64(mib).multipliedReportingOverflow(by: 1 << 20)
+        var resources = ContainerConfiguration.Resources()
+        resources.memoryInBytes = overflow ? UInt64.max : bytes
+        try resources.validateMemory()
+        return resources.memoryInBytes
+    }
+
+    /// The whole MiB in `mib` as bytes, saturating at `UInt64.max`.
+    private static func wholeMiBAsBytes(saturating mib: Double) -> UInt64 {
+        guard mib < 0x1p44 else { return UInt64.max }
+        return UInt64(mib) << 20
     }
 
     public static func allEnv(imageEnvs: [String], envFiles: [String], envs: [String]) throws -> [String] {

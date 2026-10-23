@@ -293,8 +293,12 @@ public enum ContainerCreateMapper {
 
     /// - Parameter hostCPUs: the CPUs there are, which dockerd counts with `runtime.NumCPU()`
     ///   and the runtime gives a VM at most.
+    /// - Parameter virtualMemory: the most memory a VM can have. dockerd refuses only a limit
+    ///   below its minimum, as a cgroup takes any larger one; here the limit sizes the
+    ///   container's VM, so one whose VM cannot fit is refused the way the minimum is.
     static func resources(
-        _ host: DockerHostConfig, defaults: DockerCreateDefaults, hostCPUs: Int = ProcessInfo.processInfo.activeProcessorCount
+        _ host: DockerHostConfig, defaults: DockerCreateDefaults, hostCPUs: Int = ProcessInfo.processInfo.activeProcessorCount,
+        virtualMemory: UInt64 = ContainerConfiguration.Resources.maximumVirtualMemory
     ) throws(DockerAPIError) -> ContainerConfiguration.Resources {
         var resources = ContainerConfiguration.Resources()
         resources.cpus = defaults.cpus
@@ -324,6 +328,10 @@ public enum ContainerCreateMapper {
         if let memory = host.Memory, memory != 0 {
             guard memory >= minimumMemory else {
                 throw .badRequest("Minimum memory limit allowed is 6MB")
+            }
+            let maximum = ContainerConfiguration.Resources.maximumMemoryLimit(virtualMemory: virtualMemory)
+            guard UInt64(memory) <= maximum else {
+                throw .badRequest("Maximum memory limit allowed is \(maximum >> 20)MB, as a container's VM can have at most \(virtualMemory >> 20)MB")
             }
             resources.memoryInBytes = UInt64(memory)
         }

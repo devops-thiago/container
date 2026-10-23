@@ -274,6 +274,33 @@ struct ContainersServiceRecoveryTests {
         #expect(try fixture.contents() == before)
     }
 
+    @Test(
+        "Create refuses a memory limit no VM can have, from any client, before any resource preparation",
+        arguments: [
+            ContainerConfiguration.Resources.maximumMemoryLimit() + 1024 * 1024, UInt64(1) << 50, UInt64(Int64.max), UInt64.max,
+        ])
+    func createRejectsOutOfRangeMemory(memory: UInt64) async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let before = try fixture.contents()
+        let service = try ContainersService(
+            appRoot: fixture.root, pluginLoader: fixture.loader(),
+            containerSystemConfig: ContainerSystemConfig(), log: fixture.log)
+        var configuration = fixture.configuration
+        configuration.id = "too-much-memory"
+        configuration.resources.memoryInBytes = memory
+        let error = await #expect(throws: ContainerizationError.self) {
+            try await service.create(
+                configuration: configuration,
+                kernel: .init(path: fixture.bundle.appendingPathComponent("kernel.bin"), platform: .linuxArm), options: .default)
+        }
+        #expect(error?.code == .invalidArgument)
+        #expect(error?.message.contains("invalid memory limit") == true)
+        #expect(!FileManager.default.fileExists(atPath: fixture.containers.appendingPathComponent(configuration.id).path))
+        #expect(try await service.list().isEmpty)
+        #expect(try fixture.contents() == before)
+    }
+
     @Test("Creating a container cannot reuse an ID with preserved recovery data")
     func createRejectsPreservedBundle() async throws {
         let fixture = try Fixture()
