@@ -46,6 +46,9 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
     private let lock = NSLock()
     /// Executables the container has; a start of anything else fails as the engine's does.
     var available: Set<String> = ["sh", "cat", "stat", "readlink", "ps"]
+    /// Who owns each path in the container, by its absolute path; root owns the rest. `stat`
+    /// says so, and a copy out records it on the copy, as the engine's does.
+    var owners: [String: CopyOwner] = [:]
     /// What `ps` prints.
     var psOutput = "PID   USER     TIME  COMMAND\n    1 root      0:00 sleep 60\n   12 root      0:00 ps -ef\n"
     var psStatus: Int32 = 0
@@ -199,6 +202,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         case "stat":
             let follow = arguments.contains("-L")
             let path = arguments.last ?? ""
+            let owner = lock.withLock { owners[path] } ?? CopyOwner(uid: 0, gid: 0)
             return { io in
                 var info = stat()
                 let found = follow ? stat(root + path, &info) : lstat(root + path, &info)
@@ -206,7 +210,7 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
                     await io.write("stat: can't stat '\(path)': No such file or directory\n", to: .stderr)
                     return 1
                 }
-                await io.write("\(String(info.st_mode, radix: 16)) \(info.st_size) \(info.st_mtimespec.tv_sec)\n")
+                await io.write("\(String(info.st_mode, radix: 16)) \(info.st_size) \(info.st_mtimespec.tv_sec) \(owner.uid) \(owner.gid)\n")
                 return 0
             }
         case "readlink":
@@ -261,6 +265,14 @@ final class FakeTools: EngineContainers, EngineContainerTools, @unchecked Sendab
         let from = root.path + source
         guard FileManager.default.fileExists(atPath: from) else { throw DockerAPIError.internalError("copyOut: source not found '\(source)'") }
         try FileManager.default.copyItem(atPath: from, toPath: destination.path)
+        let owners = lock.withLock { self.owners }
+        let paths = [""] + ((try? FileManager.default.subpathsOfDirectory(atPath: destination.path)) ?? [])
+        for relative in paths {
+            let base = ContainerPathArchive.clean(source)
+            let inContainer = relative.isEmpty ? base : base + "/" + relative
+            let copied = relative.isEmpty ? destination.path : destination.path + "/" + relative
+            try CopyOwner.record(owners[inContainer] ?? CopyOwner(uid: 0, gid: 0), at: copied)
+        }
     }
 
     /// What an export fails with, instead of writing the archive.
