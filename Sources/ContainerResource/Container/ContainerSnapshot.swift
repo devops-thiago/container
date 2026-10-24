@@ -164,7 +164,7 @@ extension ContainerSnapshot {
     /// The run a follow of a container's log follows, and the cursor `start` placed on the log
     /// while the container was in it.
     ///
-    /// The engine starts a run's log again in place, so a cursor placed after `run` ended may
+    /// The engine replaces the log file for each run, so a cursor opened after `run` ended may
     /// already be on the next run's log. `start` is placed between `run` and a `look` that shows
     /// the container still in that run, so what it reads first is that run's own. A run that
     /// changed in between is the one followed instead, as dockerd follows the run whose log is
