@@ -33,11 +33,14 @@ public struct K8sStart: AsyncParsableCommand {
     @Option(name: .long, help: "Cluster name (default: \(K8sHelper.defaultName))")
     var name: String = K8sHelper.defaultName
 
+    @Flag(name: .long, help: "Explicitly adopt existing cluster nodes for writable /sys, preserving their data")
+    var adoptLegacy = false
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: K8sHelper.pluginName)
 
-        try await K8sClusters.start(name: name, log: log)
+        try await K8sClusters.start(name: name, adoptLegacy: adoptLegacy, log: log)
         print(name)
     }
 }

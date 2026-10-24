@@ -528,6 +528,7 @@ extension APIServer {
             routes[XPCRoute.containerClean] = XPCServer.route(harness.clean)
             routes[XPCRoute.containerEvent] = XPCServer.route(harness.events)
             routes[XPCRoute.containerUpdateLabels] = XPCServer.route(harness.updateLabels)
+            routes[XPCRoute.containerAdoptWritableSysfs] = XPCServer.route(harness.adoptWritableSysfs)
 
             return service
         }
