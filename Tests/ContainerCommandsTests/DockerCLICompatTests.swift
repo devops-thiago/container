@@ -287,6 +287,20 @@ struct DockerCLICompatTests {
         #expect(exec.arguments == ["tool", "--sig-proxy=false"])
     }
 
+    @Test("run preserves literal guest arguments, including both sig-proxy spellings", arguments: [false, true])
+    func literalGuestArguments(proxyOption: Bool) throws {
+        let guest = ["printf", "%s\\n", "--sig-proxy-value=keep-me", "--sig-proxy=yes", "--", "--sig-proxy-value=keep-me", ""]
+        for prefix in [["run"], ["--debug", "container", "run"]] {
+            let options = proxyOption ? ["--sig-proxy=false"] : []
+            let run: Application.ContainerRun = try parse(prefix + options + ["alpine"] + guest)
+            #expect(run.image == "alpine")
+            #expect(run.arguments == guest)
+            #expect(run.proxySignals == !proxyOption)
+            let separated: Application.ContainerRun = try parse(prefix + options + ["--", "alpine"] + guest)
+            #expect(separated.arguments == guest)
+        }
+    }
+
     @Test("create refuses an --attach that names no stream, as run does")
     func createAttach() throws {
         #expect(throws: (any Error).self) { try Application.parseDockerSpellings(["create", "--attach", "bogus", "alpine"]) }

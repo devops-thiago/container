@@ -20,8 +20,8 @@ import ArgumentParser
 /// that is a flag alone and takes a value only after `=`: it either never takes one or also
 /// takes the next argument, which for `run --sig-proxy false alpine` would eat the image
 /// Docker sees there. So the flag is a flag, and before parsing the `=` form of a `run` is
-/// renamed to a hidden option of its own; what reaches the container's arguments is named
-/// back.
+/// renamed to a hidden option of its own. After parsing, the guest's argument suffix is
+/// taken from the original command line, where literal internal spellings remain untouched.
 enum DockerSpellings {
     static let sigProxyValue = "sig-proxy-value"
     private static let dockerPrefix = "--sig-proxy="
@@ -33,11 +33,6 @@ enum DockerSpellings {
         return arguments.enumerated().map { index, argument in
             index > verb && argument.hasPrefix(dockerPrefix) ? hiddenPrefix + argument.dropFirst(dockerPrefix.count) : argument
         }
-    }
-
-    /// An argument as it was written before `rewrite`.
-    static func restore(_ argument: String) -> String {
-        argument.hasPrefix(hiddenPrefix) ? dockerPrefix + argument.dropFirst(hiddenPrefix.count) : argument
     }
 
     /// Where `run` is, when the command is `run` or `container run`.
@@ -61,7 +56,10 @@ extension Application {
     static func parseDockerSpellings(_ arguments: [String]) throws -> any ParsableCommand {
         let command = try parseAsRoot(DockerSpellings.rewrite(arguments))
         guard var run = command as? ContainerRun else { return command }
-        run.arguments = run.arguments.map(DockerSpellings.restore)
+        // captureForPassthrough consumes the guest arguments as a trailing sequence. Rewriting
+        // changes spellings, never token counts. Prefix-based restoration cannot distinguish a
+        // rewritten option from a literal guest argument with the same internal spelling.
+        run.arguments = Array(arguments.suffix(run.arguments.count))
         return run
     }
 }
