@@ -129,6 +129,79 @@ struct CopyMemoryHeadroomTests {
         #expect(CopyMemoryHeadroom.memoryHighPath == "/sys/fs/cgroup/vminitd/memory.high")
     }
 
+    final class GatedLift: VminitdMemoryControl, Sendable {
+        let state = Mutex((value: "104857600", writes: [String](), waiting: [CheckedContinuation<Void, Never>](), released: false))
+
+        func memoryHigh() -> String { state.withLock { $0.value } }
+
+        func setMemoryHigh(_ value: String) async {
+            if value == "max" {
+                await withCheckedContinuation { continuation in
+                    let released = state.withLock {
+                        $0.value = value
+                        $0.writes.append(value)
+                        if !$0.released { $0.waiting.append(continuation) }
+                        return $0.released
+                    }
+                    if released { continuation.resume() }
+                }
+            } else {
+                state.withLock {
+                    $0.value = value
+                    $0.writes.append(value)
+                }
+            }
+        }
+
+        func sync() {}
+
+        func releaseWrites() {
+            let waiting = state.withLock { state in
+                defer { state.waiting.removeAll() }
+                state.released = true
+                return state.waiting
+            }
+            for continuation in waiting { continuation.resume() }
+        }
+    }
+
+    @Test("discarding a VM during its initial lift ignores a late reply", .timeLimit(.minutes(1)))
+    func discardDuringInitialLift() async throws {
+        let clock = ManualClock()
+        let control = GatedLift()
+        let headroom = CopyMemoryHeadroom(sleep: clock.sleep)
+        let copy = Task { try await headroom.withLifted(control) {} }
+        while control.state.withLock({ $0.waiting.isEmpty }) { await Task.yield() }
+        await headroom.discard()
+        control.releaseWrites()
+        try await copy.value
+        #expect(await !headroom.lifted)
+        #expect(await !headroom.restoreScheduled)
+    }
+
+    @Test("copies joining an unfinished initial lift keep the original nondefault limit", .timeLimit(.minutes(1)))
+    func overlappingInitialLift() async throws {
+        let clock = ManualClock()
+        let control = GatedLift()
+        let headroom = CopyMemoryHeadroom(sleep: clock.sleep)
+        let first = Task { try await headroom.withLifted(control) {} }
+        while control.state.withLock({ $0.waiting.isEmpty }) { await Task.yield() }
+        let second = Task { try await headroom.withLifted(control) {} }
+        while await headroom.activeCopies != 2 { await Task.yield() }
+        // Both calls have entered while the write's side effect is visible but its reply is held.
+        // Give any wrongly independent second RPC a turn; correctness is checked by its effects.
+        for _ in 0..<100 { await Task.yield() }
+        #expect(control.state.withLock { $0.writes } == ["max"])
+        control.releaseWrites()
+        try await first.value
+        try await second.value
+        try await clock.waitForSleeps(1)
+        clock.advance()
+        while await headroom.lifted { await Task.yield() }
+        #expect(control.state.withLock { $0.value } == "104857600")
+        #expect(control.state.withLock { $0.writes } == ["max", "104857600"])
+    }
+
     @Test("a limit that cannot be read goes back to vminitd's own 80 MiB", .timeLimit(.minutes(1)))
     func unreadable() async throws {
         let clock = ManualClock()
