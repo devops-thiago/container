@@ -160,12 +160,10 @@ final public class DNSConfig: Codable, Sendable {
 }
 
 final public class VminitConfig: Codable, Sendable {
-    public static var defaultImage: String {
-        let tag = String(cString: get_swift_containerization_version())
-        return tag == "latest"
-            ? "vminit:latest"
-            : "ghcr.io/apple/containerization/vminit:\(tag)"
-    }
+    // Guest backport 965d42ea: owned-file and checked-archive copies. Pin the image
+    // by content so the host RPC contract cannot drift with a mutable registry tag.
+    public static let defaultImage =
+        "ghcr.io/devops-thiago/containerization/vminit@sha256:8e68048d28032fab40263002759fba4f854a69de88d7b44c5a3c3da04c7c163a"
 
     public let image: String
 

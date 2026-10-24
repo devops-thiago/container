@@ -425,6 +425,17 @@ public struct ContainersHarness: Sendable {
         return message.reply()
     }
 
+    @Sendable
+    public func upgradeGuest(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id), ManagedContainer.nameValid(id),
+            let incarnation = message.string(key: .expectedIncarnation), !incarnation.isEmpty
+        else {
+            throw ContainerizationError(.invalidArgument, message: "guest upgrade requires a container ID and incarnation")
+        }
+        try await service.upgradeGuest(id: id, expectedIncarnation: incarnation)
+        return message.reply()
+    }
+
     /// Set labels on a container, of the keys the service lets change.
     @Sendable
     public func updateLabels(_ message: XPCMessage) async throws -> XPCMessage {
@@ -472,7 +483,8 @@ public struct ContainersHarness: Sendable {
 
         try await service.copyIn(
             id: id, source: sourcePath, destination: destinationPath, mode: mode, createParents: createParents,
-            copyUIDGID: message.bool(key: .copyUIDGID), requester: Self.requester(of: message, peerPID: peerPID))
+            copyUIDGID: message.bool(key: .copyUIDGID), noOverwriteDirNonDir: message.bool(key: .noOverwriteDirNonDir), copyAsArchive: message.bool(key: .copyAsArchive),
+            requester: Self.requester(of: message, peerPID: peerPID))
         return message.reply()
     }
 
