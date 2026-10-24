@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerAPIClient
 import ContainerTestSupport
 import Foundation
 import SystemPackage
@@ -62,6 +63,51 @@ struct TestCLICopyOwnership {
                 try f.run(["cp", top.appending("dir").string, "\(name):/tmp/"]).check()
                 try f.run(["cp", top.appending("file.txt").string, "\(name):/tmp/"]).check()
                 #expect(try Self.owners(f, name, ["/tmp/dir", "/tmp/dir/inner.txt", "/tmp/file.txt"]) == [host, host, host])
+            }
+        }
+    }
+
+    @Test(arguments: [false, true]) func testSingleFileCopyPreservesDirectoryCollision(prestart: Bool) async throws {
+        try await ContainerFixture.with { f in
+            try await f.withContainer(image: WarmupImage.alpine320.rawValue, autoRemove: false) { name in
+                let (top, _) = try Self.source(f)
+                try f.doExec(name, cmd: ["sh", "-c", "mkdir -p /tmp/file.txt/nested && printf sentinel > /tmp/file.txt/nested/keep"])
+                let process: (any ClientProcess)?
+                if prestart {
+                    try f.run(["stop", name]).check()
+                    let client = ContainerClient()
+                    let observed = try await client.get(id: name)
+                    process = try await client.bootstrap(id: observed.id, stdio: [nil, nil, nil])
+                } else {
+                    process = nil
+                }
+                let copied = try f.run(["cp", top.appending("file.txt").string, "\(name):/tmp/"])
+                #expect(copied.status != 0, "a file must not replace a nonempty directory")
+                try await process?.start()
+                #expect(try f.doExec(name, cmd: ["cat", "/tmp/file.txt/nested/keep"]) == "sentinel")
+            }
+        }
+    }
+
+    @Test(arguments: [false, true]) func testSingleFileCopyPreservesFinalSymlink(prestart: Bool) async throws {
+        try await ContainerFixture.with { f in
+            try await f.withContainer(image: WarmupImage.alpine320.rawValue, autoRemove: false) { name in
+                let (top, host) = try Self.source(f)
+                try f.doExec(name, cmd: ["sh", "-c", "printf old > /tmp/target && ln -s /tmp/target /tmp/file.txt"])
+                let process: (any ClientProcess)?
+                if prestart {
+                    try f.run(["stop", name]).check()
+                    let client = ContainerClient()
+                    let observed = try await client.get(id: name)
+                    process = try await client.bootstrap(id: observed.id, stdio: [nil, nil, nil])
+                } else {
+                    process = nil
+                }
+                try f.run(["cp", top.appending("file.txt").string, "\(name):/tmp/"]).check()
+                try await process?.start()
+                #expect(try f.run(["exec", name, "test", "-L", "/tmp/file.txt"]).status == 0)
+                #expect(try f.doExec(name, cmd: ["cat", "/tmp/target"]) == "file\n")
+                #expect(try Self.owners(f, name, ["/tmp/target"]) == [host])
             }
         }
     }

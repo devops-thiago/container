@@ -54,8 +54,8 @@ struct PendingCopiesTests {
         }
     }
 
-    @Test("a start between an upload's look at the container and its hold gets the files from the upload itself, never a 200 without them")
-    func startDuringUpload() async throws {
+    @Test("a racing start gets the upload and preserves its no-overwrite policy", arguments: [false, true])
+    func startDuringUpload(strict: Bool) async throws {
         let h = try await ToolHarness.start()
         defer { Task { try? await h.stop() } }
         let gate = DockerLatch()
@@ -63,7 +63,8 @@ struct PendingCopiesTests {
             $0.copyBeforeStart = true
             $0.copyBeforeStartGate = gate
         }
-        let put = Task { try await h.request("PUT", Self.upload, body: Self.tar([("hello.txt", "hello\n")]), contentType: "application/x-tar") }
+        let path = Self.upload.replacingOccurrences(of: "noOverwriteDirNonDir=false", with: "noOverwriteDirNonDir=\(strict)")
+        let put = Task { try await h.request("PUT", path, body: Self.tar([("hello.txt", "hello\n")]), contentType: "application/x-tar") }
         // The upload has seen the container stopped and waits before it unpacks.
         #expect(await StreamHarness.eventually { h.tools.with { $0.copyBeforeStartChecks } == 1 })
         #expect(try await h.request("POST", "/containers/off/start").status == 204)
@@ -73,6 +74,7 @@ struct PendingCopiesTests {
         #expect(try await put.value.status == 200)
         #expect(Self.contents(h, "hello.txt") == "hello\n")
         #expect(h.tools.copyCalls == ["in hello.txt / 644"])
+        #expect(h.tools.copyNoOverwriteCalls == [strict])
         #expect(!h.streams.copies.holds(Self.stopped))
         #expect(await StreamHarness.eventually { ArchiveRouteTests.scratchEntries(h).isEmpty })
     }

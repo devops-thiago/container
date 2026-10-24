@@ -51,6 +51,15 @@ struct HelpCommandTests {
         walk(Application.self, path: [])
     }
 
+    @Test("guest upgrade is explicit, accepts a container name, and documents its stopped requirement")
+    func guestUpgradeCommand() throws {
+        let command = try Application.parseAsRoot(["system", "upgrade-guest", "my-container"])
+        let upgrade = try #require(command as? Application.SystemUpgradeGuest)
+        #expect(upgrade.container == "my-container")
+        #expect(throws: (any Error).self) { try Application.parseAsRoot(["system", "upgrade-guest"]) }
+        #expect(Application.SystemUpgradeGuest.helpMessage().contains("must be stopped"))
+    }
+
     @Test
     func unknownSubcommandReturnsNil() {
         let unknownResolved = HelpCommand.resolveSubcommand(path: ["nonexistent"]) == nil

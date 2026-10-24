@@ -58,7 +58,7 @@ let package = Package(
         .library(name: "ContainerCompose", targets: ["ContainerCompose"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/containerization.git", exact: Version(stringLiteral: scVersion)),
+        .package(url: "https://github.com/devops-thiago/containerization.git", revision: "8069e05d6c5f6e7ae66be2856346599f79632b5c"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.2.0"),
         .package(url: "https://github.com/apple/swift-configuration", from: "1.0.0"),
@@ -656,6 +656,7 @@ let package = Package(
         .target(
             name: "ContainerRuntimeLinuxServer",
             dependencies: [
+                .product(name: "GRPCCore", package: "grpc-swift-2"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),

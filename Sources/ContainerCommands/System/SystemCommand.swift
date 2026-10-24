@@ -35,6 +35,7 @@ extension Application {
                 SystemStatus.self,
                 SystemStop.self,
                 SystemVersion.self,
+                SystemUpgradeGuest.self,
             ],
             aliases: ["s"]
         )

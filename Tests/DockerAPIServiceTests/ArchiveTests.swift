@@ -17,6 +17,7 @@
 import ContainerResource
 import Foundation
 import NIOCore
+import Synchronization
 import Testing
 
 @testable import DockerAPIService
@@ -665,6 +666,22 @@ struct ArchiveRouteTests {
         return scratch + staging + held
     }
 
+    @Test("a stopped-container upload records its requested no-overwrite policy")
+    func heldNoOverwritePolicy() async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        h.tools.with { $0.copyBeforeStart = true }
+        var tar = TarBuilder()
+        tar.file("entry", "keep type")
+        #expect(try await h.request("PUT", "/containers/off/archive?path=/&noOverwriteDirNonDir=true", body: tar.archive).status == 200)
+        let queue = try #require(h.streams.copies.queue)
+        let id = String(ToolHarness.stoppedID.prefix(12))
+        try queue.claim(id)
+        let seen = Mutex<[Bool]>([])
+        try await queue.apply(id) { _, _, _, _, noOverwrite, _ in seen.withLock { $0.append(noOverwrite) } }
+        #expect(seen.withLock { $0 } == [true])
+    }
+
     @Test("an upload into a container that is not running is held, and copied in at its start before its process runs")
     func uploadBeforeStart() async throws {
         let h = try await ToolHarness.start()
@@ -819,6 +836,18 @@ struct ArchiveRouteTests {
         tar.file("ok.txt", "ok")
         #expect(try await h.request("PUT", "/containers/box/archive?path=/", body: tar.archive).status == 200)
         #expect(h.tools.copyCalls == ["in ok.txt / 644"])
+    }
+
+    @Test("running uploads carry the no-overwrite policy to the engine, including nested archives", arguments: [false, true])
+    func runningNoOverwriteReachesGuest(strict: Bool) async throws {
+        let h = try await ToolHarness.start()
+        defer { Task { try? await h.stop() } }
+        var tar = TarBuilder()
+        tar.directory("nested")
+        tar.file("nested/entry", "payload")
+        let answer = try await h.request("PUT", "/containers/box/archive?path=/&noOverwriteDirNonDir=\(strict)", body: tar.archive)
+        #expect(answer.status == 200)
+        #expect(h.tools.copyNoOverwriteCalls == [strict])
     }
 
     @Test("noOverwriteDirNonDir refuses replacing a directory with a file; without it the copy goes ahead")

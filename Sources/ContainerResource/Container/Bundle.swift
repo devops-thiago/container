@@ -20,6 +20,7 @@ import Foundation
 
 public struct Bundle: Sendable {
     private static let initfsFilename = "initfs.ext4"
+    private static let upgradedInitfsFilename = "initfs-upgrade.ext4"
     private static let kernelFilename = "kernel.json"
     private static let kernelBinaryFilename = "kernel.bin"
     private static let containerRootFsBlockFilename = "rootfs.ext4"
@@ -61,12 +62,31 @@ public struct Bundle: Sendable {
 
     /// Return the initial filesystem for a sandbox.
     public var initialFilesystem: Filesystem {
-        .block(
+        let upgraded = path.appendingPathComponent(Self.upgradedInitfsFilename)
+        let filename = FileManager.default.fileExists(atPath: upgraded.path) ? Self.upgradedInitfsFilename : Self.initfsFilename
+        return .block(
             format: "ext4",
-            source: self.path.appendingPathComponent(Self.initfsFilename).path,
+            source: self.path.appendingPathComponent(filename).path,
             destination: "/",
             options: ["ro"]
         )
+    }
+
+    /// Explicitly install a guest-agent image without rewriting the workload disk or
+    /// runtime configuration. The caller must hold the stopped container's lifecycle lock.
+    /// A separate atomic override also works before the original bundle is first created.
+    public func installInitialFilesystem(_ filesystem: Filesystem) throws {
+        guard case .block(let format, _, _) = filesystem.type, format == "ext4" else {
+            throw ContainerizationError(.invalidArgument, message: "guest upgrade requires an ext4 image")
+        }
+        let staged = path.appendingPathComponent(".initfs-upgrade-\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: staged) }
+        _ = try filesystem.clone(to: staged.path)
+        try Task.checkCancellation()
+        let destination = path.appendingPathComponent(Self.upgradedInitfsFilename)
+        guard rename(staged.path, destination.path) == 0 else {
+            throw ContainerizationError(.internalError, message: "could not install guest image: \(String(cString: strerror(errno)))")
+        }
     }
 
     public var kernel: Kernel {
