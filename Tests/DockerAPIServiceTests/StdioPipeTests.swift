@@ -23,32 +23,45 @@ import Testing
 /// over its own descriptor and then closed it too closed the number twice; by the second close
 /// another exec could hold that number, and the agent trapped on the descriptor it lost.
 struct StdioPipeTests {
+    struct Identity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+    }
+
+    /// What `fd` names now, or nil when it is closed.
+    static func identity(of fd: Int32) -> Identity? {
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        return Identity(device: info.st_dev, inode: info.st_ino)
+    }
+
     @Test("a failed later duplication closes earlier copies without closing the pipes", arguments: [2, 3])
     func failedDuplicationRollsBack(failingCall: Int) throws {
         let input = try StdioPipe(.intoContainer)
         let output = try StdioPipe(.outOfContainer)
         let error = try StdioPipe(.outOfContainer)
         var calls = 0
-        var descriptors: [Int32] = []
-        var copies: [FileHandle] = []
+        // Each copy's number and the pipe it named. Tests run in parallel, so once a copy is
+        // closed its number can belong to another test's descriptor: a number that is open
+        // again but names something else was closed here.
+        var copies: [(fd: Int32, identity: Identity)] = []
         defer {
-            // Clean up a failing negative control as well.
-            for handle in copies { try? handle.close() }
+            // Clean up a failing negative control as well, closing only numbers that are
+            // still this test's copies, never a number another test has since opened.
+            for copy in copies where Self.identity(of: copy.fd) == copy.identity { close(copy.fd) }
         }
         #expect(throws: POSIXError(.EMFILE)) {
             try DockerProcessStdio.duplicating(stdin: input, stdout: output, stderr: error) { pipe in
                 calls += 1
                 if calls == failingCall { throw POSIXError(.EMFILE) }
                 let handle = try #require(try pipe.containerHandleForEngine())
-                descriptors.append(handle.fileDescriptor)
-                copies.append(handle)
+                copies.append((handle.fileDescriptor, try #require(Self.identity(of: handle.fileDescriptor))))
                 return handle
             }
         }
-        #expect(descriptors.count == failingCall - 1)
-        for fd in descriptors {
-            #expect(fcntl(fd, F_GETFD) == -1, "the earlier duplicate must be closed on failure")
-            #expect(errno == EBADF)
+        #expect(copies.count == failingCall - 1)
+        for copy in copies {
+            #expect(Self.identity(of: copy.fd) != copy.identity, "the earlier duplicate must be closed on failure")
         }
         for pipe in [input, output, error] {
             #expect(fcntl(try #require(pipe.container), F_GETFD) != -1)
