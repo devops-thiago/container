@@ -21,11 +21,13 @@ import NIOPosix
 final class ConnectHandler {
     private let serverAddress: SocketAddress
     private let connectTimeout: TimeAmount
+    private let connections: ForwardedConnections?
     private var log: Logger? = nil
 
-    init(serverAddress: SocketAddress, connectTimeout: TimeAmount, log: Logger?) {
+    init(serverAddress: SocketAddress, connectTimeout: TimeAmount, log: Logger?, connections: ForwardedConnections? = nil) {
         self.serverAddress = serverAddress
         self.connectTimeout = connectTimeout
+        self.connections = connections
         self.log = log
     }
 }
@@ -53,7 +55,14 @@ extension ConnectHandler {
     private func connectToServer(context: ChannelHandlerContext) {
         self.log?.trace("backend - connecting")
 
+        let connections = self.connections
         ClientBootstrap(group: context.eventLoop)
+            .channelInitializer { channel in
+                guard connections?.insert(channel) != false else {
+                    return channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel)
+                }
+                return channel.eventLoop.makeSucceededVoidFuture()
+            }
             .connectTimeout(self.connectTimeout)
             // The backend's end of output reaches the client as a half-close too.
             .channelOption(ChannelOptions.allowRemoteHalfClosure, value: true)

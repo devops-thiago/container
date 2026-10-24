@@ -235,7 +235,7 @@ public enum K8sClusters {
 
     /// Start every stopped node in a cluster, control plane first, then wait for the whole
     /// cluster to answer again.
-    public static func start(name: String = K8sClusters.defaultName, log: Logger) async throws {
+    public static func start(name: String = K8sClusters.defaultName, adoptLegacy: Bool = false, log: Logger) async throws {
         let client = ContainerClient()
         let controlPlane = try await client.get(id: name)
         guard controlPlane.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
@@ -250,6 +250,11 @@ public enum K8sClusters {
             .map(\.snapshot)
             .sorted { $0.id < $1.id }
 
+        // Check every node before starting any. Labels alone never grant writable /sys;
+        // old nodes need the user's explicit CLI choice, bound to each observed incarnation.
+        try await client.prepareWritableSysfs(
+            [controlPlane] + workers, role: .kubernetes, adoptLegacy: adoptLegacy,
+            adoptionCommand: "container k8s start --name \(name) --adopt-legacy")
         try Task.checkCancellation()
         try await startNodeIfNeeded(controlPlane, client: client, log: log)
         // Idempotent, and it heals clusters created before the loopback pin existed: their

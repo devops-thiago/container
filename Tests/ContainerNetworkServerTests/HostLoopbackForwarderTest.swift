@@ -257,6 +257,58 @@ struct HostLoopbackForwarderTest {
         try await third.close().get()
     }
 
+    @Test("full shutdown closes established connections even after their listener disappears", arguments: [false, true])
+    func stopClosesEstablishedConnections(retireListener: Bool) async throws {
+        let backend = try await Self.holder(group: group)
+        defer { backend.channel.close(promise: nil) }
+        let listening = Mutex([HostListener(address: .loopbackV4, port: backend.port)])
+        let opener = Opener(group: group)
+        let forwarder = HostLoopbackForwarder(listeners: { listening.withLock { $0 } }, open: opener.open, log: log)
+        await forwarder.sync()
+        let proxy = try #require(opener.proxies.first)
+        let connection = try await ClientBootstrap(group: group).connect(to: proxy).get()
+        defer { connection.close(promise: nil) }
+        try await Self.until { backend.accepted.value == 1 }
+        let independent = try await TCPForwarder(
+            proxyAddress: try SocketAddress(ipAddress: "127.0.0.1", port: 0),
+            serverAddress: try #require(backend.channel.localAddress), eventLoopGroup: group
+        ).run().get()
+        defer { independent.close() }
+        let other = try await ClientBootstrap(group: group).connect(to: try #require(independent.proxyAddress)).get()
+        defer { other.close(promise: nil) }
+        try await Self.until { backend.accepted.value == 2 }
+        if retireListener {
+            listening.withLock { $0.removeAll() }
+            await forwarder.sync()
+            #expect(connection.isActive, "listener removal allows existing sessions to drain")
+        }
+        await forwarder.stop()
+        try await Self.until { !connection.isActive }
+        #expect(!connection.isActive, "full stop must close established relays")
+        try await Self.until { backend.closed.value == 1 }
+        #expect(other.isActive, "another forwarder's sessions must remain open")
+        await forwarder.stop()
+    }
+
+    @Test("a listener arriving after shutdown cannot establish a backend connection")
+    func lateListenerCannotDial() async throws {
+        let backend = try await Self.holder(group: group)
+        defer { backend.channel.close(promise: nil) }
+        let connections = ForwardedConnections()
+        await connections.closeAll()
+        let relay = try await TCPForwarder(
+            proxyAddress: try SocketAddress(ipAddress: "127.0.0.1", port: 0),
+            serverAddress: try #require(backend.channel.localAddress), eventLoopGroup: group,
+            connections: connections
+        ).run().get()
+        defer { relay.close() }
+        let client = try await ClientBootstrap(group: group).connect(to: try #require(relay.proxyAddress)).get()
+        defer { client.close(promise: nil) }
+        try await Self.until { !client.isActive }
+        #expect(backend.accepted.value == 0)
+        await connections.closeAll()
+    }
+
     // MARK: - Helpers
 
     final class Counter: Sendable {
@@ -268,6 +320,7 @@ struct HostLoopbackForwarderTest {
     struct Server {
         let channel: any Channel
         let accepted: Counter
+        let closed: Counter
         var port: UInt16 { UInt16(channel.localAddress!.port!) }
     }
 
@@ -286,7 +339,7 @@ struct HostLoopbackForwarderTest {
         var proxies: [SocketAddress] { results.compactMap(\.proxyAddress) }
 
         var open: HostLoopbackForwarder.Open {
-            { [self] mirror in
+            { [self] mirror, connections in
                 let fail = state.withLock { state in
                     guard state.failures < failFirst else { return false }
                     state.failures += 1
@@ -299,7 +352,7 @@ struct HostLoopbackForwarderTest {
                 let relay = try await TCPForwarder(
                     proxyAddress: try SocketAddress(ipAddress: "127.0.0.1", port: 0),
                     serverAddress: try SocketAddress(ipAddress: target, port: Int(mirror.port)),
-                    eventLoopGroup: group
+                    eventLoopGroup: group, connections: connections
                 ).run().get()
                 state.withLock { $0.results.append(relay) }
                 return relay
@@ -310,6 +363,7 @@ struct HostLoopbackForwarderTest {
     /// A server that greets each client and hangs up.
     private static func greeter(on host: String, group: any EventLoopGroup, v6Only: Bool? = nil) async throws -> Server {
         let accepted = Counter()
+        let closed = Counter()
         var bootstrap = ServerBootstrap(group: group)
         if let v6Only {
             bootstrap = bootstrap.serverChannelOption(
@@ -319,23 +373,26 @@ struct HostLoopbackForwarderTest {
             try await bootstrap
             .childChannelInitializer { channel in
                 accepted.add()
+                channel.closeFuture.whenComplete { _ in closed.add() }
                 return channel.eventLoop.makeCompletedFuture { try channel.pipeline.syncOperations.addHandler(Greeter()) }
             }
             .bind(host: host, port: 0).get()
-        return Server(channel: channel, accepted: accepted)
+        return Server(channel: channel, accepted: accepted, closed: closed)
     }
 
     /// A server that keeps each connection open and says nothing.
     private static func holder(group: any EventLoopGroup) async throws -> Server {
         let accepted = Counter()
+        let closed = Counter()
         let channel =
             try await ServerBootstrap(group: group)
             .childChannelInitializer { channel in
                 accepted.add()
+                channel.closeFuture.whenComplete { _ in closed.add() }
                 return channel.eventLoop.makeSucceededVoidFuture()
             }
             .bind(host: "127.0.0.1", port: 0).get()
-        return Server(channel: channel, accepted: accepted)
+        return Server(channel: channel, accepted: accepted, closed: closed)
     }
 
     /// Everything a server at `address` sends before it hangs up.

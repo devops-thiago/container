@@ -433,6 +433,35 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Preflight the entire selection before authorizing any legacy managed container.
+    /// Callers must invoke this before starting or recreating any selected container.
+    public func prepareWritableSysfs(
+        _ snapshots: [ContainerSnapshot], role: ManagedSysfsRole, adoptLegacy: Bool, adoptionCommand: String
+    ) async throws {
+        let legacy = snapshots.filter { !$0.configuration.writableSysfs }
+        for node in legacy {
+            guard adoptLegacy else {
+                throw ContainerizationError(.invalidState, message: "legacy container \(node.id) needs explicit adoption: \(adoptionCommand)")
+            }
+            guard node.status == .stopped else {
+                throw ContainerizationError(.invalidState, message: "stop legacy container \(node.id) before adopting it")
+            }
+        }
+        for node in legacy {
+            try Task.checkCancellation()
+            try await adoptWritableSysfs(id: node.id, expectedIncarnation: node.incarnation, role: role)
+        }
+    }
+
+    /// Explicitly authorize writable /sys for the observed legacy managed container.
+    public func adoptWritableSysfs(id: String, expectedIncarnation: String, role: ManagedSysfsRole) async throws {
+        let request = XPCMessage(route: .containerAdoptWritableSysfs)
+        request.set(key: .id, value: id)
+        request.set(key: .expectedIncarnation, value: expectedIncarnation)
+        request.set(key: .sysfsRole, value: role.rawValue)
+        try await xpcClient.send(request, responseTimeout: .seconds(10))
+    }
+
     /// Update the guest agent of the exact stopped container the caller observed.
     public func upgradeGuest(id: String, expectedIncarnation: String) async throws {
         let request = XPCMessage(route: .containerUpgradeGuest)

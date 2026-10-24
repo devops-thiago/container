@@ -57,7 +57,7 @@ let package = Package(
         .library(name: "ContainerCompose", targets: ["ContainerCompose"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/devops-thiago/containerization.git", revision: "965d42ea5951cb9b7d219736b375291cad5fbac7"),
+        .package(url: "https://github.com/devops-thiago/containerization.git", revision: "d2245213f1a009a145d1b0fc4b1731f64424d613"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.7.0"),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.2.0"),
         .package(url: "https://github.com/apple/swift-configuration", from: "1.0.0"),

@@ -15,7 +15,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/devops-thiago/containerization.git",
       "state" : {
-        "revision" : "965d42ea5951cb9b7d219736b375291cad5fbac7"
+        "revision" : "d2245213f1a009a145d1b0fc4b1731f64424d613"
       }
     },
     {

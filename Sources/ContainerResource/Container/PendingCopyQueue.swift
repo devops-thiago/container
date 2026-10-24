@@ -225,7 +225,10 @@ public struct PendingCopyQueue: Sendable {
             }
             guard record.version == 1 || (record.version == 2 && record.noOverwriteDirNonDir == true) else {
                 release(container)
-                throw Failure(upload: upload, message: "unsupported pending-copy record version \(record.version)")
+                let held = pending(container).appending(path: upload.lastPathComponent)
+                throw Failure(
+                    upload: held,
+                    message: "unsupported pending-copy record version \(record.version) in \(held.path(percentEncoded: false)); the upload is preserved for a compatible engine")
             }
             // Whether the record on disk names nothing that is in.
             var recorded = true

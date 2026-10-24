@@ -80,6 +80,7 @@ public enum XPCKeys: String {
     case eventsGap
     /// JSON `[String: String]`: labels to set on a container.
     case containerLabels
+    case sysfsRole
     /// Error key.
     case error
     /// FD to a container resource key.
@@ -234,6 +235,7 @@ public enum XPCRoute: String {
     /// A subscription to container events: the reply carries the read end of a pipe of them.
     case containerEvent
     /// Set labels on a container, of the keys the server allows to change.
+    case containerAdoptWritableSysfs
     case containerUpgradeGuest
     case containerUpdateLabels
     case containerStats
