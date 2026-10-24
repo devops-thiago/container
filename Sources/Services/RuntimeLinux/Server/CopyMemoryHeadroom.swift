@@ -71,6 +71,8 @@ actor CopyMemoryHeadroom {
     private var active = 0
     /// The value to put back, while the limit is lifted.
     private var saved: String?
+    /// Shared from before the first guest read through the lift reply.
+    private var lifting: (id: UUID, task: Task<String?, Never>)?
     /// The wait before putting the limit back, while no copy runs.
     private var restoreTimer: Task<Void, Never>?
     /// Putting the limit back, once started.
@@ -103,6 +105,9 @@ actor CopyMemoryHeadroom {
     /// Whether the limit is lifted now.
     var lifted: Bool { saved != nil }
 
+    /// Copies which have entered, including those waiting for the initial lift.
+    var activeCopies: Int { active }
+
     /// Run `operation`, a copy into the container, with vminitd's limit lifted. A failure to
     /// lift it is logged and the copy runs anyway, at the speed it had before.
     func withLifted<T: Sendable>(
@@ -125,24 +130,39 @@ actor CopyMemoryHeadroom {
             await restoring.value
         }
         guard saved == nil else { return }
-        var before: String
-        do {
-            before = try await control.memoryHigh().trimmingCharacters(in: .whitespacesAndNewlines)
-        } catch {
-            log?.warning("could not read vminitd's memory limit; it goes back to vminitd's default", metadata: ["error": "\(error)"])
-            before = ""
+        let step: (id: UUID, task: Task<String?, Never>)
+        if let lifting {
+            step = lifting
+        } else {
+            let task = Task<String?, Never> { [log] in
+                var before: String
+                do {
+                    before = try await control.memoryHigh().trimmingCharacters(in: .whitespacesAndNewlines)
+                } catch {
+                    log?.warning("could not read vminitd's memory limit; it goes back to vminitd's default", metadata: ["error": "\(error)"])
+                    before = ""
+                }
+                if before.isEmpty || before == Self.lifted {
+                    before = String(Self.vminitdMemoryHigh)
+                }
+                do {
+                    try Task.checkCancellation()
+                    try await control.setMemoryHigh(Self.lifted)
+                    log?.info("lifted vminitd's memory limit for a copy", metadata: ["memory.high": "\(before)"])
+                    return before
+                } catch {
+                    log?.warning("could not lift vminitd's memory limit for a copy", metadata: ["error": "\(error)"])
+                    return nil
+                }
+            }
+            step = (UUID(), task)
+            lifting = step
         }
-        if before.isEmpty || before == Self.lifted {
-            before = String(Self.vminitdMemoryHigh)
-        }
-        // Another copy may have lifted it while this one read.
-        guard saved == nil else { return }
-        do {
-            try await control.setMemoryHigh(Self.lifted)
+        let before = await step.task.value
+        // A discard ends ownership of this VM, even if its last RPC replies afterwards.
+        if lifting?.id == step.id {
             saved = before
-            log?.info("lifted vminitd's memory limit for a copy", metadata: ["memory.high": "\(before)"])
-        } catch {
-            log?.warning("could not lift vminitd's memory limit for a copy", metadata: ["error": "\(error)"])
+            lifting = nil
         }
     }
 
@@ -167,6 +187,8 @@ actor CopyMemoryHeadroom {
         restoreTimer?.cancel()
         restoreTimer = nil
         saved = nil
+        lifting?.task.cancel()
+        lifting = nil
         // The next VM's restore starts a sync of its own, never waiting on this VM's.
         syncing?.task.cancel()
         syncing = nil
