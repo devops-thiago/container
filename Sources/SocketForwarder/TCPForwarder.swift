@@ -38,6 +38,7 @@ public struct TCPForwarder: SocketForwarder {
     /// How many connections may be relayed at once; beyond it a client is closed at once.
     /// `nil` sets no limit.
     private let connectionLimit: ConnectionLimit?
+    private let connections: ForwardedConnections
 
     public init(
         proxyAddress: SocketAddress,
@@ -46,7 +47,8 @@ public struct TCPForwarder: SocketForwarder {
         connectTimeout: TimeAmount = .seconds(10),
         log: Logger? = nil,
         acceptsPeer: (@Sendable (SocketAddress) -> Bool)? = nil,
-        connectionLimit: ConnectionLimit? = nil
+        connectionLimit: ConnectionLimit? = nil,
+        connections: ForwardedConnections = ForwardedConnections()
     ) throws {
         self.proxyAddress = proxyAddress
         self.serverAddress = serverAddress
@@ -55,6 +57,7 @@ public struct TCPForwarder: SocketForwarder {
         self.log = log
         self.acceptsPeer = acceptsPeer
         self.connectionLimit = connectionLimit
+        self.connections = connections
     }
 
     public func run() throws -> EventLoopFuture<SocketForwarderResult> {
@@ -71,6 +74,7 @@ public struct TCPForwarder: SocketForwarder {
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
+                    guard self.connections.insert(channel) else { throw ChannelError.ioOnClosedChannel }
                     if let acceptsPeer = self.acceptsPeer, !(channel.remoteAddress.map(acceptsPeer) ?? false) {
                         try channel.pipeline.syncOperations.addHandler(RefusedPeerHandler())
                         return
@@ -84,7 +88,7 @@ public struct TCPForwarder: SocketForwarder {
                         channel.closeFuture.whenComplete { _ in limit.release() }
                     }
                     try channel.pipeline.syncOperations.addHandler(
-                        ConnectHandler(serverAddress: self.serverAddress, connectTimeout: self.connectTimeout, log: log)
+                        ConnectHandler(serverAddress: self.serverAddress, connectTimeout: self.connectTimeout, log: log, connections: self.connections)
                     )
                 }
             }

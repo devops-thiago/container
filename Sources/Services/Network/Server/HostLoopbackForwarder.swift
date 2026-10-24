@@ -80,14 +80,16 @@ public actor HostLoopbackForwarder {
         return Set(ports.map { Mirror(port: $0, target: v4.contains($0) ? .loopbackV4 : .loopbackV6) })
     }
 
-    /// Opens one relay; the result closes it. Injected so tests need no gateway address.
-    public typealias Open = @Sendable (Mirror) async throws -> SocketForwarderResult
+    /// Opens one relay using the supplied connection group. The result owns its listener;
+    /// the group owns its sessions until full shutdown. Injected so tests need no gateway address.
+    public typealias Open = @Sendable (Mirror, ForwardedConnections) async throws -> SocketForwarderResult
 
     private let listeners: @Sendable () throws -> [HostListener]
     private let open: Open
     private let interval: Duration
     private let log: Logger
     private var running: [Mirror: SocketForwarderResult] = [:]
+    private var connections = ForwardedConnections()
     /// The last failure logged per port, so a port that cannot be had is reported once.
     private var failures: [UInt16: String] = [:]
     /// Whether the listener table could not be read on the last pass, so that is said once.
@@ -116,7 +118,7 @@ public actor HostLoopbackForwarder {
         listeners: @escaping @Sendable () throws -> [HostListener] = HostListeners.current,
         connectionLimit: ConnectionLimit = ConnectionLimit(maximum: HostLoopbackForwarder.maximumConnections)
     ) {
-        let open: Open = { mirror in
+        let open: Open = { mirror, connections in
             let target = mirror.target == .loopbackV6 ? "::1" : "127.0.0.1"
             let forwarder = try TCPForwarder(
                 proxyAddress: try SocketAddress(ipAddress: gateway.description, port: Int(mirror.port)),
@@ -124,7 +126,7 @@ public actor HostLoopbackForwarder {
                 eventLoopGroup: eventLoopGroup,
                 log: log,
                 acceptsPeer: { Self.serves($0, subnet: subnet) },
-                connectionLimit: connectionLimit)
+                connectionLimit: connectionLimit, connections: connections)
             return try await forwarder.run().get()
         }
         self.init(listeners: listeners, open: open, log: log)
@@ -172,6 +174,7 @@ public actor HostLoopbackForwarder {
     /// Brings the relays in line with the listeners of the moment, once.
     public func sync() async {
         let pass = generation
+        let connections = self.connections
         let wanted: Set<Mirror>
         do {
             wanted = Self.plan(try listeners())
@@ -191,13 +194,15 @@ public actor HostLoopbackForwarder {
             log.info("a host port relay closed; reopening it", metadata: ["port": "\(mirror.port)"])
         }
         for (mirror, relay) in running where !wanted.contains(mirror) {
+            guard pass == generation else { return }
             running[mirror] = nil
             await relay.closeNow()
             log.info("stopped relaying a host port", metadata: ["port": "\(mirror.port)"])
         }
         for mirror in wanted where running[mirror] == nil {
+            guard pass == generation else { return }
             do {
-                let relay = try await open(mirror)
+                let relay = try await open(mirror, connections)
                 guard pass == generation else {
                     await relay.closeNow()
                     return
@@ -220,8 +225,13 @@ public actor HostLoopbackForwarder {
     /// Closes every relay.
     public func stop() async {
         generation += 1
+        poller?.cancel()
+        poller = nil
+        let oldConnections = connections
+        connections = ForwardedConnections()
         let relays = Array(running.values)
         running.removeAll()
+        await oldConnections.closeAll()
         for relay in relays { await relay.closeNow() }
     }
 }
