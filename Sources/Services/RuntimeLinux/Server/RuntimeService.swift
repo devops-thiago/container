@@ -2020,13 +2020,21 @@ extension XPCMessage {
 
 extension ContainerResource.Bundle {
     func createLogFile() throws {
-        // Create the log file we'll write stdio to.
-        // O_TRUNC resolves a log delay issue on restarted containers by force-updating internal state
-        let fd = Darwin.open(self.containerLog.path, O_CREAT | O_RDONLY | O_TRUNC, 0o644)
-        guard fd > 0 else {
+        // Give every run a new inode. Existing followers can drain the previous run's
+        // descriptor even if the new run writes an identical banner or rolls its log over.
+        let temporary = self.containerLog.deletingLastPathComponent()
+            .appendingPathComponent(".stdio-\(UUID().uuidString)")
+        let fd = Darwin.open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o644)
+        guard fd >= 0 else {
             throw POSIXError(.init(rawValue: errno)!)
         }
-        close(fd)
+        defer {
+            close(fd)
+            _ = Darwin.unlink(temporary.path)
+        }
+        guard Darwin.rename(temporary.path, self.containerLog.path) == 0 else {
+            throw POSIXError(.init(rawValue: errno)!)
+        }
     }
 }
 

@@ -15,9 +15,12 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerLog
+import ContainerResource
 import Foundation
 import Synchronization
 import Testing
+
+@testable import ContainerRuntimeLinuxServer
 
 /// `container logs -f` ends with its container's run, as `docker logs -f` does, and sends the
 /// last output first.
@@ -85,6 +88,31 @@ struct LogFileFollowEndTests {
         } onCancel: {
             follow.cancel()
         }
+    }
+
+    @Test("a new run has its own log even when its banner matches the old run", arguments: [false, true])
+    func restartKeepsOldDescriptor(rollOverNewRun: Bool) async throws {
+        let fixture = try Fixture()
+        let banner = String(repeating: "same startup banner\n", count: 20)
+        try fixture.rewrite(banner)
+        let handle = try FileHandle(forReadingFrom: fixture.path)
+        let reader = try LogFileReader(handle: handle, startAtEnd: true)
+        try fixture.append("old run final output\n")
+
+        // Exercise the exact log creation used by RuntimeService.bootstrap, not a simulated
+        // content comparison. The later run may write (or roll over) before a follower wakes.
+        try ContainerResource.Bundle(path: fixture.directory).createLogFile()
+        try fixture.append(banner + String(repeating: "new run only\n", count: 30))
+        if rollOverNewRun {
+            try fixture.rewrite("[container log rolled over: \(UUID())]\nnew run rollover\n")
+        }
+        #expect(try reader.isDeleted(), "the old descriptor must stay attached to the old run")
+        try await LogFileFollow.follow(handle, from: reader, runEnded: { true }) { data in
+            fixture.received.withLock { $0.append(data) }
+        }
+        #expect(fixture.text == "old run final output\n")
+        let current = try String(contentsOf: fixture.path, encoding: .utf8)
+        #expect(current.contains(rollOverNewRun ? "new run rollover" : "new run only"))
     }
 
     @Test("the follow ends once the run has ended, after what the container wrote last")
