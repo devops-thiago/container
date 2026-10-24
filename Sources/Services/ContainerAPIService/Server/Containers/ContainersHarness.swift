@@ -412,6 +412,19 @@ public struct ContainersHarness: Sendable {
         return reply
     }
 
+    @Sendable
+    public func adoptWritableSysfs(_ message: XPCMessage) async throws -> XPCMessage {
+        guard let id = message.string(key: .id), ManagedContainer.nameValid(id),
+            let incarnation = message.string(key: .expectedIncarnation), !incarnation.isEmpty,
+            let value = message.string(key: .sysfsRole),
+            let role = ManagedSysfsRole(rawValue: value)
+        else {
+            throw ContainerizationError(.invalidArgument, message: "adoption requires a container ID, incarnation and managed role")
+        }
+        try await service.adoptWritableSysfs(id: id, expectedIncarnation: incarnation, role: role)
+        return message.reply()
+    }
+
     /// Set labels on a container, of the keys the service lets change.
     @Sendable
     public func updateLabels(_ message: XPCMessage) async throws -> XPCMessage {

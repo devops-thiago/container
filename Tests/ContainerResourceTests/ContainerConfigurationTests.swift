@@ -266,13 +266,13 @@ struct ContainerConfigurationWritableSysfsTests {
     }
 
     @Test(
-        "A container saved before the key keeps writable /sys only if the engine made it",
+        "Legacy labels cannot authorize writable /sys",
         arguments: [
             ([:], false),
             (["com.example.app": "web"], false),
-            ([ResourceLabelKeys.role: ResourceRoleValues.builder, ResourceLabelKeys.plugin: "builder"], true),
-            ([ResourceLabelKeys.plugin: ResourcePluginValues.kubernetes, ResourceLabelKeys.role: "control-plane"], true),
-            ([ResourceLabelKeys.plugin: ResourcePluginValues.machine], true),
+            ([ResourceLabelKeys.role: ResourceRoleValues.builder, ResourceLabelKeys.plugin: "builder"], false),
+            ([ResourceLabelKeys.plugin: ResourcePluginValues.kubernetes, ResourceLabelKeys.role: "control-plane"], false),
+            ([ResourceLabelKeys.plugin: ResourcePluginValues.machine], false),
             ([ResourceLabelKeys.plugin: "compose"], false),
         ]
     )
