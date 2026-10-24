@@ -838,13 +838,14 @@ public actor ContainersService {
     private func copyInHeld(id: String, client: RuntimeClient) async throws {
         do {
             try self.pendingCopies.claim(id)
-            try await self.pendingCopies.apply(id) { source, destination, mode, copyUIDGID, requester in
+            try await self.pendingCopies.apply(id) { source, destination, mode, copyUIDGID, noOverwrite, requester in
                 let path = source.path(percentEncoded: false)
                 let bookmark = try await Self.copyHostDirectoryBookmark(for: path, verb: "read") {
                     await HostDirectoryGrants.shared.lend($0, requester: requester)
                 }
                 try await client.copyIn(
-                    source: path, destination: destination, mode: mode, createParents: true, copyUIDGID: copyUIDGID, hostDirectoryBookmark: bookmark)
+                    source: path, destination: destination, mode: mode, createParents: true, copyUIDGID: copyUIDGID,
+                    hostDirectoryBookmark: bookmark, noOverwriteDirNonDir: noOverwrite, copyAsArchive: true)
             }
         } catch let failure as PendingCopyQueue.Failure {
             self.log.error(
@@ -1355,7 +1356,8 @@ public actor ContainersService {
     ///
     /// - Parameter requester: who asked for the copy, which a folder-permission panel names.
     public func copyIn(
-        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false,
+        id: String, source: String, destination: String, mode: UInt32, createParents: Bool = true, copyUIDGID: Bool = false, noOverwriteDirNonDir: Bool = false,
+        copyAsArchive: Bool = false,
         requester: String? = nil
     ) async throws {
         self.log.debug("\(#function)")
@@ -1370,7 +1372,7 @@ public actor ContainersService {
         }
         try await client.copyIn(
             source: source, destination: destination, mode: mode, createParents: createParents, copyUIDGID: copyUIDGID,
-            hostDirectoryBookmark: bookmark)
+            hostDirectoryBookmark: bookmark, noOverwriteDirNonDir: noOverwriteDirNonDir, copyAsArchive: copyAsArchive)
     }
 
     /// Copy a file or directory from the container to the host.
@@ -1623,6 +1625,44 @@ public actor ContainersService {
             state.snapshot.configuration = configuration
             await self.setContainerState(id, state, context: context)
         }
+    }
+
+    /// Explicitly update only a stopped container's guest agent. Custom and legacy guest
+    /// images are never replaced as a side effect of Start or a failed copy.
+    public func upgradeGuest(id: String, expectedIncarnation: String) async throws {
+        guard !expectedIncarnation.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "guest upgrade requires the observed container incarnation")
+        }
+        let platform = try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            try await self.requireGuestUpgrade(id: id, incarnation: expectedIncarnation, context: context).configuration.platform
+        }
+        // Image downloads must not hold the global lifecycle lock. Revalidate after the
+        // download, in case the container started or was replaced while it was in flight.
+        let image = VminitConfig.defaultImage
+        let filesystem =
+            if let fetch = self.hooks.initFilesystem {
+                try await fetch(platform, image)
+            } else {
+                try await self.getInitBlock(for: platform, imageRef: image)
+            }
+        try await self.lock.withLock(logMetadata: ["acquirer": "\(#function)", "id": "\(id)"]) { context in
+            _ = try await self.requireGuestUpgrade(id: id, incarnation: expectedIncarnation, context: context)
+            try Task.checkCancellation()
+            let bundle = ContainerResource.Bundle(path: self.containerRoot.appendingPathComponent(id))
+            try bundle.installInitialFilesystem(filesystem)
+        }
+    }
+
+    private func requireGuestUpgrade(id: String, incarnation: String, context: AsyncLock.Context) throws -> ContainerSnapshot {
+        let state = try self.getContainerState(id: id, context: context)
+        try Self.require(labels: nil, incarnation: incarnation, on: state, id: id)
+        guard state.snapshot.status == .stopped, state.client == nil else {
+            throw ContainerizationError(.invalidState, message: "stop \(id) before upgrading its guest image")
+        }
+        guard state.snapshot.configuration.runtimeHandler == "container-runtime-linux" else {
+            throw ContainerizationError(.unsupported, message: "this runtime does not support a guest-image upgrade")
+        }
+        return state.snapshot
     }
 
     /// Set labels on a container, of the keys `labelPolicy` lets change: in memory, in the

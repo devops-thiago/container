@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import Containerization
 import ContainerizationArchive
 import Darwin
@@ -33,8 +34,12 @@ struct PrestartCopyRPCTests {
 
     final class Receiver: RegistrableRPCService, Sendable {
         let requests: Mutex<[Request]>
+        let rejection: RPCError?
 
-        init() { requests = Mutex([]) }
+        init(rejection: RPCError? = nil) {
+            requests = Mutex([])
+            self.rejection = rejection
+        }
 
         func registerMethods<Transport: ServerTransport>(with router: inout RPCRouter<Transport>) {
             router.registerHandler(
@@ -43,13 +48,14 @@ struct PrestartCopyRPCTests {
             ) { stream, _ in
                 let request = try await ServerRequest(stream: stream)
                 self.requests.withLock { $0.append(request.message) }
+                if let rejection = self.rejection { throw rejection }
                 return StreamingServerResponse(single: ServerResponse(message: Response.with { $0.status = .complete }, metadata: [:]))
             }
         }
     }
 
     // Exercise the real Vminitd serializer, not a fake GuestCopyAgent above the broken call.
-    @Test("every copy in goes to the agent as an archive, a file's too", .timeLimit(.minutes(1)))
+    @Test("files use the owned raw operation; directories still use archives", .timeLimit(.minutes(1)))
     func archiveFlagOnWire() async throws {
         let receiver = Receiver()
         try await withGRPCServer(
@@ -74,16 +80,32 @@ struct PrestartCopyRPCTests {
             let agent = try await Vminitd(connection: FileHandle(fileDescriptor: fd, closeOnDealloc: false), group: MultiThreadedEventLoopGroup.singleton)
             do {
                 try await VminitdCopyAgent.requestCopy(
-                    agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true)
+                    agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true,
+                    isDirectory: true, owner: nil)
+                try await VminitdCopyAgent.requestCopy(
+                    agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true,
+                    isDirectory: false, owner: CopyOwner(uid: 1234, gid: 5678))
+                try await VminitdCopyAgent.requestCopy(
+                    agent: agent, root: "/run/container/test/rootfs", path: "/smoke", port: 12345, mode: 0o640, createParents: true,
+                    isDirectory: true, owner: nil, noOverwriteDirNonDir: true)
+                for strict in [false, true] {
+                    try await VminitdCopyAgent.requestCopy(
+                        agent: agent, root: "/run/container/test/rootfs", path: "/smoke/config", port: 12345, mode: 0o640, createParents: true,
+                        isDirectory: false, owner: CopyOwner(uid: 1234, gid: 5678), noOverwriteDirNonDir: strict, copyAsArchive: true)
+                }
             } catch {
                 try? await agent.close()
                 throw error
             }
             try await agent.close()
             let requests = receiver.requests.withLock { $0 }
-            #expect(requests.map(\.isArchive) == [true])
+            #expect(requests.map(\.isArchive) == [true, false, true, true, true])
+            #expect(requests.map(\.direction) == [.copyIn, .copyInOwnedFile, .copyInCheckedArchive, .copyIn, .copyInCheckedArchive])
+            #expect(requests.map(\.hasOwnerUid) == [false, true, false, false, false])
+            #expect(requests.map(\.hasOwnerGid) == [false, true, false, false, false])
+            #expect(requests[1].ownerUid == 1234)
+            #expect(requests[1].ownerGid == 5678)
             for request in requests {
-                #expect(request.direction == .copyIn)
                 #expect(request.root == "/run/container/test/rootfs")
                 #expect(request.path == "/smoke")
                 #expect(request.vsockPort == 12345)
@@ -93,46 +115,112 @@ struct PrestartCopyRPCTests {
         }
     }
 
-    @Test("a file is unpacked in its destination's parent, as the one entry named for it")
-    func fileUnpackPoint() {
-        #expect(VminitdCopyAgent.unpackPoint(for: "/etc/app/config", isDirectory: false) == ("/etc/app", "config"))
-        #expect(VminitdCopyAgent.unpackPoint(for: "/motd", isDirectory: false) == ("/", "motd"))
-        #expect(VminitdCopyAgent.unpackPoint(for: "/srv/smoke", isDirectory: true) == ("/srv/smoke", "."))
+    @Test("old guests fail closed with upgrade guidance and other errors remain intact", .timeLimit(.minutes(1)), arguments: [true, false])
+    func legacyGuestRejection(legacy: Bool) async throws {
+        let rejection = RPCError(code: .invalidArgument, message: legacy ? "copy: unrecognized direction 2" : "copy: invalid root")
+        let receiver = Receiver(rejection: rejection)
+        try await withGRPCServer(
+            transport: .http2NIOPosix(address: .ipv4(host: "127.0.0.1", port: 0), transportSecurity: .plaintext),
+            services: [receiver]
+        ) { server in
+            let address = try #require(try await server.listeningAddress?.ipv4)
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            #expect(fd >= 0)
+            var peer = sockaddr_in()
+            peer.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            peer.sin_family = sa_family_t(AF_INET)
+            peer.sin_port = UInt16(address.port).bigEndian
+            peer.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let connected = withUnsafePointer(to: &peer) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            guard connected == 0 else {
+                close(fd)
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            let agent = try await Vminitd(connection: FileHandle(fileDescriptor: fd, closeOnDealloc: false), group: MultiThreadedEventLoopGroup.singleton)
+            do {
+                try await VminitdCopyAgent.requestCopy(
+                    agent: agent, root: "/rootfs", path: "/file", port: 12345, mode: 0o640, createParents: false,
+                    isDirectory: false, owner: CopyOwner(uid: 1, gid: 2))
+                Issue.record("old guest accepted a copy")
+            } catch {
+                let message = String(describing: error)
+                if legacy {
+                    #expect(message.contains("container system upgrade-guest"))
+                    #expect(message.contains("preserves workload data"))
+                } else {
+                    #expect((error as? RPCError)?.message == rejection.message)
+                }
+            }
+            try await agent.close()
+            #expect(receiver.requests.withLock { $0.count } == 1, "never retry with the unsafe legacy operation")
+        }
     }
 
-    @Test("a file goes as one archive entry with its bytes, its mode and its host owner")
+    @Test("single-file owners preserve recorded identity and explicit overrides")
+    func fileOwnerSelection() throws {
+        let source = try PrestartCopyTests.Source()
+        var info = stat()
+        #expect(stat(source.file.path, &info) == 0)
+        #expect(try VminitdCopyAgent.fileOwner(source.file, override: nil) == CopyOwner(uid: info.st_uid, gid: info.st_gid))
+        try CopyOwner.record(CopyOwner(uid: 2345, gid: 3456), at: source.file.path)
+        #expect(try VminitdCopyAgent.fileOwner(source.file, override: nil) == CopyOwner(uid: 2345, gid: 3456))
+        #expect(try VminitdCopyAgent.fileOwner(source.file, override: CopyOwner(uid: 0, gid: 0)) == CopyOwner(uid: 0, gid: 0))
+    }
+
+    @Test("single-file payloads are exact bytes, even when they begin with a gzip header")
     func fileArchivePayload() async throws {
         let source = try PrestartCopyTests.Source()
         let expected = Data([0x1f, 0x8b, 0x08, 0, 0, 1, 2, 3])
         try expected.write(to: source.file)
-        let archive = source.top.appending(path: "payload.tar.gz")
-        FileManager.default.createFile(atPath: archive.path, contents: nil)
+        let payload = source.top.appending(path: "payload")
+        FileManager.default.createFile(atPath: payload.path, contents: nil)
         try await VminitdCopyAgent.send(
-            source.file, isDirectory: false, name: "config", mode: 0o640, owner: nil, to: FileHandle(forWritingTo: archive))
-        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: archive))
-        try #require(entries.count == 1)
-        let (entry, data) = entries[0]
-        #expect(entry.path == "config")
-        #expect(entry.fileType == .regular)
-        #expect(entry.permissions & 0o7777 == 0o640)
-        #expect(data == expected)
-        var info = stat()
-        #expect(stat(source.file.path, &info) == 0)
-        #expect(entry.owner == info.st_uid)
-        #expect(entry.group == info.st_gid)
+            source.file, isDirectory: false, name: "config", mode: 0o640, owner: nil, to: FileHandle(forWritingTo: payload))
+        #expect(try Data(contentsOf: payload) == expected)
     }
 
-    @Test("a file's archive is stored, not compressed: a copy costs what sending its bytes did")
+    @Test("explicit archive uploads preserve replacement semantics and enforce a requested type policy", arguments: [false, true])
+    func explicitFileArchive(strict: Bool) async throws {
+        let source = try PrestartCopyTests.Source()
+        try Data("uploaded contents".utf8).write(to: source.file)
+        let payload = source.top.appending(path: "explicit.tar.gz")
+        FileManager.default.createFile(atPath: payload.path, contents: nil)
+        try await VminitdCopyAgent.send(
+            source.file, isDirectory: false, name: "config", mode: 0o640,
+            owner: CopyOwner(uid: getuid(), gid: getgid()), copyAsArchive: true, to: FileHandle(forWritingTo: payload))
+        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: payload))
+        #expect(entries.count == 1)
+        let entry = try #require(entries.first?.0)
+        #expect(entry.path == "config")
+        #expect(entry.owner == getuid())
+        #expect(entry.group == getgid())
+        let destination = source.top.appending(path: "destination")
+        let directory = destination.appending(path: "config")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let sentinel = directory.appending(path: "keep")
+        try Data("preserved".utf8).write(to: sentinel)
+        let reader = try ArchiveReader(format: .pax, filter: .gzip, file: payload)
+        if strict {
+            #expect(throws: (any Error).self) { try reader.extractContents(to: destination, noOverwriteDirNonDir: true) }
+            #expect(try String(contentsOf: sentinel, encoding: .utf8) == "preserved")
+        } else {
+            #expect(try reader.extractContents(to: destination).isEmpty)
+            #expect(try String(contentsOf: directory, encoding: .utf8) == "uploaded contents")
+            #expect(!FileManager.default.fileExists(atPath: sentinel.path))
+        }
+    }
+
+    @Test("a large single-file transfer preserves the exact length and contents")
     func fileArchiveIsStored() async throws {
         let source = try PrestartCopyTests.Source()
-        try Data(count: 1 << 20).write(to: source.file)
-        let archive = source.top.appending(path: "stored.tar.gz")
-        FileManager.default.createFile(atPath: archive.path, contents: nil)
-        try await VminitdCopyAgent.send(source.file, isDirectory: false, name: "zeros", mode: 0, owner: nil, to: FileHandle(forWritingTo: archive))
-        let size = try #require(try FileManager.default.attributesOfItem(atPath: archive.path)[.size] as? Int)
-        #expect(size > 1 << 20, "a megabyte of zeros compressed to \(size) bytes")
-        let entries = Array(try ArchiveReader(format: .pax, filter: .gzip, file: archive))
-        #expect(entries.map(\.1) == [Data(count: 1 << 20)])
+        let expected = Data(count: 1 << 20)
+        try expected.write(to: source.file)
+        let payload = source.top.appending(path: "payload")
+        FileManager.default.createFile(atPath: payload.path, contents: nil)
+        try await VminitdCopyAgent.send(source.file, isDirectory: false, name: "zeros", mode: 0, owner: nil, to: FileHandle(forWritingTo: payload))
+        #expect(try Data(contentsOf: payload) == expected)
     }
 
     @Test("directory payloads contain nested files and their contents")

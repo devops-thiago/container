@@ -224,7 +224,7 @@ package enum ContainerPathArchive {
         }
         for entry in entries {
             try await tools.copyIn(
-                container, source: root.appending(path: entry.name), destination: destination, mode: entry.mode, copyUIDGID: copyUIDGID,
+                container, source: root.appending(path: entry.name), destination: destination, mode: entry.mode, copyUIDGID: copyUIDGID, noOverwriteDirNonDir: false,
                 requester: requester)
         }
     }

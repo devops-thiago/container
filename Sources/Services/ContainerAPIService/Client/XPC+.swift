@@ -210,6 +210,9 @@ public enum XPCKeys: String {
     case createParents
     /// Whether a copy in is owned by the container's user, as `docker cp -a` has it.
     case copyUIDGID
+    case noOverwriteDirNonDir
+    /// Explicit archive uploads retain archive replacement semantics; native file copies do not.
+    case copyAsArchive
     /// Whether a copy out keeps each file's owner in the container on the copy
     /// (`CopyOwner.record(_:at:)`), for an archive of it that carries the owners.
     case recordCopyOwners
@@ -233,6 +236,7 @@ public enum XPCRoute: String {
     case containerEvent
     /// Set labels on a container, of the keys the server allows to change.
     case containerAdoptWritableSysfs
+    case containerUpgradeGuest
     case containerUpdateLabels
     case containerStats
     case containerDiskUsage

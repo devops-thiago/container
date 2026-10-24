@@ -61,13 +61,16 @@ public struct PendingCopyQueue: Sendable {
         /// Whether what it holds goes in owned by the container's user (`copyUIDGID`). A
         /// record from before it could say so has none: each file keeps its archive's owner.
         public let copyUIDGID: Bool?
+        /// Preserve directory/non-directory kinds when the upload is applied later.
+        public let noOverwriteDirNonDir: Bool?
 
-        public init(destination: String, entries: [Entry], requester: String?, copyUIDGID: Bool = false) {
-            self.version = 1
+        public init(destination: String, entries: [Entry], requester: String?, copyUIDGID: Bool = false, noOverwriteDirNonDir: Bool = false) {
+            self.version = noOverwriteDirNonDir ? 2 : 1
             self.destination = destination
             self.entries = entries
             self.requester = requester
             self.copyUIDGID = copyUIDGID
+            self.noOverwriteDirNonDir = noOverwriteDirNonDir
         }
     }
 
@@ -200,6 +203,18 @@ public struct PendingCopyQueue: Sendable {
         _ container: String,
         copyIn: @Sendable (_ source: URL, _ destination: String, _ mode: UInt32, _ copyUIDGID: Bool, _ requester: String?) async throws -> Void
     ) async throws {
+        try await apply(container) { source, destination, mode, copyUIDGID, noOverwrite, requester in
+            guard !noOverwrite else {
+                throw Failure(upload: source, message: "this copy handler cannot enforce the stored no-overwrite policy")
+            }
+            try await copyIn(source, destination, mode, copyUIDGID, requester)
+        }
+    }
+
+    public func apply(
+        _ container: String,
+        copyIn: @Sendable (_ source: URL, _ destination: String, _ mode: UInt32, _ copyUIDGID: Bool, _ noOverwrite: Bool, _ requester: String?) async throws -> Void
+    ) async throws {
         for (_, upload) in Self.uploads(in: applying(container)) {
             var record: Record
             do {
@@ -208,7 +223,7 @@ public struct PendingCopyQueue: Sendable {
                 release(container)
                 throw Failure(upload: upload, message: "could not read the copy held in \(upload.path(percentEncoded: false)): \(error)")
             }
-            guard record.version == 1 else {
+            guard record.version == 1 || (record.version == 2 && record.noOverwriteDirNonDir == true) else {
                 release(container)
                 let held = pending(container).appending(path: upload.lastPathComponent)
                 throw Failure(
@@ -220,7 +235,7 @@ public struct PendingCopyQueue: Sendable {
             while let entry = record.entries.first {
                 let source = Self.root(of: upload).appending(path: entry.name)
                 do {
-                    try await copyIn(source, record.destination, entry.mode, record.copyUIDGID ?? false, record.requester)
+                    try await copyIn(source, record.destination, entry.mode, record.copyUIDGID ?? false, record.noOverwriteDirNonDir ?? false, record.requester)
                 } catch {
                     release(container)
                     throw Failure(upload: upload, message: "could not copy \(entry.name) into \(record.destination) before the start: \(Self.reason(error))")

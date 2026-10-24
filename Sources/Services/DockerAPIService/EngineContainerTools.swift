@@ -53,8 +53,9 @@ public protocol EngineContainerTools: Sendable {
     /// `destination/<name of source>`. A file gets `mode`. Each file keeps the owner its
     /// source names, or one recorded on it when it was staged (`CopyOwner`); `copyUIDGID`
     /// gives everything the container's user instead, as dockerd's `copyUIDGID` does.
+    /// `noOverwriteDirNonDir` is enforced by the guest, including nested archive entries.
     /// `requester` is as `EngineContainers.create` takes it.
-    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, requester: String?) async throws
+    func copyIn(_ container: ContainerSnapshot, source: URL, destination: String, mode: UInt32, copyUIDGID: Bool, noOverwriteDirNonDir: Bool, requester: String?) async throws
     /// Writes the container's filesystem to `archive` as an uncompressed tar: a running
     /// container's as it is now, a stopped one's as it was left, and one never started its
     /// image's. `archive` is in `scratchDirectory()`.
