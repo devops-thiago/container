@@ -49,6 +49,24 @@ public struct DockerProcessStdio: Sendable {
 
     /// No stdio at all: what a detached start binds.
     public static let detached = Self()
+
+    /// Duplicate the three streams together before handing any descriptor to the engine.
+    static func duplicating(
+        stdin: StdioPipe? = nil, stdout: StdioPipe? = nil, stderr: StdioPipe? = nil,
+        duplicate: (StdioPipe) throws -> FileHandle? = { try $0.containerHandleForEngine() }
+    ) throws -> Self {
+        var handles: [FileHandle?] = []
+        do {
+            for pipe in [stdin, stdout, stderr] {
+                handles.append(try pipe.flatMap(duplicate))
+            }
+            return Self(stdin: handles[0], stdout: handles[1], stderr: handles[2])
+        } catch {
+            // None has reached XPC yet. Once returned, the engine owns their closure.
+            for handle in handles { try? handle?.close() }
+            throw error
+        }
+    }
 }
 
 /// One OS pipe. The agent keeps one end and the container gets the other; whichever end is

@@ -23,6 +23,52 @@ import Testing
 /// over its own descriptor and then closed it too closed the number twice; by the second close
 /// another exec could hold that number, and the agent trapped on the descriptor it lost.
 struct StdioPipeTests {
+    @Test("a failed later duplication closes earlier copies without closing the pipes", arguments: [2, 3])
+    func failedDuplicationRollsBack(failingCall: Int) throws {
+        let input = try StdioPipe(.intoContainer)
+        let output = try StdioPipe(.outOfContainer)
+        let error = try StdioPipe(.outOfContainer)
+        var calls = 0
+        var descriptors: [Int32] = []
+        var copies: [FileHandle] = []
+        defer {
+            // Clean up a failing negative control as well.
+            for handle in copies { try? handle.close() }
+        }
+        #expect(throws: POSIXError(.EMFILE)) {
+            try DockerProcessStdio.duplicating(stdin: input, stdout: output, stderr: error) { pipe in
+                calls += 1
+                if calls == failingCall { throw POSIXError(.EMFILE) }
+                let handle = try #require(try pipe.containerHandleForEngine())
+                descriptors.append(handle.fileDescriptor)
+                copies.append(handle)
+                return handle
+            }
+        }
+        #expect(descriptors.count == failingCall - 1)
+        for fd in descriptors {
+            #expect(fcntl(fd, F_GETFD) == -1, "the earlier duplicate must be closed on failure")
+            #expect(errno == EBADF)
+        }
+        for pipe in [input, output, error] {
+            #expect(fcntl(try #require(pipe.container), F_GETFD) != -1)
+            #expect(fcntl(try #require(pipe.host), F_GETFD) != -1)
+        }
+    }
+
+    @Test("successful duplication keeps stream positions and transfers each copy once")
+    func duplicateStreams() throws {
+        let output = try StdioPipe(.outOfContainer)
+        let stdio = try DockerProcessStdio.duplicating(stdout: output)
+        #expect(stdio.stdin == nil)
+        #expect(stdio.stderr == nil)
+        let handle = try #require(stdio.stdout)
+        #expect(fcntl(handle.fileDescriptor, F_GETFD) & FD_CLOEXEC != 0)
+        #expect(handle.fileDescriptor != output.container)
+        try handle.close()
+        #expect(fcntl(try #require(output.container), F_GETFD) != -1)
+    }
+
     @Test("the engine gets a copy of the container's end, never the descriptor the pipe closes")
     func engineGetsACopy() throws {
         for direction in [StdioPipe.Direction.intoContainer, .outOfContainer] {
