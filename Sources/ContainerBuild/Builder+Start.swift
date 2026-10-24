@@ -70,6 +70,8 @@ extension Builder {
         /// Forward the caller's SSH agent into the builder. Takes effect only when
         /// `SSH_AUTH_SOCK` is set.
         public var ssh: Bool
+        /// Explicitly authorize writable /sys on a legacy builder before normal startup.
+        public var adoptLegacy: Bool
         public var dnsNameservers: [String]
         public var dnsDomain: String?
         public var dnsSearchDomains: [String]
@@ -79,6 +81,7 @@ extension Builder {
             cpus: Int64? = nil,
             memory: String? = nil,
             ssh: Bool = false,
+            adoptLegacy: Bool = false,
             dnsNameservers: [String] = [],
             dnsDomain: String? = nil,
             dnsSearchDomains: [String] = [],
@@ -87,6 +90,7 @@ extension Builder {
             self.cpus = cpus
             self.memory = memory
             self.ssh = ssh
+            self.adoptLegacy = adoptLegacy
             self.dnsNameservers = dnsNameservers
             self.dnsDomain = dnsDomain
             self.dnsSearchDomains = dnsSearchDomains
@@ -313,7 +317,13 @@ extension Builder {
         let builderPlatform = ContainerizationOCI.Platform(arch: "arm64", os: "linux", variant: "v8")
 
         let client = ContainerClient()
-        if let existingContainer = try? await client.get(id: builderContainerId) {
+        if var existingContainer = try? await client.get(id: builderContainerId) {
+            if !existingContainer.configuration.writableSysfs {
+                try await client.prepareWritableSysfs(
+                    [existingContainer], role: .builder, adoptLegacy: options.adoptLegacy,
+                    adoptionCommand: "container builder start --adopt-legacy")
+                existingContainer.configuration.writableSysfs = true
+            }
             let recreate = target.recreate(existingContainer.configuration)
             let action = try startAction(status: existingContainer.status, recreate: recreate)
             switch action {

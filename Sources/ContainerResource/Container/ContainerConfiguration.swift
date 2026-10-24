@@ -172,7 +172,7 @@ public struct ContainerConfiguration: Sendable, Codable {
         readonlyPaths = try container.decodeIfPresent([String].self, forKey: .readonlyPaths)
         writableSysfs =
             try container.decodeIfPresent(Bool.self, forKey: .writableSysfs)
-            ?? Self.engineManagesCgroups(labels: labels)
+            ?? false
         creationDate = try container.decodeIfPresent(Date.self, forKey: .creationDate) ?? Date(timeIntervalSince1970: 0)
     }
 
@@ -316,17 +316,4 @@ public struct ContainerConfiguration: Sendable, Codable {
         self.initProcess = process
     }
 
-    /// Whether a container saved before ``writableSysfs`` existed is one of the engine's own
-    /// that set it now: its builder, a Kubernetes node or a machine, told apart by the labels
-    /// the engine gave them. Read only for a saved configuration without the key, so a label
-    /// on a newer container does not make its `/sys` writable.
-    static func engineManagesCgroups(labels: [String: String]) -> Bool {
-        if labels[ResourceLabelKeys.role] == ResourceRoleValues.builder {
-            return true
-        }
-        guard let plugin = labels[ResourceLabelKeys.plugin] else {
-            return false
-        }
-        return ResourcePluginValues.isKubernetes(plugin) || plugin == ResourcePluginValues.machine
-    }
 }

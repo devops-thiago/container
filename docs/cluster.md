@@ -264,3 +264,22 @@ container cluster load-image --name feature-payments my-service:feature-payments
 
 - [Command reference](./command-reference.md#container-cluster-management) — full details of all `container cluster` subcommands
 - [Container machines](./container-machine.md) — persistent Linux environments for general-purpose development
+
+## Adopting nodes created by older versions
+
+Older node configurations did not record their need for writable `/sys`. Labels alone no
+longer enable it, because ordinary containers can carry the same labels. If starting an old
+cluster reports that adoption is required, stop the cluster and explicitly adopt its nodes:
+
+```sh
+container k8s stop --name my-cluster
+container k8s start --name my-cluster --adopt-legacy
+```
+
+This records the permission on each existing node without deleting or recreating it. Each
+update checks the node's creation identity, so a replacement with the same name is refused.
+Once adopted, later starts do not need the flag. New clusters already record the permission.
+
+An old builder may need the same explicit authorization: stop it, then run
+`container builder start --adopt-legacy`. Normal builder configuration changes can still
+cause its existing recreation policy to apply.

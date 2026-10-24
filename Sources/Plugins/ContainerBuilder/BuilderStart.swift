@@ -39,6 +39,9 @@ struct BuilderStart: AsyncParsableCommand {
     )
     var memory: String?
 
+    @Flag(name: .long, help: "Explicitly authorize writable /sys for a legacy builder")
+    var adoptLegacy = false
+
     @OptionGroup
     public var dns: Flags.DNS
 
@@ -69,6 +72,7 @@ struct BuilderStart: AsyncParsableCommand {
             Builder.StartOptions(
                 cpus: self.cpus,
                 memory: self.memory,
+                adoptLegacy: self.adoptLegacy,
                 dnsNameservers: self.dns.nameservers,
                 dnsDomain: self.dns.domain,
                 dnsSearchDomains: self.dns.searchDomains,
