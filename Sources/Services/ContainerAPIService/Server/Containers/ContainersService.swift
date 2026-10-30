@@ -651,14 +651,35 @@ public actor ContainersService {
     /// helpers start empty with the engine, so the reservations made at create are made
     /// again here; in id order, so the outcome does not depend on dictionary order.
     public func reserveAddressesForExistingContainers() async {
-        for id in containers.keys.sorted() {
-            guard let configuration = containers[id]?.snapshot.configuration else { continue }
+        // Keep the ownership inventory stable across helper RPCs, just as create does.
+        await self.lock.withLock { context in
+            await self.reserveAddressesForExistingContainers(context: context)
+        }
+    }
+
+    private func reserveAddressesForExistingContainers(context: AsyncLock.Context) async {
+        let inventory: AttachmentNameValidator.NamespaceInventory
+        do {
+            inventory = try .init(containers: self.containers.mapValues { $0.snapshot.configuration.networks })
+        } catch {
+            self.log.warning("could not index saved network names", metadata: ["error": "\(error)"])
+            return
+        }
+        for id in self.containers.keys.sorted() {
+            guard let configuration = self.containers[id]?.snapshot.configuration else { continue }
             do {
-                try await networksService?.reserveAddresses(for: id, attachments: configuration.networks)
+                try AttachmentNameValidator.validateStored(
+                    id: id, networks: configuration.networks,
+                    inventory: inventory, excluding: id)
+                try await self.networksService?.reserveAddresses(for: id, attachments: configuration.networks)
             } catch {
-                log.warning("could not reserve addresses", metadata: ["id": "\(id)", "error": "\(error)"])
+                self.log.warning("could not reserve addresses", metadata: ["id": "\(id)", "error": "\(error)"])
             }
         }
+    }
+
+    private func otherNetworkAttachments(excluding id: String) -> [AttachmentConfiguration] {
+        containers.filter { $0.key != id }.flatMap { $0.value.snapshot.configuration.networks }
     }
 
     /// Bootstrap the init process of the container.
@@ -746,7 +767,8 @@ public actor ContainersService {
 
         let path = self.containerRoot.appendingPathComponent(id)
         let (config, _) = try Self.getContainerConfiguration(at: path)
-        try AttachmentNameValidator.validateStored(id: id, networks: config.networks)
+        try AttachmentNameValidator.validateStored(
+            id: id, networks: config.networks, existing: otherNetworkAttachments(excluding: id))
         if let held = Self.volumeInUse(by: self.containers.values.map(\.snapshot), neededBy: config) {
             throw ContainerizationError(
                 .invalidState,

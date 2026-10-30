@@ -66,12 +66,29 @@ actor AttachmentAllocator {
     ///
     /// An exact alias may be shared: as Docker allows, every host that declares it holds it, and
     /// it may also be another host's hostname. The allocation fails without changing any state if a
-    /// subtree alias is already held by another host on this network.
+    /// subtree alias is already held by another host, or its private root would be shared.
     ///
     /// - Throws: `ContainerizationError` with code `.exists` if a subtree alias is already in use.
     @discardableResult
     func allocate(hostname: String, aliases: [DNSMatchRule] = []) async throws -> UInt32 {
         let hostname = AttachmentOptions.canonicalHostname(hostname)
+
+        do {
+            try AliasPolicy.validateNamespace(
+                hostname: try? DNSName(hostname), aliases: aliases,
+                foreignExactName: { name in
+                    (name.pqdn != hostname && self.hostnames[name.pqdn] != nil)
+                        || self.exactAliases[name.pqdn]?.contains(where: { $0 != hostname }) == true
+                },
+                foreignSubtree: { name in
+                    self.subtreeAliases[name].map { $0 != hostname } ?? false
+                },
+                foreignPrivateSubtree: { name in
+                    self.subtreeAliases[name].map { $0 != hostname && $0 != name.pqdn } ?? false
+                })
+        } catch let violation as AliasPolicy.Violation {
+            throw ContainerizationError(.exists, message: violation.description)
+        }
 
         var newAliases = [DNSMatchRule]()
         for rule in aliases where !newAliases.contains(rule) {
