@@ -50,7 +50,8 @@ func resolveMachineId(_ id: String?, client: MachineClient) async throws -> Stri
 /// *why* setup refused to run (e.g. a uid/username/home conflict with an
 /// existing account in the image).
 ///
-/// On any failure during user setup the machine is stopped to leave it in a clean state.
+/// Only the caller that booted this VM runs setup and may roll it back. An already
+/// running VM is reused; concurrent callers wait for the owner's setup to finish.
 @discardableResult
 func bootMachine(
     id: String?,
@@ -61,9 +62,7 @@ func bootMachine(
     if let sshAuthSock = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
         dynamicEnv["SSH_AUTH_SOCK"] = sshAuthSock
     }
-    let snapshot = try await client.boot(id: id, dynamicEnv: dynamicEnv)
-
-    do {
+    return try await client.bootAndPrepare(id: id, dynamicEnv: dynamicEnv) { snapshot in
         guard let containerId = snapshot.containerId else {
             throw ContainerizationError(
                 .invalidState,
@@ -97,17 +96,5 @@ func bootMachine(
                 message: "container machine failed to create user"
             )
         }
-    } catch {
-        // A machine whose user setup did not finish is stopped rather than left half made;
-        // say so, because the raw error ("Operation not supported by device") reads as a
-        // broken machine rather than a setup that never ran.
-        try? await client.stop(id: snapshot.id)
-        throw ContainerizationError(
-            .internalError,
-            message: "container machine \(snapshot.id) was stopped because its user setup failed: \(error)",
-            cause: error
-        )
     }
-
-    return snapshot
 }

@@ -42,10 +42,14 @@ public actor MachinesService {
         var id: String { snapshot.configuration.id }
 
         var logger: Task<Void, Never>?
+        var setupLease: MachineSetupLease?
+        var runtimeIncarnation: String?
     }
 
     private var serviceState: ServiceState
     private let client: ContainerClient
+    typealias BootSettings = (networkID: String, stopSignal: String?)
+    private let bootSettings: @Sendable (MachineConfiguration) async throws -> BootSettings
 
     private let resourceRoot: FilePath
     private let machineRoot: FilePath
@@ -64,6 +68,13 @@ public actor MachinesService {
     }
 
     public init(appRoot: FilePath, resourceRoot: FilePath, log: Logger) throws {
+        try self.init(appRoot: appRoot, resourceRoot: resourceRoot, log: log, client: ContainerClient())
+    }
+
+    init(
+        appRoot: FilePath, resourceRoot: FilePath, log: Logger, client: ContainerClient,
+        bootSettings: @escaping @Sendable (MachineConfiguration) async throws -> BootSettings = MachinesService.resolveBootSettings
+    ) throws {
         self.resourceRoot = resourceRoot
 
         let machineRoot = appRoot.appending(Self.machinesDir)
@@ -73,8 +84,18 @@ public actor MachinesService {
 
         self.log = log
         self.machines = try Self.loadAtBoot(root: machineRoot, resourceRoot: resourceRoot, log: log)
-        self.client = ContainerClient()
+        self.client = client
+        self.bootSettings = bootSettings
         self.exitMonitor = ExitMonitor(log: log)
+    }
+
+    static func resolveBootSettings(_ configuration: MachineConfiguration) async throws -> BootSettings {
+        guard let network = try await NetworkClient().builtin else {
+            throw ContainerizationError(.invalidState, message: "default network is not present")
+        }
+        // Retain the image stop signal, defaulting to SIGTERM when image metadata is unavailable.
+        let imageConfig = try? await ClientImage(description: configuration.image).config(for: configuration.platform).config
+        return (network.id, imageConfig?.stopSignal)
     }
 
     static private func loadAtBoot(root: FilePath, resourceRoot: FilePath, log: Logger) throws -> [String: MachineState] {
@@ -346,6 +367,21 @@ public actor MachinesService {
         dynamicEnv: [String: String] = [:],
         hostDirectoryBookmarks: [Data] = []
     ) async throws -> MachineSnapshot {
+        let result = try await boot(id: id, dynamicEnv: dynamicEnv, hostDirectoryBookmarks: hostDirectoryBookmarks, coordinated: false)
+        switch result {
+        case .started(let snapshot, _), .existing(let snapshot): return snapshot
+        }
+    }
+
+    public func bootForSetup(
+        id: String?, dynamicEnv: [String: String] = [:], hostDirectoryBookmarks: [Data] = []
+    ) async throws -> MachineBootResult {
+        try await boot(id: id, dynamicEnv: dynamicEnv, hostDirectoryBookmarks: hostDirectoryBookmarks, coordinated: true)
+    }
+
+    private func boot(
+        id: String?, dynamicEnv: [String: String], hostDirectoryBookmarks: [Data], coordinated: Bool
+    ) async throws -> MachineBootResult {
         self.log.debug("\(#function)")
 
         guard let id = id ?? self.default?.id else {
@@ -362,13 +398,11 @@ public actor MachinesService {
 
             switch state.snapshot.status {
             case .running:
-                // The snapshot's `initialized` was read when this boot began, before the
-                // caller's first-time user setup ran inside the guest. Answer with the
-                // bundle's current word, or the next caller repeats the setup — and a
-                // repeat that fails stops a machine that was fine.
+                // Refresh persisted first-boot status. Setup ownership is tracked
+                // separately for this VM's current boot.
                 state.snapshot.initialized = bundle.initialized
                 await self.setMachineState(id, state, context: context)
-                return state.snapshot
+                return .existing(snapshot: state.snapshot)
             case .stopped:
                 break
             default:
@@ -383,12 +417,14 @@ public actor MachinesService {
             let rootfs = try bundle.machineRootfs
 
             let bootConfig = state.snapshot.bootConfig
-            var config = try await state.snapshot.configuration.toContainerConfig(
+            let settings = try await self.bootSettings(state.snapshot.configuration)
+            var config = state.snapshot.configuration.toContainerConfig(
                 cid: cid,
                 sbin: path.appending(MachineBundle.sbinDirectory),
                 initializedFile: path.appending(MachineBundle.initializedFile),
                 homeMountOption: bootConfig.homeMount,
                 virtualization: bootConfig.virtualization,
+                settings: settings
             )
 
             config.resources.cpus = bootConfig.cpus
@@ -407,12 +443,14 @@ public actor MachinesService {
             }
 
             var fhs: [FileHandle] = []
+            let incarnation = UUID().uuidString.lowercased()
             do {
                 try await self.client.create(
                     configuration: config,
                     options: ContainerCreateOptions(autoRemove: true, rootFsOverride: rootfs),
                     kernel: kernel,
-                    hostDirectoryBookmarks: hostDirectoryBookmarks
+                    hostDirectoryBookmarks: hostDirectoryBookmarks,
+                    incarnation: incarnation
                 )
 
                 let process = try await self.client.bootstrap(
@@ -465,12 +503,17 @@ public actor MachinesService {
 
                 try await self.exitMonitor.registerProcess(
                     id: id,
-                    onExit: self.handleMachineExit
+                    onExit: { id, code in
+                        await self.handleMachineExit(id: id, code: code, containerID: cid, incarnation: incarnation)
+                    }
                 )
 
                 state.snapshot.status = .running
                 state.snapshot.startedDate = Date()
                 state.snapshot.containerId = cid
+                state.runtimeIncarnation = incarnation
+                state.setupLease = coordinated ? MachineSetupLease(machineID: id, containerID: cid, token: UUID()) : nil
+                state.snapshot.setupPending = coordinated
                 state.snapshot.initialized = bundle.initialized
                 await self.setMachineState(id, state, context: context)
 
@@ -487,7 +530,8 @@ public actor MachinesService {
                     return ExitStatus(exitCode: code)
                 }
 
-                return state.snapshot
+                if let lease = state.setupLease { return .started(snapshot: state.snapshot, lease: lease) }
+                return .existing(snapshot: state.snapshot)
             } catch {
                 await self.exitMonitor.stopTracking(id: id)
 
@@ -496,8 +540,11 @@ public actor MachinesService {
                 state.logger = nil
 
                 fhs.forEach { try? $0.close() }
-                try? await self.client.delete(id: cid, force: true)
+                try? await self.client.delete(id: cid, force: true, expectedIncarnation: incarnation)
 
+                state.setupLease = nil
+                state.runtimeIncarnation = nil
+                state.snapshot.setupPending = false
                 state.snapshot.status = .stopped
                 state.snapshot.startedDate = nil
                 state.snapshot.containerId = nil
@@ -519,47 +566,94 @@ public actor MachinesService {
         return String(cString: entry.pointee.pw_dir)
     }
 
+    func stopAfterSetupDisconnect(_ lease: MachineSetupLease) async {
+        do {
+            // Cleanup must still run if the connection handler was cancelled.
+            let cleanup = Task { try await self.stopSetup(lease) }
+            _ = try await cleanup.value
+        } catch {
+            log.warning("failed to stop abandoned machine setup", metadata: ["id": "\(lease.machineID)", "error": "\(error)"])
+        }
+    }
+
+    public func completeSetup(_ lease: MachineSetupLease) async throws -> MachineSnapshot {
+        try await self.lock.withLock { context in
+            var state = try await self._getMachineState(id: lease.machineID)
+            guard state.setupLease == lease, state.snapshot.status == .running,
+                state.snapshot.containerId == lease.containerID, state.snapshot.setupPending
+            else { throw ContainerizationError(.invalidState, message: "machine setup no longer owns this VM") }
+            // Revoke rollback authority before followers are allowed to use the VM. A lost
+            // completion reply must not let the old caller stop a successfully prepared VM.
+            state.setupLease = nil
+            state.snapshot.setupPending = false
+            let path = try self.bundlePath(id: lease.machineID)
+            state.snapshot.initialized = MachineBundle(path: path).initialized
+            await self.setMachineState(lease.machineID, state, context: context)
+            return state.snapshot
+        }
+    }
+
+    public func stopSetup(_ lease: MachineSetupLease) async throws -> Bool {
+        try await self.lock.withLock { context in
+            guard let state = try? await self._getMachineState(id: lease.machineID),
+                state.setupLease == lease, state.snapshot.setupPending,
+                state.snapshot.containerId == lease.containerID, state.snapshot.status == .running
+            else { return false }
+            try await self.stopLocked(id: lease.machineID, context: context)
+            return true
+        }
+    }
+
     public func stop(id: String) async throws {
         self.log.debug("\(#function)")
-
         try await self.lock.withLock { context in
-            let state = try await self._getMachineState(id: id)
-
-            switch state.snapshot.status {
-            case .stopped:
-                return
-            case .running:
-                break
-            default:
-                throw ContainerizationError(
-                    .invalidState,
-                    message: "container machine \(id) is \(state.snapshot.status)"
-                )
-            }
-
-            guard let cid = state.snapshot.containerId else {
-                throw ContainerizationError(
-                    .internalError,
-                    message: "no container ID for running container machine"
-                )
-            }
-
-            try await self.client.stop(id: cid, opts: ContainerStopOptions(timeoutInSeconds: 10, signal: nil))
-            await self.handleMachineExit(id: id, code: nil, context: context)
+            try await self.stopLocked(id: id, context: context)
         }
     }
 
-    private func handleMachineExit(id: String, code: ExitStatus? = nil) async {
+    private func stopLocked(id: String, context: AsyncLock.Context) async throws {
+        let state = try self._getMachineState(id: id)
+
+        switch state.snapshot.status {
+        case .stopped:
+            return
+        case .running:
+            break
+        default:
+            throw ContainerizationError(
+                .invalidState,
+                message: "container machine \(id) is \(state.snapshot.status)"
+            )
+        }
+
+        guard let cid = state.snapshot.containerId else {
+            throw ContainerizationError(
+                .internalError,
+                message: "no container ID for running container machine"
+            )
+        }
+
+        guard let incarnation = state.runtimeIncarnation else {
+            throw ContainerizationError(.invalidState, message: "running machine has no backing container identity")
+        }
+        try await self.client.stop(id: cid, opts: ContainerStopOptions(timeoutInSeconds: 10, signal: nil), expectedIncarnation: incarnation)
+        await self.handleMachineExit(id: id, code: nil, containerID: cid, incarnation: incarnation, context: context)
+    }
+
+    func handleMachineExit(id: String, code: ExitStatus?, containerID: String, incarnation: String) async {
         await self.lock.withLock { [self] context in
-            await handleMachineExit(id: id, code: code, context: context)
+            await handleMachineExit(id: id, code: code, containerID: containerID, incarnation: incarnation, context: context)
         }
     }
 
-    private func handleMachineExit(id: String, code: ExitStatus?, context: AsyncLock.Context) async {
+    private func handleMachineExit(id: String, code: ExitStatus?, containerID: String, incarnation: String, context: AsyncLock.Context) async {
         self.log.info("container exited for container machine \(id)")
-        guard var state = self.machines[id] else {
+        guard var state = self.machines[id], state.snapshot.containerId == containerID, state.runtimeIncarnation == incarnation else {
             return
         }
+        state.setupLease = nil
+        state.runtimeIncarnation = nil
+        state.snapshot.setupPending = false
         state.snapshot.status = .stopped
         state.snapshot.startedDate = nil
         state.snapshot.containerId = nil
@@ -676,7 +770,8 @@ extension MachineConfiguration {
         initializedFile: FilePath,
         homeMountOption: MachineConfig.HomeMountOption,
         virtualization: Bool,
-    ) async throws -> ContainerConfiguration {
+        settings: MachinesService.BootSettings
+    ) -> ContainerConfiguration {
         var config = ContainerConfiguration(
             id: cid,
             image: image,
@@ -728,12 +823,9 @@ extension MachineConfiguration {
             domain: domain,
             searchDomains: [domain],
         )
-        guard let defaultNetwork = try await NetworkClient().builtin else {
-            throw ContainerizationError(.invalidState, message: "default network is not present")
-        }
         config.networks = [
             AttachmentConfiguration(
-                network: defaultNetwork.id,
+                network: settings.networkID,
                 options: AttachmentOptions(hostname: dnsHostname)
             )
         ]
@@ -747,9 +839,7 @@ extension MachineConfiguration {
 
         config.rosetta = platform.architecture == "amd64" && Arch.hostArchitecture() == .arm64
 
-        // Default to nil if image is not found, which defaults to send SIGTERM on stop
-        let imageConfig = try? await ClientImage(description: image).config(for: platform).config
-        config.stopSignal = imageConfig?.stopSignal
+        config.stopSignal = settings.stopSignal
 
         return config
     }

@@ -23,6 +23,9 @@ public enum MachineKeys: String {
     case machines
     /// Single container machine snapshot.
     case snapshot
+    case bootResult
+    case setupLease
+    case stopped
     /// Boot-time configuration.
     case bootConfig
     /// File handles to logs

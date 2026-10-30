@@ -31,6 +31,10 @@ public struct MachineSnapshot: Codable, Sendable {
 
     public var initialized: Bool
 
+    /// A coordinated boot is still preparing this VM. False also covers raw boots whose
+    /// caller manages accounts itself; it does not attest to those accounts.
+    public var setupPending: Bool
+
     public var id: String { configuration.id }
     public var platform: ContainerizationOCI.Platform { configuration.platform }
 
@@ -44,6 +48,7 @@ public struct MachineSnapshot: Codable, Sendable {
         case ipAddress
         case diskSize
         case initialized
+        case setupPending
     }
 
     public init(
@@ -56,6 +61,7 @@ public struct MachineSnapshot: Codable, Sendable {
         ipAddress: String? = nil,
         diskSize: UInt64? = nil,
         initialized: Bool = false,
+        setupPending: Bool = false,
     ) {
         self.configuration = configuration
         self.status = status
@@ -66,6 +72,7 @@ public struct MachineSnapshot: Codable, Sendable {
         self.ipAddress = ipAddress
         self.diskSize = diskSize
         self.initialized = initialized
+        self.setupPending = setupPending
     }
 
     public init(from decoder: Decoder) throws {
@@ -80,5 +87,6 @@ public struct MachineSnapshot: Codable, Sendable {
         ipAddress = try container.decodeIfPresent(String.self, forKey: .ipAddress)
         diskSize = try container.decodeIfPresent(UInt64.self, forKey: .diskSize)
         initialized = try container.decodeIfPresent(Bool.self, forKey: .initialized) ?? false
+        setupPending = try container.decodeIfPresent(Bool.self, forKey: .setupPending) ?? false
     }
 }

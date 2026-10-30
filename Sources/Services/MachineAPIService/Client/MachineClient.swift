@@ -89,17 +89,27 @@ public struct MachineClient: Sendable {
     }
 
     private let xpcClient: XPCClient
+    let setupClientFactory: @Sendable () -> XPCClient
 
     public init() {
-        self.xpcClient = XPCClient(service: Self.serviceIdentifier)
+        self.init(xpcClient: XPCClient(service: Self.serviceIdentifier))
+    }
+
+    init(
+        xpcClient: XPCClient,
+        setupClientFactory: @escaping @Sendable () -> XPCClient = { XPCClient(service: Self.serviceIdentifier) }
+    ) {
+        self.xpcClient = xpcClient
+        self.setupClientFactory = setupClientFactory
     }
 
     @discardableResult
-    private func xpcSend(
+    func xpcSend(
         message: XPCMessage,
-        timeout: Duration? = .seconds(10)
+        timeout: Duration? = .seconds(10),
+        cancelOnTaskCancellation: Bool = false
     ) async throws -> XPCMessage {
-        try await xpcClient.send(message, responseTimeout: timeout)
+        try await xpcClient.send(message, responseTimeout: timeout, cancelOnTaskCancellation: cancelOnTaskCancellation)
     }
 
     /// List container machines
@@ -213,19 +223,8 @@ public struct MachineClient: Sendable {
         hostDirectoryBookmarks: [Data] = []
     ) async throws -> MachineSnapshot {
         do {
-            let request = XPCMessage(route: MachineRoutes.bootMachine.rawValue)
-            if let id {
-                request.set(key: MachineKeys.id.rawValue, value: id)
-            }
-
-            let dynamicEnvData = try JSONEncoder().encode(dynamicEnv)
-            request.set(key: MachineKeys.dynamicEnv.rawValue, value: dynamicEnvData)
-
-            if !hostDirectoryBookmarks.isEmpty {
-                request.set(
-                    key: MachineKeys.hostDirectoryBookmarks.rawValue,
-                    value: try JSONEncoder().encode(hostDirectoryBookmarks))
-            }
+            let request = try Self.bootRequest(
+                route: .bootMachine, id: id, dynamicEnv: dynamicEnv, hostDirectoryBookmarks: hostDirectoryBookmarks)
 
             let response = try await xpcSend(message: request, timeout: nil)
             guard let data = response.dataNoCopy(key: MachineKeys.snapshot.rawValue) else {
@@ -279,11 +278,15 @@ public struct MachineClient: Sendable {
 
     /// Inspect a container machine and return its snapshot.
     public func inspect(id: String) async throws -> MachineSnapshot {
+        try await inspect(id: id, responseTimeout: nil, cancelOnTaskCancellation: false)
+    }
+
+    func inspect(id: String, responseTimeout: Duration?, cancelOnTaskCancellation: Bool) async throws -> MachineSnapshot {
         do {
             let request = XPCMessage(route: MachineRoutes.inspectMachine.rawValue)
             request.set(key: MachineKeys.id.rawValue, value: id)
 
-            let response = try await xpcSend(message: request, timeout: nil)
+            let response = try await xpcSend(message: request, timeout: responseTimeout, cancelOnTaskCancellation: cancelOnTaskCancellation)
             guard let data = response.dataNoCopy(key: MachineKeys.snapshot.rawValue) else {
                 throw ContainerizationError(
                     .internalError,
