@@ -1012,6 +1012,12 @@ let package = Package(
             path: "Sources/Plugins/ContainerBuilder",
             exclude: ["config.toml"]
         ),
+        .testTarget(
+            name: "ContainerBuilderPluginTests",
+            dependencies: [
+                "container-builder"
+            ]
+        ),
     ]
 )
 
