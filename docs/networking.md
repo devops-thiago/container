@@ -179,8 +179,8 @@ An alias that contains `*` is rejected. Use the leading-dot form instead, which 
 ### Rules for aliases
 
 * A name with a leading dot must be below a name that the same network attachment owns, which is its own hostname or one of its exact aliases. `gateway.test` with `.gateway.test` is allowed. `.apps.test` on a container that has no `apps.test` name is not.
-* An exact alias needs at least two labels, such as `api.test`, and the part after the leading dot of a subtree alias needs at least two labels too. A name with a single label is not under any domain, so macOS would never send queries for it to the container DNS service. When a default DNS domain is configured, a name without a dot gets the domain, as described above. When none is configured, `api` and `.test` are rejected.
-* Every exact name is unique across all containers, whether they are running or stopped. A new container cannot use an alias or a hostname that another container already has, and an alias cannot match another container's name.
+* The part after the leading dot of a subtree alias needs at least two labels. When a default DNS domain is configured, a name without a dot gets the domain, as described above. When none is configured, an exact alias with a single label, such as `db`, is kept as Docker keeps a service name: other containers on the network find it in their hosts files, but macOS never sends queries for it to the container DNS service. A subtree alias such as `.test` is rejected.
+* A hostname is unique across all containers, whether they are running or stopped. An exact alias may be shared, as Docker allows: containers that declare the same alias, such as the replicas of a Compose service, all answer to it, and a lookup returns every address. An alias may also equal another container's name.
 * A container can have at most 32 aliases for each network.
 * Aliases are fixed when the container is created.
 

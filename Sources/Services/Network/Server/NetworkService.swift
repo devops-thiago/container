@@ -42,6 +42,17 @@ public protocol NetworkService: Sendable {
     /// does not resolve on this network.
     func lookup(name: String) async throws -> NetworkMatch?
 
+    /// Every attachment the name resolves to: an exact alias that several attachments share
+    /// resolves to each of them, first match first.
+    func lookupAll(name: String) async throws -> [NetworkMatch]
+
     /// Return the attachments for every hostname registered with the network.
     func attachments() async throws -> [Attachment]
+}
+
+extension NetworkService {
+    /// A service that knows only the first match answers with it alone.
+    public func lookupAll(name: String) async throws -> [NetworkMatch] {
+        try await lookup(name: name).map { [$0] } ?? []
+    }
 }

@@ -419,6 +419,28 @@ public actor NetworksService {
         return match?.attachment
     }
 
+    /// Every attachment `hostname` resolves to: the one `lookup(hostname:)` picks, and, when
+    /// the name is an exact alias that several attachments on that network share, each of them,
+    /// as Docker's DNS answers a shared alias with every address that holds it.
+    public func lookupAll(hostname: String) async throws -> [Attachment] {
+        guard let first = try await lookup(hostname: hostname) else {
+            return []
+        }
+        guard let client = self.serviceStates[first.network]?.client,
+            let all = try? await client.lookupAll(name: hostname)
+        else {
+            return [first]
+        }
+        var result = [first]
+        for match in all {
+            if case .subtree = match.kind { continue }
+            if !result.contains(where: { $0.ipv4Address == match.attachment.ipv4Address }) {
+                result.append(match.attachment)
+            }
+        }
+        return result
+    }
+
     public func plugin(for id: String) throws -> String {
         guard let serviceState = serviceStates[id] else {
             throw ContainerizationError(.notFound, message: "no network for id \(id)")

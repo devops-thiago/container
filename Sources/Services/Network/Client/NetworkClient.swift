@@ -98,19 +98,34 @@ extension NetworkClient {
     /// - Returns: The attachment that the name resolves to and how the name matched, or nil if the
     ///   name does not resolve on this network.
     public func lookup(name: String) async throws -> NetworkMatch? {
+        try await lookupAll(name: name).first
+    }
+
+    /// Every attachment `name` resolves to on the network, first match first. A shared exact
+    /// alias resolves to each attachment holding it; a helper that predates that answers one.
+    public func lookupAll(name: String) async throws -> [NetworkMatch] {
         let request = XPCMessage(route: NetworkRoutes.lookup.rawValue)
         request.set(key: NetworkKeys.name.rawValue, value: name)
 
         let client = createClient()
 
-        let response = try await client.send(request)
+        return try Self.matches(from: try await client.send(request))
+    }
+
+    /// The matches a lookup reply carries: every attachment holding a shared alias, or the one
+    /// match a helper that predates sharing sends.
+    static func matches(from response: XPCMessage) throws -> [NetworkMatch] {
         guard let data = response.dataNoCopy(key: NetworkKeys.attachment.rawValue) else {
-            return nil
+            return []
         }
-        return NetworkMatch(
-            attachment: try JSONDecoder().decode(Attachment.self, from: data),
-            kind: try response.matchKind()
-        )
+        let kind = try response.matchKind()
+        if let all = response.dataNoCopy(key: NetworkKeys.attachments.rawValue) {
+            let attachments = try JSONDecoder().decode([Attachment].self, from: all)
+            if !attachments.isEmpty {
+                return attachments.enumerated().map { NetworkMatch(attachment: $1, kind: $0 == 0 ? kind : .alias) }
+            }
+        }
+        return [NetworkMatch(attachment: try JSONDecoder().decode(Attachment.self, from: data), kind: kind)]
     }
 
     /// Every attachment the network currently has, so a joining container can learn the

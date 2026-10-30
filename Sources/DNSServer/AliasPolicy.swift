@@ -42,7 +42,7 @@ public enum AliasPolicy {
     /// Parses the aliases of one attachment and checks that they follow the rules.
     ///
     /// - There are at most `maximumAliasesPerAttachment` of them, and each one is a valid rule.
-    /// - No alias is listed twice, and an exact alias is not the hostname of the attachment.
+    /// - No alias is listed twice. An exact alias equal to the hostname of the attachment is dropped.
     /// - A subtree alias has a base with at least `minimumLabels` labels, and the base is the hostname
     ///   of the attachment or one of its exact aliases, so an attachment cannot claim the names below
     ///   a name that it does not own.
@@ -51,10 +51,14 @@ public enum AliasPolicy {
     ///   - aliases: The aliases in their string form.
     ///   - hostname: The hostname of the attachment, or nil if it is not a valid DNS name.
     ///   - network: The name of the network, which is used in error descriptions.
-    /// - Returns: The aliases as rules, in the order they were given.
+    ///   - tolerant: For aliases read back from a container an earlier engine stored: an alias that
+    ///     breaks a rule is left out of the result instead of failing, so the container still starts.
+    /// - Returns: The aliases as rules, in the order they were given, without any left out.
     /// - Throws: `Violation` for the first rule that is broken.
-    public static func validate(aliases: [String], hostname: DNSName?, network: String) throws -> [DNSMatchRule] {
-        guard aliases.count <= Self.maximumAliasesPerAttachment else {
+    public static func validate(
+        aliases: [String], hostname: DNSName?, network: String, tolerant: Bool = false
+    ) throws -> [DNSMatchRule] {
+        guard tolerant || aliases.count <= Self.maximumAliasesPerAttachment else {
             throw Violation("network \(network) has \(aliases.count) aliases, but at most \(Self.maximumAliasesPerAttachment) are allowed")
         }
 
@@ -63,6 +67,9 @@ public enum AliasPolicy {
             do {
                 rules.append((alias, try DNSMatchRule(alias)))
             } catch {
+                // A stored alias an earlier engine accepted stays a hosts-file name; it is
+                // only left out of DNS.
+                if tolerant { continue }
                 throw Violation("invalid alias \"\(alias)\" for network \(network): \(error)")
             }
         }
@@ -77,31 +84,36 @@ public enum AliasPolicy {
         }
 
         var seen = Set<DNSMatchRule>()
+        var accepted = [DNSMatchRule]()
         for (alias, rule) in rules {
             guard seen.insert(rule).inserted else {
+                if tolerant { continue }
                 throw Violation("alias \"\(alias)\" is listed more than once for network \(network)")
             }
             switch rule {
             case .exact(let name):
                 // A single-label exact alias is allowed, as Docker allows it: the system
                 // resolver never routes it here, but peers' hosts files list it, and the
-                // container DNS server answers it when a search domain is appended.
-                guard name != hostname else {
-                    throw Violation("alias \"\(alias)\" is already a hostname of the container")
-                }
+                // container DNS server answers it when a search domain is appended. An alias
+                // that repeats the container's own hostname adds nothing, and Docker accepts
+                // it, so it is dropped rather than refused.
+                guard name != hostname else { continue }
             case .subtree(let base):
                 guard base.labels.count >= Self.minimumLabels else {
+                    if tolerant { continue }
                     throw Violation(
                         "alias \"\(alias)\" must have at least \(Self.minimumLabels) labels after the leading dot. Configure a default DNS domain to have the domain added to a name that has none"
                     )
                 }
                 guard owned.contains(base) else {
+                    if tolerant { continue }
                     throw Violation(
                         "alias \"\(alias)\" must be below the hostname or an exact alias of network \(network), but \"\(base.pqdn)\" is neither"
                     )
                 }
             }
+            accepted.append(rule)
         }
-        return rules.map { $0.rule }
+        return accepted
     }
 }

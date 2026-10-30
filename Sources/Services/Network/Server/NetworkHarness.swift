@@ -64,13 +64,22 @@ public actor NetworkHarness: Sendable {
     public func lookup(_ message: XPCMessage) async throws -> XPCMessage {
         let name = try message.name()
         let reply = message.reply()
-        guard let match = try await service.lookup(name: name) else {
-            return reply
-        }
+        try Self.setMatches(try await service.lookupAll(name: name), on: reply)
+        return reply
+    }
 
+    /// Put a lookup's matches in its reply: the first as the one match, as before, and, for an
+    /// alias several attachments share, every one of them; a client that predates this reads
+    /// the first.
+    static func setMatches(_ matches: [NetworkMatch], on reply: XPCMessage) throws {
+        guard let match = matches.first else {
+            return
+        }
         try reply.setAttachment(match.attachment)
         reply.setMatchKind(match.kind)
-        return reply
+        if matches.count > 1 {
+            reply.set(key: NetworkKeys.attachments.rawValue, value: try JSONEncoder().encode(matches.map(\.attachment)))
+        }
     }
 
     @Sendable

@@ -80,9 +80,9 @@ struct AliasPolicyTests {
         #expect(rules.count == 1)
     }
 
-    @Test("An exact alias cannot be the hostname of the attachment")
-    func exactIsHostname() {
-        expectViolation("already a hostname", ["Gateway.Test."])
+    @Test("An exact alias that repeats the hostname of the attachment is dropped, as Docker accepts it")
+    func exactIsHostname() throws {
+        #expect(try validate(["Gateway.Test.", "api.test"]).map(\.description) == ["api.test"])
     }
 
     @Test("A subtree base needs at least two labels")
@@ -110,5 +110,13 @@ struct AliasPolicyTests {
     func subtreeWithoutHostname() throws {
         expectViolation("neither", [".gateway.test"], hostname: nil)
         #expect(try validate(["apps.test", ".apps.test"], hostname: nil).count == 2)
+    }
+
+    @Test("Tolerant validation leaves out what breaks a rule instead of failing")
+    func tolerantLeavesOut() throws {
+        let rules = try AliasPolicy.validate(
+            aliases: ["_bad", "api.test", "api.test", ".com.example", "db"],
+            hostname: name("gateway.test"), network: "default", tolerant: true)
+        #expect(rules.map(\.description) == ["api.test", "db"])
     }
 }

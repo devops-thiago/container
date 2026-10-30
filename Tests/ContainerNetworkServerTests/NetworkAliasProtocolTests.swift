@@ -14,7 +14,9 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerResource
 import ContainerXPC
+import ContainerizationExtras
 import Testing
 
 @testable import ContainerNetworkClient
@@ -77,5 +79,36 @@ struct NetworkAliasProtocolTests {
         #expect(throws: (any Error).self) {
             try message().name()
         }
+    }
+
+    // MARK: - Lookups that answer with every holder of a shared alias
+
+    private func attachment(_ hostname: String, _ address: String) throws -> ContainerResource.Attachment {
+        try ContainerResource.Attachment(
+            network: "backend", hostname: hostname, ipv4Address: CIDRv4(address), ipv4Gateway: IPv4Address("192.0.2.1"),
+            ipv6Address: nil, macAddress: nil, aliases: ["web"])
+    }
+
+    @Test func testASharedAliasCarriesEveryHolderToTheClient() throws {
+        let reply = message()
+        let matches = [
+            NetworkMatch(attachment: try attachment("shop-web-1", "192.0.2.10/24"), kind: .alias),
+            NetworkMatch(attachment: try attachment("shop-web-2", "192.0.2.11/24"), kind: .alias),
+        ]
+        try NetworkHarness.setMatches(matches, on: reply)
+
+        let decoded = try NetworkClient.matches(from: reply)
+        #expect(decoded.map(\.attachment.hostname) == ["shop-web-1", "shop-web-2"])
+        #expect(decoded.map(\.attachment.ipv4Address.address.description) == ["192.0.2.10", "192.0.2.11"])
+        #expect(decoded.allSatisfy { $0.kind == .alias })
+    }
+
+    @Test func testASingleMatchStaysTheReplyAnOlderClientReads() throws {
+        let reply = message()
+        try NetworkHarness.setMatches([NetworkMatch(attachment: try attachment("shop-db-1", "192.0.2.30/24"), kind: .hostname)], on: reply)
+
+        #expect(reply.dataNoCopy(key: NetworkKeys.attachments.rawValue) == nil)
+        #expect(try NetworkClient.matches(from: reply).map(\.attachment.hostname) == ["shop-db-1"])
+        #expect(try NetworkClient.matches(from: message()).isEmpty)
     }
 }
