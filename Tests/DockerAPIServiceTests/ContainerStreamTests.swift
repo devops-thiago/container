@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import NIOCore
 import NIOPosix
@@ -405,6 +406,30 @@ struct ContainerStreamTests {
             #expect(try await StreamHarness.waitAnswer(waiter)["StatusCode"] as? Int == 0)
         }
         #expect(await StreamHarness.eventually { await !h.streams.processes.holds(engineID) })
+    }
+
+    @Test("a missing network gives start and its already-registered waiter the same Docker error")
+    func missingNetworkWaitMatchesStart() async throws {
+        let h = try await StreamHarness.start()
+        defer { Task { try? await h.stop() } }
+        let created = try await h.request(
+            "POST", "/containers/create?name=missing-network",
+            body: """
+                {"Image":"alpine","Cmd":["true"],"HostConfig":{"NetworkMode":"nosuch"}}
+                """)
+        #expect(created.status == 201)
+        h.engine.bootstrapError = ContainerizationError(
+            .internalError, message: "failed to bootstrap container",
+            cause: ContainerizationError(.notFound, message: "no network for id nosuch"))
+        try await h.server.withClient { waiter in
+            try await StreamHarness.beginWait(waiter, "missing-network", "next-exit")
+            let start = try await h.request("POST", "/containers/missing-network/start")
+            #expect(start.status == 404)
+            #expect(start.body.contains("network nosuch not found"))
+            let answer = try await StreamHarness.waitAnswer(waiter)
+            #expect(answer["StatusCode"] as? Int == 128)
+            #expect((answer["Error"] as? [String: Any])?["Message"] as? String == "network nosuch not found")
+        }
     }
 
     @Test("a failed start answers the wait with the error body and lets the attach go")

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import NIOCore
 import NIOHTTP1
@@ -259,6 +260,48 @@ struct ListGate: Sendable {
 
 @Suite(.timeLimit(.minutes(1)))
 struct ContainerRoutesTests {
+    @Test("a missing network is accepted at create and reported as Docker's 404 at start", arguments: [false, true], ["wrapped", "direct", "translated"])
+    func missingNetworkFailsAtStart(autoRemove: Bool, errorShape: String) async throws {
+        let created = try await call(
+            .POST, "/containers/create?name=missing-network",
+            body: """
+                {"Image":"alpine","Cmd":["true"],"HostConfig":{"NetworkMode":"nosuch","AutoRemove":\(autoRemove)}}
+                """)
+        #expect(created.status == .created)
+        let engineID = try #require(engine.plans.last?.configuration.id)
+        #expect(engine.plans.last?.configuration.networks.map(\.network) == ["nosuch"])
+        let missing = ContainerizationError(.notFound, message: "no network for id nosuch")
+        switch errorShape {
+        case "wrapped":
+            // ContainerClient.bootstrap wraps the typed error received from the API server.
+            engine.bootstrapError = ContainerizationError(.internalError, message: "failed to bootstrap container", cause: missing)
+        case "direct": engine.bootstrapError = missing
+        default: engine.bootstrapError = DockerAPIError.notFound(missing.message)
+        }
+        let started = try await call(.POST, "/containers/missing-network/start")
+        #expect(started.status == .notFound)
+        #expect((try started.json() as? [String: String])?["message"] == "network nosuch not found")
+        #expect((engine.snapshot(engineID) == nil) == autoRemove)
+        #expect(engine.calls.contains("delete \(engineID) true") == autoRemove)
+        #expect((await identities.records.isEmpty) == autoRemove)
+    }
+
+    @Test("network translation requires both a notFound code and the declared network", arguments: ["wrong-network", "wrong-code", "other-resource"])
+    func unrelatedStartFailuresKeepTheirMeaning(kind: String) async throws {
+        _ = try await call(
+            .POST, "/containers/create?name=unrelated",
+            body: """
+                {"Image":"alpine","Cmd":["true"],"HostConfig":{"NetworkMode":"nosuch"}}
+                """)
+        let message = kind == "wrong-network" ? "no network for id elsewhere" : kind == "other-resource" ? "no container for id nosuch" : "no network for id nosuch"
+        let cause = ContainerizationError(kind == "wrong-code" ? .internalError : .notFound, message: message)
+        engine.bootstrapError = ContainerizationError(.internalError, message: "failed to bootstrap container", cause: cause)
+        let started = try await call(.POST, "/containers/unrelated/start")
+        #expect(started.status == .internalServerError)
+        #expect(started.body.contains(message))
+        #expect(!started.body.contains("network nosuch not found"))
+    }
+
     struct Answer {
         let status: HTTPResponseStatus
         let body: String
