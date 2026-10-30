@@ -60,7 +60,7 @@ struct TestCLICommitCommand {
                 #expect(try f.isImagePresent(reference))
                 try assertCommittedImageMetadata(f, reference: reference)
 
-                try await f.withContainer(image: reference) { committedName in
+                try await f.withContainer(image: reference, tag: "committed", containerArgs: []) { committedName in
                     let output = try f.doExec(committedName, cmd: ["cat", "/committed-file"])
                     #expect(output.trimmingCharacters(in: .whitespacesAndNewlines) == expected)
 
@@ -85,9 +85,20 @@ struct TestCLICommitCommand {
 
         let decoder = JSONDecoder()
         let index = try decoder.decode(Index.self, from: Data(contentsOf: URL(filePath: extractedDirectory.appending("index.json").string)))
-        let manifestDescriptor = try #require(index.manifests.first)
+        var manifestDescriptor = try #require(index.manifests.first)
         #expect(manifestDescriptor.annotations?["org.opencontainers.image.ref.name"] == reference)
 
+        #expect(index.manifests.count == 1)
+        // Save preserves the image's index. A single-platform commit may therefore be
+        // wrapped in nested indexes; keep validating the same manifest and config below.
+        var visited = Set<String>()
+        while manifestDescriptor.mediaType == MediaTypes.index {
+            try #require(visited.insert(manifestDescriptor.digest).inserted, "cyclic image index")
+            let nested = try decoder.decode(Index.self, from: blobData(manifestDescriptor, in: extractedDirectory))
+            try #require(nested.manifests.count == 1, "a committed image must have one platform")
+            manifestDescriptor = try #require(nested.manifests.first)
+        }
+        #expect(manifestDescriptor.mediaType == MediaTypes.imageManifest)
         let manifest = try decoder.decode(Manifest.self, from: blobData(manifestDescriptor, in: extractedDirectory))
         #expect(manifest.layers.count == 1)
 
