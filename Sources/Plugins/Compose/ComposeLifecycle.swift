@@ -153,8 +153,8 @@ struct ComposeUp: AsyncParsableCommand {
 /// Build an image the way `container build` does, in this process: a plugin cannot start
 /// the `container` command itself from inside its sandbox.
 func runBuild(_ arguments: [String]) async throws {
-    let command = try Application.BuildCommand.parse(arguments)
-    try await command.run()
+    let options = try BuildOptions.parse(arguments)
+    try await options.runLinuxBuild(containerSystemConfig: try await ClientHealthCheck.loadContainerSystemConfig())
 }
 
 struct ComposeDown: AsyncParsableCommand {

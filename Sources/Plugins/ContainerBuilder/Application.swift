@@ -16,8 +16,8 @@
 
 import ArgumentParser
 import ContainerAPIClient
-import TerminalProgress
 import ContainerBuild
+import TerminalProgress
 
 @main
 struct Application: AsyncParsableCommand {

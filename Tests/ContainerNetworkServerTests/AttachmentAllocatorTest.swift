@@ -320,6 +320,9 @@ struct AttachmentAllocatorTest {
         let index2 = try await allocator.allocate(hostname: "gw.test.", aliases: rules("api.test", ".gw.test"))
         #expect(index1 == index2)
 
+        // Each allocation is a holder, and the names stay until the last one lets go.
+        try await allocator.deallocate(hostname: "gw.test.")
+        #expect(try await allocator.match(name: "api.test.")?.index == index1)
         try await allocator.deallocate(hostname: "gw.test.")
         #expect(try await allocator.match(name: "api.test.") == nil)
         #expect(try await allocator.match(name: "web.gw.test.") == nil)
@@ -359,6 +362,8 @@ struct AttachmentAllocatorTest {
 
         #expect(try await allocator.match(name: "two-alias.test.") == nil)
         #expect(try await allocator.match(name: "one-alias.test.")?.index == first)
+    }
+
     @Test func testAddressIsKeptUntilItsLastHolderLetsGo() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
 

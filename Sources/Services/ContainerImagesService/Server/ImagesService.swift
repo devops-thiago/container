@@ -155,7 +155,7 @@ public actor ImagesService {
             ]
         )
 
-        let platforms = try await Self.withAuthentication(ref: reference) { auth in
+        let platforms = try await self.withAuthentication(ref: reference, credential: nil) { auth in
             try await self.imageStore.platforms(reference: reference, insecure: insecure, auth: auth)
         }
         guard let platforms else {

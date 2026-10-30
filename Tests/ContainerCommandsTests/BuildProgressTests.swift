@@ -24,7 +24,7 @@ import Testing
 /// `container build --progress`, which `compose build` and `compose up` run too: plain lines
 /// unless standard error is a terminal, as Docker's buildx decides for `auto`.
 struct BuildProgressTests {
-    private typealias Build = Application.BuildCommand
+    private typealias Build = BuildOptions
 
     /// Both ends of a pipe, closed when the test is done.
     private static func withPipe(_ body: (Int32) throws -> Void) throws {

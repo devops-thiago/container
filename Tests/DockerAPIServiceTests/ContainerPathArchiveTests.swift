@@ -148,7 +148,7 @@ struct ContainerPathArchiveTests {
         // A root link is staged on the host, not copied: its owner is the container's stat.
         #expect(try await setup.owners("/data/link") == ["link": CopyOwner(uid: 33, gid: 34)])
         // Without stat in the image, the root's owner is the one the copy out recorded.
-        setup.tools.with { $0.available.remove("stat") }
+        _ = setup.tools.with { $0.available.remove("stat") }
         #expect(try await setup.owners("/data/a.txt") == ["a.txt": CopyOwner(uid: 1234, gid: 5678)])
     }
 

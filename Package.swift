@@ -214,6 +214,7 @@ let package = Package(
                 .product(name: "ContainerizationOCI", package: "containerization"),
                 "ContainerAPIClient",
                 "ContainerCommands",
+                "ContainerLog",
                 "ContainerResource",
                 "DockerAPIService",
             ]

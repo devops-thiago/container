@@ -249,9 +249,9 @@ actor CopyMemoryHeadroom {
                 Task {
                     do {
                         try await control.sync()
-                        await self.syncEnded(id, .success(()))
+                        self.syncEnded(id, .success(()))
                     } catch {
-                        await self.syncEnded(id, .failure(error))
+                        self.syncEnded(id, .failure(error))
                     }
                 }
             )
