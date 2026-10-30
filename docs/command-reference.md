@@ -1856,12 +1856,14 @@ Starts a stopped Kubernetes cluster and refreshes its entry in `~/.kube/config` 
 **Usage**
 
 ```bash
-container cluster start [--name <name>] [--debug]
+container cluster start [--name <name>] [--adopt-legacy] [--readiness <ready|registered>] [--debug]
 ```
 
 **Options**
 
 *   `--name <name>`: Cluster name (default: `cluster-dev`)
+*   `--adopt-legacy`: Explicitly adopt legacy cluster nodes for writable `/sys`, preserving their data.
+*   `--readiness <ready|registered>`: Persist the requested readiness policy. `ready` requires node readiness and CoreDNS availability. `registered` requires the API server and every expected node to register, for clusters intentionally left without a CNI. Without this option, start uses the saved policy or full readiness for legacy clusters. Installing a CNI later does not silently change the policy; select `ready` explicitly.
 
 **Examples**
 
