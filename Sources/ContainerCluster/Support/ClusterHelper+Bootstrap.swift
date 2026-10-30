@@ -43,7 +43,7 @@ extension ClusterHelper {
             // Also at /kind/kubeadm.conf: the node image's entrypoint reads it on every boot
             // whose IP differs from the last one, to regenerate the API server's serving
             // certificate. Without it a restarted node whose address moved exits 1 before
-            // containerd ever comes up — `k8s start` only worked when the allocator happened
+            // containerd ever comes up — `cluster start` only worked when the allocator happened
             // to hand the old address back.
             arguments: [
                 "-c",

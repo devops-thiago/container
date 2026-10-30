@@ -16,20 +16,20 @@
 
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 @Suite("k8s kubectl")
-struct K8sKubectlTests {
+struct ClusterKubectlTests {
     @Test("the bundled kubectl is the plugin's sibling")
     func siblingPath() {
         #expect(
-            K8sKubectl.bundledKubectl(besides: "/App.app/Contents/libexec/container/plugins/k8s/bin/k8s")
-                == "/App.app/Contents/libexec/container/plugins/k8s/bin/kubectl")
+            ClusterKubectl.bundledKubectl(besides: "/App.app/Contents/libexec/container/plugins/cluster/bin/cluster")
+                == "/App.app/Contents/libexec/container/plugins/cluster/bin/kubectl")
     }
 
     @Test("arguments pass through unchanged, after an optional --context, with the plugin's kubeconfig as the default")
     func passthrough() {
-        let invocation = K8sKubectl.invocation(
+        let invocation = ClusterKubectl.invocation(
             kubectl: "/k/kubectl",
             kubeconfig: "/home/.kube/config",
             inheritedKubeconfig: nil,
@@ -42,35 +42,35 @@ struct K8sKubectlTests {
 
     @Test("manifests, kustomizations, kubeconfigs and the local side of cp are host files")
     func fileReferences() {
-        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "deploy.yaml"]) == ["deploy.yaml"])
-        #expect(K8sKubectl.fileReferences(in: ["apply", "--filename=/abs/deploy.yaml", "-n", "x"]) == ["/abs/deploy.yaml"])
-        #expect(K8sKubectl.fileReferences(in: ["apply", "-k", "overlays/dev"]) == ["overlays/dev"])
-        #expect(K8sKubectl.fileReferences(in: ["--kubeconfig", "kc.yaml", "get", "pods"]) == ["kc.yaml"])
-        #expect(K8sKubectl.fileReferences(in: ["cp", "./local.txt", "web:/tmp/local.txt"]) == ["./local.txt"])
-        #expect(K8sKubectl.fileReferences(in: ["cp", "kube-system/web:/etc/hosts", "/Users/x/hosts", "-c", "main"]) == ["/Users/x/hosts"])
-        #expect(K8sKubectl.fileReferences(in: ["cp", "-n", "kube-system", "web:/etc/hosts", "./hosts"]) == ["./hosts"])
+        #expect(ClusterKubectl.fileReferences(in: ["apply", "-f", "deploy.yaml"]) == ["deploy.yaml"])
+        #expect(ClusterKubectl.fileReferences(in: ["apply", "--filename=/abs/deploy.yaml", "-n", "x"]) == ["/abs/deploy.yaml"])
+        #expect(ClusterKubectl.fileReferences(in: ["apply", "-k", "overlays/dev"]) == ["overlays/dev"])
+        #expect(ClusterKubectl.fileReferences(in: ["--kubeconfig", "kc.yaml", "get", "pods"]) == ["kc.yaml"])
+        #expect(ClusterKubectl.fileReferences(in: ["cp", "./local.txt", "web:/tmp/local.txt"]) == ["./local.txt"])
+        #expect(ClusterKubectl.fileReferences(in: ["cp", "kube-system/web:/etc/hosts", "/Users/x/hosts", "-c", "main"]) == ["/Users/x/hosts"])
+        #expect(ClusterKubectl.fileReferences(in: ["cp", "-n", "kube-system", "web:/etc/hosts", "./hosts"]) == ["./hosts"])
     }
 
     @Test("standard input, URLs and commands that name no file borrow nothing")
     func noFiles() {
-        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "-"]).isEmpty)
-        #expect(K8sKubectl.fileReferences(in: ["apply", "-f", "https://example.com/deploy.yaml"]).isEmpty)
-        #expect(K8sKubectl.fileReferences(in: ["get", "pods", "-A", "-o", "wide"]).isEmpty)
-        #expect(K8sKubectl.fileReferences(in: ["exec", "web", "--", "cat", "/etc/hosts"]).isEmpty)
+        #expect(ClusterKubectl.fileReferences(in: ["apply", "-f", "-"]).isEmpty)
+        #expect(ClusterKubectl.fileReferences(in: ["apply", "-f", "https://example.com/deploy.yaml"]).isEmpty)
+        #expect(ClusterKubectl.fileReferences(in: ["get", "pods", "-A", "-o", "wide"]).isEmpty)
+        #expect(ClusterKubectl.fileReferences(in: ["exec", "web", "--", "cat", "/etc/hosts"]).isEmpty)
     }
 
     @Test("a pod reference is a colon before any slash")
     func remoteCopyPaths() {
-        #expect(K8sKubectl.isRemoteCopyPath("web:/tmp/x"))
-        #expect(K8sKubectl.isRemoteCopyPath("kube-system/web:/tmp/x"))
-        #expect(!K8sKubectl.isRemoteCopyPath("/Users/x/file:with:colons"))
-        #expect(!K8sKubectl.isRemoteCopyPath("./dir/file"))
-        #expect(!K8sKubectl.isRemoteCopyPath("plain.txt"))
+        #expect(ClusterKubectl.isRemoteCopyPath("web:/tmp/x"))
+        #expect(ClusterKubectl.isRemoteCopyPath("kube-system/web:/tmp/x"))
+        #expect(!ClusterKubectl.isRemoteCopyPath("/Users/x/file:with:colons"))
+        #expect(!ClusterKubectl.isRemoteCopyPath("./dir/file"))
+        #expect(!ClusterKubectl.isRemoteCopyPath("plain.txt"))
     }
 
     @Test("a KUBECONFIG the user set is left alone")
     func userKubeconfigWins() {
-        let invocation = K8sKubectl.invocation(
+        let invocation = ClusterKubectl.invocation(
             kubectl: "/k/kubectl", kubeconfig: "/home/.kube/config", inheritedKubeconfig: "/mine", context: nil, arguments: ["version"])
         #expect(invocation.argv == ["/k/kubectl", "version"])
         #expect(invocation.environment.isEmpty)

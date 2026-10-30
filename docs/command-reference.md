@@ -1794,6 +1794,8 @@ container system property list --format json
 > [!IMPORTANT]
 > The `cluster` command is an experimental feature and its subcommands and options are subject to change.
 
+`container k8s` is an alias of `container cluster`: `container k8s <subcommand>` runs the same plugin with the same subcommands and options.
+
 ### `container cluster create`
 
 Creates and starts a local Kubernetes cluster and optional worker nodes. Pulls the node image if needed, runs `kubeadm init`, installs a CNI (default: bundled kindnet), and merges the cluster credentials into `~/.kube/config`.
@@ -1869,6 +1871,37 @@ container cluster start
 
 # start a named cluster
 container cluster start --name my-cluster
+```
+
+### `container cluster stop`
+
+Stops every node of a cluster, workers first and the control plane last, keeping the nodes and the kubeconfig entry. `container cluster start` brings the cluster back.
+
+**Usage**
+
+```bash
+container cluster stop [--name <name>] [--debug]
+```
+
+**Options**
+
+*   `--name <name>`: Cluster name (default: `cluster-dev`)
+
+### `container cluster kubectl`
+
+Runs the `kubectl` installed beside the cluster plugin with the default kubeconfig, against its current context or, with `--name`, against that cluster's context. Everything after the options is passed to `kubectl`.
+
+**Usage**
+
+```bash
+container cluster kubectl [--name <name>] <kubectl-arguments> ...
+```
+
+**Examples**
+
+```bash
+container cluster kubectl get nodes
+container cluster kubectl --name my-cluster get pods -A
 ```
 
 ### `container cluster delete (rm)`

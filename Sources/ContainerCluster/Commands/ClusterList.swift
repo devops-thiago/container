@@ -33,7 +33,7 @@ public struct ClusterList: AsyncParsableCommand {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
 
         let snapshots = try await ContainerClient().list(
-            filters: ContainerListFilters(labels: [ResourceLabelKeys.plugin: ClusterHelper.pluginName])
+            filters: ClusterHelper.nodeListFilters
         )
         let rows = ClusterHelper.buildClusterRows(from: snapshots)
         print(ClusterHelper.renderTable(rows))

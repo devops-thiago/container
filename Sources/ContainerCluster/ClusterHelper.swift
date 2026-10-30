@@ -25,6 +25,17 @@ import Logging
 
 public struct ClusterHelper {
     public static let pluginName: String = ResourcePluginValues.kubernetes
+
+    /// Whether `labels` mark a node of this plugin, under its name or under `k8s`, the name
+    /// engines before 1.6.1 gave the plugin, so clusters made by an earlier engine stay usable.
+    public static func ownsNode(_ labels: [String: String]) -> Bool {
+        ResourcePluginValues.isKubernetes(labels[ResourceLabelKeys.plugin])
+    }
+
+    /// A container listing of every node of this plugin, under its current or its earlier name.
+    public static var nodeListFilters: ContainerListFilters {
+        ContainerListFilters(labels: [ResourceLabelKeys.plugin: "^(\(pluginName)|\(ResourcePluginValues.legacyKubernetes))$"])
+    }
     public static let defaultName: String = "cluster-dev"
     public static let controlPlaneRoleName: String = "control-plane"
     public static let workerRoleName: String = "worker"
@@ -166,7 +177,7 @@ public struct ClusterHelper {
     /// one or more workers the control plane is tainted and is not a combined control-plane/worker node.
     static func workerContainerNames(clusterName: String, client: ContainerClient) async throws -> [String] {
         let snapshots = try await client.list(
-            filters: ContainerListFilters(labels: [ResourceLabelKeys.plugin: pluginName])
+            filters: ClusterHelper.nodeListFilters
         )
         return workerContainerNames(from: snapshots, clusterName: clusterName)
     }

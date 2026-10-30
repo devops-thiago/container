@@ -35,7 +35,7 @@ extension ClusterHelper {
         log.info("Fetching kubeconfig", metadata: ["cluster": "\(containerId)"])
 
         let container = try await client.get(id: containerId)
-        guard container.configuration.labels[ResourceLabelKeys.plugin] == pluginName else {
+        guard ClusterHelper.ownsNode(container.configuration.labels) else {
             log.error("container is not a cluster, refusing config fetch", metadata: ["name": "\(containerId)"])
             throw ContainerizationError(.invalidArgument, message: "\(containerId) is not a cluster")
         }

@@ -69,6 +69,15 @@ kubectl --context my-cluster get pods
 container cluster delete --name my-cluster
 ```
 
+Stop a cluster to free its resources without losing it, and start it again later:
+
+```bash
+container cluster stop --name my-cluster
+container cluster start --name my-cluster
+```
+
+`container k8s` is an alias of `container cluster`, so `container k8s start --name my-cluster` does the same.
+
 ### Customize resources
 
 Allocate CPU and memory based on your needs:
@@ -272,8 +281,8 @@ longer enable it, because ordinary containers can carry the same labels. If star
 cluster reports that adoption is required, stop the cluster and explicitly adopt its nodes:
 
 ```sh
-container k8s stop --name my-cluster
-container k8s start --name my-cluster --adopt-legacy
+container cluster stop --name my-cluster
+container cluster start --name my-cluster --adopt-legacy
 ```
 
 This records the permission on each existing node without deleting or recreating it. Each

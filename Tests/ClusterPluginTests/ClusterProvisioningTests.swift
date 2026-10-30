@@ -17,7 +17,7 @@
 import Logging
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 private actor ProvisioningEvents {
     private(set) var values: [String] = []
@@ -80,6 +80,11 @@ private struct TestProvisioner: NodeProvisioner {
         if failAt == .ready { throw ProvisioningFailure.expected }
     }
 
+    func waitForRegistered(name: String, log: Logger) async throws {
+        await events.append("\(label).registered:\(name)")
+        if failAt == .ready { throw ProvisioningFailure.expected }
+    }
+
     func teardown(name: String, log: Logger) async throws {
         await events.append("\(label).teardown:\(name)")
         if failAt == .teardown { throw ProvisioningFailure.expected }
@@ -124,6 +129,30 @@ struct ClusterProvisioningTests {
                 "w2.join:dev-worker-2:10.0.0.2:6443:token:sha256:hash",
                 "w2.ready:dev-worker-2",
             ])
+    }
+
+    @Test("without a CNI, workers only wait to register, since they never report Ready")
+    func workersWithoutCNIOnlyRegister() async throws {
+        let events = ProvisioningEvents()
+        let controlPlane = TestProvisioner(
+            "cp", roles: [StandardRoles.controlPlane], events: events)
+        let workers = [
+            K8sClusters.WorkerNode(
+                name: "dev-worker-1",
+                provisioner: TestProvisioner("w1", roles: [StandardRoles.worker], events: events))
+        ]
+
+        try await K8sClusters.provisionCluster(
+            name: "dev",
+            controlPlane: controlPlane,
+            workers: workers,
+            initializeControlPlane: { _, _, _ in .init(token: "token", caCertHash: "sha256:hash") },
+            workersMustBeReady: false,
+            log: log)
+
+        let recorded = await events.values
+        #expect(recorded.contains("w1.registered:dev-worker-1"))
+        #expect(!recorded.contains("w1.ready:dev-worker-1"))
     }
 
     @Test("a worker readiness failure tears down attempted nodes in reverse order")

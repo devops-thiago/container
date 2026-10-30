@@ -291,7 +291,7 @@ struct BuildClusterRowsTests {
         let nestedWorker = try makeWorker(
             "foo-worker-1-worker-1", clusterName: "foo-worker-1")
 
-        let rows = ClusterHelper.buildK8sRows(from: [nestedWorker, parent, nested])
+        let rows = ClusterHelper.buildClusterRows(from: [nestedWorker, parent, nested])
 
         #expect(rows.filter { $0.snapshot.id == nestedWorker.id }.count == 1)
         #expect(
@@ -304,7 +304,7 @@ struct BuildClusterRowsTests {
         let nested = try makeControlPlane("foo-worker-1")
         let nestedWorker = try makeWorker("foo-worker-1-worker-1")
 
-        let rows = ClusterHelper.buildK8sRows(from: [nestedWorker, parent, nested])
+        let rows = ClusterHelper.buildClusterRows(from: [nestedWorker, parent, nested])
 
         #expect(rows.filter { $0.snapshot.id == nestedWorker.id }.count == 1)
         #expect(

@@ -57,25 +57,31 @@ extension K8sClusters {
     /// a cluster, or the image could not be saved. Otherwise every node gets an outcome, and
     /// a node that failed or was not running does not stop the others. Pass the result to
     /// `imageLoadFailure(image:cluster:results:)` to turn any failure into one error.
+    /// A non-empty `nodes` loads into those nodes only, each of which must belong to the cluster.
     public static func loadImage(
         _ image: String,
         cluster name: String = K8sClusters.defaultName,
         platform: Platform? = nil,
+        nodes requested: [String] = [],
         log: Logger
     ) async throws -> [NodeImageLoad] {
         let client = ContainerClient()
         // Resolve the nodes before saving, so a wrong name fails fast and leaves no archive.
-        let nodes = try await nodesToLoad(cluster: name, containers: client)
+        let all = try await nodesToLoad(cluster: name, containers: client)
+        // `requested` narrows the load to those nodes, each checked to belong to the cluster.
+        let targets = try ClusterLoadImage.resolveTargets(
+            clusterName: name, nodes: requested, workers: all.dropFirst().map(\.id))
+        let nodes = targets.compactMap { id in all.first { $0.id == id } }
 
         // The images service writes the archive, not this process, so it goes where both can
         // reach: in a sandboxed CLI or app, this process's own temporary directory is closed
         // to the engine, as `image save` already allows for.
         let archive = FilePath(try PathUtils.sharedTemporaryDirectory().path(percentEncoded: false))
-            .appending("k8s-image-\(UUID().uuidString).tar")
+            .appending("cluster-image-\(UUID().uuidString).tar")
         defer { try? FileManager.default.removeItem(atPath: archive.string) }
 
         let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
-        let fq = K8sHelper.fqReference(image)
+        let fq = ClusterHelper.fqReference(image)
         let resolvedPlatform = try platform ?? Platform(from: "linux/\(Arch.hostArchitecture().rawValue)")
         log.info("Saving image", metadata: ["ref": "\(image)"])
         try await ClientImage.save(
@@ -97,23 +103,23 @@ extension K8sClusters {
         do {
             named = try await containers.get(id: name)
         } catch let error as ContainerizationError where error.code == .notFound {
-            throw ContainerizationError(.notFound, message: "k8s cluster \(name) not found")
+            throw ContainerizationError(.notFound, message: "cluster \(name) not found")
         }
-        guard named.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-            throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
+        guard ClusterHelper.ownsNode(named.configuration.labels) else {
+            throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
         }
         let nodes = clusterNodes(cluster: name, listed: try await containers.listNodes())
         guard nodes.first?.id == name else {
-            throw ContainerizationError(.notFound, message: "k8s cluster \(name) not found")
+            throw ContainerizationError(.notFound, message: "cluster \(name) not found")
         }
         return nodes
     }
 
     /// The nodes of cluster `name` among `listed`, with the cluster's ownership rules from
-    /// `k8s list`: the control plane first, then its workers ordered by ID. Empty when the
+    /// `cluster list`: the control plane first, then its workers ordered by ID. Empty when the
     /// listing has no control plane by that name.
     static func clusterNodes(cluster name: String, listed: [ContainerSnapshot]) -> [ContainerSnapshot] {
-        let nodes = K8sHelper.buildK8sRows(from: listed)
+        let nodes = ClusterHelper.buildClusterRows(from: listed)
             .filter { $0.clusterName == name }
             .map(\.snapshot)
         guard let controlPlane = nodes.first(where: { $0.id == name }) else { return [] }
@@ -131,7 +137,7 @@ extension K8sClusters {
         maximumConcurrent: Int = K8sClusters.maximumConcurrentImageImports,
         log: Logger
     ) async -> [NodeImageLoad] {
-        let fq = K8sHelper.fqReference(image)
+        let fq = ClusterHelper.fqReference(image)
         // The archive carries the normalized name. When the user wrote the reference
         // differently, the node also gets the name as written, as the single-node load did.
         let givenName = fq == image ? nil : image

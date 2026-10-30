@@ -21,7 +21,7 @@ import Logging
 import Synchronization
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 private func snapshot(
     id: String,
@@ -53,7 +53,7 @@ private func node(id: String, cluster: String, role: String, status: String = "r
     try snapshot(
         id: id,
         labels: [
-            ResourceLabelKeys.plugin: K8sHelper.pluginName,
+            ResourceLabelKeys.plugin: ClusterHelper.pluginName,
             ResourceLabelKeys.cluster: cluster,
             ResourceLabelKeys.role: role,
         ],
@@ -61,11 +61,11 @@ private func node(id: String, cluster: String, role: String, status: String = "r
 }
 
 private func controlPlane(_ cluster: String, status: String = "running") throws -> ContainerSnapshot {
-    try node(id: cluster, cluster: cluster, role: K8sHelper.controlPlaneRoleName, status: status)
+    try node(id: cluster, cluster: cluster, role: ClusterHelper.controlPlaneRoleName, status: status)
 }
 
 private func worker(_ cluster: String, _ number: Int, status: String = "running") throws -> ContainerSnapshot {
-    try node(id: "\(cluster)-worker-\(number)", cluster: cluster, role: K8sHelper.workerRoleName, status: status)
+    try node(id: "\(cluster)-worker-\(number)", cluster: cluster, role: ClusterHelper.workerRoleName, status: status)
 }
 
 /// The engine as a load sees it: the containers by ID, a listing, and ctr runs that record
@@ -199,7 +199,7 @@ struct K8sLoadImageTests {
             try await K8sClusters.nodesToLoad(cluster: "web", containers: engine)
         }
         #expect(error?.code == .invalidArgument)
-        #expect(error?.message == "web is not a k8s cluster")
+        #expect(error?.message == "web is not a cluster")
     }
 
     @Test("a worker's ID is not a cluster name")
@@ -222,7 +222,7 @@ struct K8sLoadImageTests {
         let results = await K8sClusters.importArchive(
             archive, image: "docker.io/my-app:latest", into: [cp], containers: engine, log: log)
 
-        #expect(results == [.init(node: "dev", role: K8sHelper.controlPlaneRoleName, outcome: .loaded)])
+        #expect(results == [.init(node: "dev", role: ClusterHelper.controlPlaneRoleName, outcome: .loaded)])
         #expect(
             engine.calls == [
                 .importImage(node: "dev", archive: archive),

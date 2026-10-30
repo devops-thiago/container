@@ -17,8 +17,6 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerLog
-import ContainerResource
-import ContainerizationError
 import Logging
 
 public struct ClusterDelete: AsyncParsableCommand {
@@ -33,58 +31,15 @@ public struct ClusterDelete: AsyncParsableCommand {
     @Option(name: .long, help: "Cluster name")
     var name: String = ClusterHelper.defaultName
 
+    @Option(name: .customLong("require-label"), help: "Delete only nodes carrying this key=value label")
+    var requiredLabels: [String] = []
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: ClusterHelper.pluginName)
 
-        let client = ContainerClient()
-
-        let clusterContainer = try? await client.get(id: name)
-        if let container = clusterContainer {
-            guard container.configuration.labels[ResourceLabelKeys.plugin] == ClusterHelper.pluginName else {
-                log.error("container is not a cluster, refusing delete", metadata: ["name": "\(name)"])
-                throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
-            }
-        }
-
-        let workerNames = (try? await ClusterHelper.workerContainerNames(clusterName: name, client: client)) ?? []
-        var failures: [(name: String, error: Error)] = []
-
-        for workerName in workerNames {
-            do {
-                try? await client.stop(id: workerName)
-                try await client.delete(id: workerName)
-            } catch let error as ContainerizationError where error.code == .notFound || (error.cause as? ContainerizationError)?.code == .notFound {
-                log.debug("worker container not found, skipping delete", metadata: ["name": "\(workerName)"])
-            } catch {
-                log.error("failed to delete worker container", metadata: ["name": "\(workerName)", "error": "\(error)"])
-                failures.append((workerName, error))
-            }
-        }
-
-        do {
-            try? await client.stop(id: name)
-            try await client.delete(id: name)
-        } catch let error as ContainerizationError where error.code == .notFound || (error.cause as? ContainerizationError)?.code == .notFound {
-            log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
-        } catch {
-            log.error("failed to delete cluster container", metadata: ["name": "\(name)", "error": "\(error)"])
-            failures.append((name, error))
-        }
-
-        // Only touch the kubeconfig for a cluster we found. Otherwise the entries
-        // named `name` belong to someone else, so leave them alone.
-        if clusterContainer != nil || !workerNames.isEmpty {
-            try ClusterHelper.removeConfig(containerId: name, log: log)
-        } else {
-            log.debug("no cluster container found, leaving kubeconfig untouched", metadata: ["name": "\(name)"])
-        }
-
-        guard failures.isEmpty else {
-            let details = failures.map { "\($0.name): \($0.error)" }.joined(separator: "; ")
-            throw ContainerizationError(.internalError, message: "failed to delete node(s): \(details)")
-        }
-
+        try await K8sClusters.delete(
+            name: name, requiredLabels: requiredLabels.isEmpty ? nil : Utility.parseKeyValuePairs(requiredLabels), log: log)
         print(name)
     }
 }

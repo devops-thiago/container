@@ -36,7 +36,8 @@ extension K8sClusters {
             _ hasWorkers: Bool
         ) async throws -> JoinCredentials?
 
-    /// Provision one control plane and its workers with deterministic rollback.
+    /// Provision one control plane and its workers with deterministic rollback. Each worker
+    /// waits for Ready, or only to register when `workersMustBeReady` is false (no CNI).
     ///
     /// A node is put in `attempted` before provisioning starts, because provisioning can
     /// create its container and then fail while booting it. Rollback runs workers-first and
@@ -46,6 +47,7 @@ extension K8sClusters {
         controlPlane: any NodeProvisioner,
         workers: [WorkerNode],
         initializeControlPlane: @escaping ControlPlaneInitializer,
+        workersMustBeReady: Bool = true,
         finalizeCluster: @escaping @Sendable () async throws -> Void = {},
         log: Logger,
         progressUpdate: @escaping ProgressUpdateHandler = { _ in }
@@ -79,12 +81,17 @@ extension K8sClusters {
                 let credentials = credentials!
                 try await worker.provisioner.join(
                     name: worker.name,
-                    controlPlaneEndpoint: "\(address):\(K8sHelper.clusterContainerPort)",
+                    controlPlaneEndpoint: "\(address):\(ClusterHelper.clusterContainerPort)",
                     token: credentials.token,
                     caCertHash: credentials.caCertHash,
                     log: log)
                 try Task.checkCancellation()
-                try await worker.provisioner.waitForReady(name: worker.name, log: log)
+                // Without a CNI a node never reports Ready; registering is all it can do.
+                if workersMustBeReady {
+                    try await worker.provisioner.waitForReady(name: worker.name, log: log)
+                } else {
+                    try await worker.provisioner.waitForRegistered(name: worker.name, log: log)
+                }
             }
             try Task.checkCancellation()
             try await finalizeCluster()

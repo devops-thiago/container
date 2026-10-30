@@ -21,7 +21,7 @@ import Logging
 import Synchronization
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 // MARK: - Fixtures
 
@@ -325,9 +325,9 @@ extension KubeconfigEnvTests {
             let worker = try snapshot(
                 id: "\(name)-worker-1",
                 labels: [
-                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.plugin: ClusterHelper.pluginName,
                     ResourceLabelKeys.cluster: name,
-                    ResourceLabelKeys.role: K8sHelper.workerRoleName,
+                    ResourceLabelKeys.role: ClusterHelper.workerRoleName,
                 ],
                 incarnation: "worker-token")
             let engine = FakeContainers(
@@ -421,25 +421,25 @@ extension KubeconfigEnvTests {
             let parent = try snapshot(
                 id: parentName,
                 labels: [
-                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.plugin: ClusterHelper.pluginName,
                     ResourceLabelKeys.cluster: parentName,
-                    ResourceLabelKeys.role: K8sHelper.controlPlaneRoleName,
+                    ResourceLabelKeys.role: ClusterHelper.controlPlaneRoleName,
                 ],
                 incarnation: "parent-token")
             let nested = try snapshot(
                 id: nestedName,
                 labels: [
-                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.plugin: ClusterHelper.pluginName,
                     ResourceLabelKeys.cluster: nestedName,
-                    ResourceLabelKeys.role: K8sHelper.controlPlaneRoleName,
+                    ResourceLabelKeys.role: ClusterHelper.controlPlaneRoleName,
                 ],
                 incarnation: "nested-token")
             let nestedWorker = try snapshot(
                 id: "\(nestedName)-worker-1",
                 labels: [
-                    ResourceLabelKeys.plugin: K8sHelper.pluginName,
+                    ResourceLabelKeys.plugin: ClusterHelper.pluginName,
                     ResourceLabelKeys.cluster: nestedName,
-                    ResourceLabelKeys.role: K8sHelper.workerRoleName,
+                    ResourceLabelKeys.role: ClusterHelper.workerRoleName,
                 ],
                 incarnation: "nested-worker-token")
             let engine = FakeContainers(
@@ -537,7 +537,9 @@ extension KubeconfigEnvTests {
             let engine = FakeContainers(get: .success(node), current: node)
             try await withScratchKubeconfig(containing: name) { file in
                 try await K8sClusters.delete(name: name, containers: engine, log: log)
-                let required = K8sClusters.nodeLabels
+                // The node carries the plugin's earlier name, `k8s`, and is still deleted under it.
+                let required = K8sClusters.nodeLabels(of: node)
+                #expect(required == ["com.apple.container.plugin": "k8s"])
                 #expect(
                     engine.calls == [
                         .init(name: "stop", id: name, labels: required, incarnation: node.incarnation),
