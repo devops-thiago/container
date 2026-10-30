@@ -30,7 +30,7 @@ public struct ClusterWriteConfig: AsyncParsableCommand {
     )
 
     @Option(name: .long, help: "Cluster name")
-    var name: String = ClusterHelper.defaultName
+    var name: String = ClusterCommandContext.defaultName
 
     @Option(name: .long, help: "Path to the kubeconfig file to write or append to (default: ~/.kube/config)")
     var kubeconfig: String?

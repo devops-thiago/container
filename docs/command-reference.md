@@ -1794,7 +1794,7 @@ container system property list --format json
 > [!IMPORTANT]
 > The `cluster` command is an experimental feature and its subcommands and options are subject to change.
 
-`container k8s` is an alias of `container cluster`: `container k8s <subcommand>` runs the same plugin with the same subcommands and options.
+`container k8s` is a compatibility alias of `container cluster`, with the same subcommands and options. Without `--name`, the legacy spelling keeps targeting `k8s-dev`; `container cluster` targets `cluster-dev`. An explicit `--name` selects that cluster under either spelling. Neither command falls back to the other default when its target is absent. `kubectl` continues to use the selected context when no cluster name is supplied.
 
 ### `container cluster create`
 

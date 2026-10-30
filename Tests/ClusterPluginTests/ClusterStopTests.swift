@@ -110,6 +110,26 @@ private final class StoppableContainers: K8sClusterContainers, @unchecked Sendab
 struct ClusterStopTests {
     private let log = Logger(label: "k8s-stop-tests")
 
+    @Test(arguments: [["k8s-dev"], ["cluster-dev"], ["k8s-dev", "cluster-dev"]], ["k8s", "cluster"])
+    func dispatchedDefaultNeverStopsTheOtherCluster(inventory: [String], invokedAs: String) async throws {
+        let listed = try inventory.map { try snapshot(id: $0, cluster: $0, role: ClusterHelper.controlPlaneRoleName, incarnation: $0) }
+        let engine = StoppableContainers(listed: listed)
+        let argv = dispatchedClusterArguments(invokedAs, "stop")
+        let command = try ClusterCommandContext.$invokedAs.withValue(URL(fileURLWithPath: argv[0]).lastPathComponent) {
+            try ClusterStop.parse(Array(argv.dropFirst(2)))
+        }
+        let intended = invokedAs == "k8s" ? "k8s-dev" : "cluster-dev"
+        if inventory.contains(intended) {
+            try await K8sClusters.stop(name: command.name, containers: engine, log: log)
+            #expect(engine.calls.map(\.id) == [intended])
+        } else {
+            await #expect(throws: ContainerizationError.self) {
+                try await K8sClusters.stop(name: command.name, containers: engine, log: log)
+            }
+            #expect(engine.calls.isEmpty)
+        }
+    }
+
     @Test("workers stop before the control plane, each with the labels and incarnation observed")
     func workersStopFirst() async throws {
         let name = "dev"

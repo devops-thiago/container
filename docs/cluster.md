@@ -76,7 +76,7 @@ container cluster stop --name my-cluster
 container cluster start --name my-cluster
 ```
 
-`container k8s` is an alias of `container cluster`, so `container k8s start --name my-cluster` does the same.
+`container k8s` remains a compatibility alias, so `container k8s start --name my-cluster` does the same. Without `--name`, the old spelling targets `k8s-dev` and the new spelling targets `cluster-dev`. Existing scripts keep their original target even when both clusters exist; neither spelling substitutes the other default if its own is missing. The alias remains supported. `kubectl` still uses the selected context when no name is supplied.
 
 ### Customize resources
 

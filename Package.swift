@@ -223,6 +223,7 @@ let package = Package(
             dependencies: [
                 "ContainerAPIClient",
                 "ContainerCluster",
+                "ContainerPlugin",
                 "ContainerResource",
                 "Yams",
             ]
