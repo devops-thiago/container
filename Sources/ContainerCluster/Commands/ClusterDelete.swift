@@ -29,7 +29,7 @@ public struct ClusterDelete: AsyncParsableCommand {
     )
 
     @Option(name: .long, help: "Cluster name")
-    var name: String = ClusterHelper.defaultName
+    var name: String = ClusterCommandContext.defaultName
 
     @Option(name: .customLong("require-label"), help: "Delete only nodes carrying this key=value label")
     var requiredLabels: [String] = []

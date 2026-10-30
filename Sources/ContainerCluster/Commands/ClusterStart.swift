@@ -30,8 +30,8 @@ public struct ClusterStart: AsyncParsableCommand {
         abstract: "Start a stopped Kubernetes cluster"
     )
 
-    @Option(name: .long, help: "Cluster name (default: \(ClusterHelper.defaultName))")
-    var name: String = ClusterHelper.defaultName
+    @Option(name: .long, help: "Cluster name (default: \(ClusterCommandContext.defaultName))")
+    var name: String = ClusterCommandContext.defaultName
 
     @Flag(name: .long, help: "Explicitly adopt existing cluster nodes for writable /sys, preserving their data")
     var adoptLegacy = false
