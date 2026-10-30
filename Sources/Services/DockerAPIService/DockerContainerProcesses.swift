@@ -14,6 +14,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+import ContainerizationError
 import Logging
 
 /// The processes this service started, and what their starts bound.
@@ -24,6 +25,32 @@ import Logging
 /// `container run -d` does. Either way the process is kept: its exit status is what `wait`
 /// answers with, and its terminal is what `resize` sizes.
 public actor DockerContainerProcesses {
+    /// Bootstrap wraps the API server's typed failure. Translate only the missing-network
+    /// error for a network this container actually declares; unrelated notFound errors keep
+    /// their meaning. Do this before notifying waiters, so wait and start agree.
+    private static func startFailure(_ error: any Error, networkIDs: [String]) -> any Error {
+        let messages = Dictionary(
+            uniqueKeysWithValues: Set(networkIDs).map {
+                ("no network for id \($0)", "network \($0) not found")
+            })
+        var cause: (any Error)? = error
+        while let current = cause {
+            guard let engine = current as? ContainerizationError else {
+                if let docker = current as? DockerAPIError,
+                    docker.status == .notFound, let message = messages[docker.message]
+                {
+                    return DockerAPIError.notFound(message)
+                }
+                break
+            }
+            if engine.code == .notFound, let message = messages[engine.message] {
+                return DockerAPIError.notFound(message)
+            }
+            cause = engine.cause
+        }
+        return error
+    }
+
     public enum StartOutcome: Sendable, Equatable {
         case started
         /// Already running, or being started by another request.
@@ -114,14 +141,15 @@ public actor DockerContainerProcesses {
             }
             try await bootstrapped?.start()
         } catch {
+            let failure = Self.startFailure(error, networkIDs: container.snapshot.configuration.networks.map(\.network))
             await session?.close()
             if bootstrapped != nil {
                 // What a failed start leaves half-made would get in the way of the next one.
                 try? await engine.stop(container.snapshot, timeout: 1, signal: nil)
             }
-            await waits.startFailed(engineID, message: Self.message(error))
+            await waits.startFailed(engineID, message: Self.message(failure))
             await attaches.complete(tickets, .released)
-            throw error
+            throw failure
         }
         guard let process = bootstrapped else { throw DockerAPIError.internalError("the container's process was not bootstrapped") }
 
