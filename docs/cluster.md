@@ -78,6 +78,18 @@ container cluster start --name my-cluster
 
 `container k8s` remains a compatibility alias, so `container k8s start --name my-cluster` does the same. Without `--name`, the old spelling targets `k8s-dev` and the new spelling targets `cluster-dev`. Existing scripts keep their original target even when both clusters exist; neither spelling substitutes the other default if its own is missing. The alias remains supported. `kubectl` still uses the selected context when no name is supplied.
 
+Clusters created with `--cni NONE` retain that choice across stop/start. Start waits for the API server and every cluster node to register; it does not claim that nodes are Ready or that CoreDNS is Available. Other clusters keep the full readiness checks.
+
+For an older no-CNI cluster without a saved choice, select it explicitly:
+
+```bash
+container cluster start --name my-cluster --readiness registered
+```
+
+After installing a CNI, use `--readiness ready` to restore full node and CoreDNS checks. The choice is saved with the control plane's data, including when a readiness check fails. Without saved metadata or an explicit choice, start requires full readiness. A NotReady node never selects the weaker policy automatically.
+
+This option does not adopt legacy nodes or change their permissions. When adoption is required, `--adopt-legacy` is a separate explicit choice. Invalid saved metadata produces an error; either readiness option can replace it with the user's chosen policy.
+
 ### Customize resources
 
 Allocate CPU and memory based on your needs:

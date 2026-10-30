@@ -112,6 +112,40 @@ extension ClusterHelper {
     /// kubelet twice; a fresh rollout is what brings it back.
     static let podRestartAfter: Duration = .seconds(120)
 
+    /// No CNI means registration, not readiness. Require every expected node by name:
+    /// querying only the nodes that happen to exist could miss an absent worker.
+    static func waitForRegisteredNodes(
+        containerId: String, nodes: [String], log: Logger, budget: Duration = nodeReadyBudget,
+        now: @Sendable () -> ContinuousClock.Instant = { .now },
+        sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        probe: @Sendable ([String], ContinuousClock.Instant) async throws -> Int32
+    ) async throws {
+        guard !nodes.isEmpty else {
+            throw ContainerizationError(.invalidArgument, message: "cluster registration requires at least one expected node")
+        }
+        let deadline = now().advanced(by: budget)
+        func checkDeadline() throws {
+            try Task.checkCancellation()
+            guard now() < deadline else {
+                throw ContainerizationError(.timeout, message: "cluster \(containerId): expected nodes did not register within \(Self.describe(budget))")
+            }
+        }
+        log.info("Waiting for cluster nodes to register", metadata: ["nodes": "\(nodes.joined(separator: ", "))"])
+        while true {
+            try checkDeadline()
+            let code: Int32
+            do {
+                code = try await probe(["get"] + nodes.map { "node/\($0)" } + ["--request-timeout=2s"], deadline)
+            } catch {
+                try checkDeadline()
+                throw ContainerizationError(.internalError, message: "cluster \(containerId) stopped unexpectedly during registration", cause: error)
+            }
+            try checkDeadline()
+            if code == 0 { return }
+            try await sleep(min(.seconds(2), now().duration(to: deadline)))
+        }
+    }
+
     struct ReadinessTiming: Sendable {
         var nodeBudget = nodeReadyBudget
         var podBudget = podReadyBudget

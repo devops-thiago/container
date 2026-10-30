@@ -36,11 +36,18 @@ public struct ClusterStart: AsyncParsableCommand {
     @Flag(name: .long, help: "Explicitly adopt existing cluster nodes for writable /sys, preserving their data")
     var adoptLegacy = false
 
+    @Option(
+        name: .long,
+        help:
+            "Persist a readiness choice: ready waits for nodes and CoreDNS; registered waits only for node registration (no CNI). Defaults to the stored choice, or ready for legacy clusters."
+    )
+    var readiness: ClusterReadinessPolicy?
+
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: ClusterHelper.pluginName)
 
-        try await K8sClusters.start(name: name, adoptLegacy: adoptLegacy, log: log)
+        try await K8sClusters.start(name: name, adoptLegacy: adoptLegacy, readiness: readiness, log: log)
         print(name)
     }
 }
