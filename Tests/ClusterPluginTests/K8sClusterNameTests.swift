@@ -17,7 +17,7 @@
 import ContainerResource
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 /// Containers take names longer than a hostname; a cluster does not, since its name is a node's
 /// hostname and Kubernetes names the node by it.

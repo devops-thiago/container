@@ -21,7 +21,7 @@ import Logging
 import Synchronization
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 private func snapshot(
     id: String,
@@ -31,7 +31,7 @@ private func snapshot(
     incarnation: String
 ) throws -> ContainerSnapshot {
     let labels = [
-        ResourceLabelKeys.plugin: K8sHelper.pluginName,
+        ResourceLabelKeys.plugin: ClusterHelper.pluginName,
         ResourceLabelKeys.cluster: cluster,
         ResourceLabelKeys.role: role,
     ]
@@ -107,22 +107,22 @@ private final class StoppableContainers: K8sClusterContainers, @unchecked Sendab
 }
 
 @Suite("k8s stop")
-struct K8sStopTests {
+struct ClusterStopTests {
     private let log = Logger(label: "k8s-stop-tests")
 
     @Test("workers stop before the control plane, each with the labels and incarnation observed")
     func workersStopFirst() async throws {
         let name = "dev"
-        let controlPlane = try snapshot(id: name, cluster: name, role: K8sHelper.controlPlaneRoleName, incarnation: "cp")
-        let worker1 = try snapshot(id: "\(name)-worker-1", cluster: name, role: K8sHelper.workerRoleName, incarnation: "w1")
-        let worker2 = try snapshot(id: "\(name)-worker-2", cluster: name, role: K8sHelper.workerRoleName, incarnation: "w2")
-        let other = try snapshot(id: "other", cluster: "other", role: K8sHelper.controlPlaneRoleName, incarnation: "o")
+        let controlPlane = try snapshot(id: name, cluster: name, role: ClusterHelper.controlPlaneRoleName, incarnation: "cp")
+        let worker1 = try snapshot(id: "\(name)-worker-1", cluster: name, role: ClusterHelper.workerRoleName, incarnation: "w1")
+        let worker2 = try snapshot(id: "\(name)-worker-2", cluster: name, role: ClusterHelper.workerRoleName, incarnation: "w2")
+        let other = try snapshot(id: "other", cluster: "other", role: ClusterHelper.controlPlaneRoleName, incarnation: "o")
         let engine = StoppableContainers(listed: [worker1, other, controlPlane, worker2])
 
         try await K8sClusters.stop(name: name, containers: engine, log: log)
 
         let expectedLabels = [
-            ResourceLabelKeys.plugin: K8sHelper.pluginName,
+            ResourceLabelKeys.plugin: ClusterHelper.pluginName,
             ResourceLabelKeys.cluster: name,
         ]
         #expect(
@@ -136,9 +136,9 @@ struct K8sStopTests {
     @Test("a node that is already stopped is left alone")
     func stoppedNodesAreSkipped() async throws {
         let name = "dev"
-        let controlPlane = try snapshot(id: name, cluster: name, role: K8sHelper.controlPlaneRoleName, incarnation: "cp")
+        let controlPlane = try snapshot(id: name, cluster: name, role: ClusterHelper.controlPlaneRoleName, incarnation: "cp")
         let worker = try snapshot(
-            id: "\(name)-worker-1", cluster: name, role: K8sHelper.workerRoleName, status: "stopped", incarnation: "w1")
+            id: "\(name)-worker-1", cluster: name, role: ClusterHelper.workerRoleName, status: "stopped", incarnation: "w1")
         let engine = StoppableContainers(listed: [controlPlane, worker])
 
         try await K8sClusters.stop(name: name, containers: engine, log: log)
@@ -148,7 +148,7 @@ struct K8sStopTests {
 
     @Test("a name that is not a cluster is refused before any stop")
     func unknownClusterIsRefused() async throws {
-        let other = try snapshot(id: "other", cluster: "other", role: K8sHelper.controlPlaneRoleName, incarnation: "o")
+        let other = try snapshot(id: "other", cluster: "other", role: ClusterHelper.controlPlaneRoleName, incarnation: "o")
         let engine = StoppableContainers(listed: [other])
 
         await #expect(throws: ContainerizationError.self) {
@@ -160,9 +160,9 @@ struct K8sStopTests {
     @Test("a node replaced between the listing and the stop is refused, and the rest are not stopped")
     func replacedNodeStopsTheRun() async throws {
         let name = "dev"
-        let controlPlane = try snapshot(id: name, cluster: name, role: K8sHelper.controlPlaneRoleName, incarnation: "cp")
-        let worker = try snapshot(id: "\(name)-worker-1", cluster: name, role: K8sHelper.workerRoleName, incarnation: "w1")
-        let replacement = try snapshot(id: "\(name)-worker-1", cluster: name, role: K8sHelper.workerRoleName, incarnation: "w1-again")
+        let controlPlane = try snapshot(id: name, cluster: name, role: ClusterHelper.controlPlaneRoleName, incarnation: "cp")
+        let worker = try snapshot(id: "\(name)-worker-1", cluster: name, role: ClusterHelper.workerRoleName, incarnation: "w1")
+        let replacement = try snapshot(id: "\(name)-worker-1", cluster: name, role: ClusterHelper.workerRoleName, incarnation: "w1-again")
         let engine = StoppableContainers(listed: [controlPlane, worker], current: [controlPlane, replacement])
 
         await #expect(throws: ContainerizationError.self) {

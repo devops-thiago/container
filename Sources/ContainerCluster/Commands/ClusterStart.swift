@@ -22,7 +22,7 @@ import ContainerizationError
 import Foundation
 import Logging
 
-public struct K8sStart: AsyncParsableCommand {
+public struct ClusterStart: AsyncParsableCommand {
     public init() {}
 
     public static let configuration = CommandConfiguration(
@@ -30,15 +30,15 @@ public struct K8sStart: AsyncParsableCommand {
         abstract: "Start a stopped Kubernetes cluster"
     )
 
-    @Option(name: .long, help: "Cluster name (default: \(K8sHelper.defaultName))")
-    var name: String = K8sHelper.defaultName
+    @Option(name: .long, help: "Cluster name (default: \(ClusterHelper.defaultName))")
+    var name: String = ClusterHelper.defaultName
 
     @Flag(name: .long, help: "Explicitly adopt existing cluster nodes for writable /sys, preserving their data")
     var adoptLegacy = false
 
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
-        let log = Logger(label: K8sHelper.pluginName)
+        let log = Logger(label: ClusterHelper.pluginName)
 
         try await K8sClusters.start(name: name, adoptLegacy: adoptLegacy, log: log)
         print(name)

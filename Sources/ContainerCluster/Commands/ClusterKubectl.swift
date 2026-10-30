@@ -19,13 +19,13 @@ import ContainerAPIClient
 import ContainerizationError
 import Foundation
 
-/// `container k8s kubectl …`: the kubectl that ships beside this plugin, run against the
+/// `container cluster kubectl …`: the kubectl that ships beside this plugin, run against the
 /// kubeconfig the plugin maintains, so a cluster made here can be driven without installing
 /// kubectl or writing a config by hand.
 ///
 /// The process is replaced rather than spawned: kubectl gets the terminal, the signals and
 /// the exit status directly, which is what `kubectl exec -it` and `kubectl logs -f` need.
-public struct K8sKubectl: AsyncParsableCommand {
+public struct ClusterKubectl: AsyncParsableCommand {
     public init() {}
 
     public static let configuration = CommandConfiguration(
@@ -37,9 +37,9 @@ public struct K8sKubectl: AsyncParsableCommand {
             keeps unless KUBECONFIG is set.
 
             EXAMPLES:
-              $ container k8s kubectl get nodes
-              $ container k8s kubectl --name my-cluster get pods -A
-              $ container k8s kubectl version --client
+              $ container cluster kubectl get nodes
+              $ container cluster kubectl --name my-cluster get pods -A
+              $ container cluster kubectl version --client
             """
     )
 
@@ -166,7 +166,7 @@ public struct K8sKubectl: AsyncParsableCommand {
         }
         let invocation = Self.invocation(
             kubectl: resolved,
-            kubeconfig: K8sHelper.resolveKubeconfigMergePath().string,
+            kubeconfig: ClusterHelper.resolveKubeconfigMergePath().string,
             inheritedKubeconfig: ProcessInfo.processInfo.environment["KUBECONFIG"],
             context: name,
             arguments: arguments)

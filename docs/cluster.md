@@ -88,6 +88,14 @@ Each cluster node runs as a container, but `container cluster` manages those con
 - If you name a cluster node, `container start`, `container stop`, `container kill`, and `container delete` report it as not found, as they would for a container that doesn't exist. Other containers named in the same command are still processed.
 
 Commands that don't change a node's lifecycle, such as `container inspect`, `container logs`, `container exec`, `container stats`, and `container clean`, work on a cluster node you name. Use `container cluster delete` to remove a cluster and its nodes.
+Stop a cluster to free its resources without losing it, and start it again later:
+
+```bash
+container cluster stop --name my-cluster
+container cluster start --name my-cluster
+```
+
+`container k8s` is an alias of `container cluster`, so `container k8s start --name my-cluster` does the same.
 
 ### Customize resources
 
@@ -294,8 +302,8 @@ longer enable it, because ordinary containers can carry the same labels. If star
 cluster reports that adoption is required, stop the cluster and explicitly adopt its nodes:
 
 ```sh
-container k8s stop --name my-cluster
-container k8s start --name my-cluster --adopt-legacy
+container cluster stop --name my-cluster
+container cluster start --name my-cluster --adopt-legacy
 ```
 
 This records the permission on each existing node without deleting or recreating it. Each

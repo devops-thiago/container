@@ -35,10 +35,10 @@ import Yams
 /// returned instead of printed. The commands call through here so the two cannot drift.
 public enum K8sClusters {
     public static let maximumWorkers = 64
-    public static let defaultName = K8sHelper.defaultName
-    public static let defaultNodeImage = K8sHelper.nodeImage
+    public static let defaultName = ClusterHelper.defaultName
+    public static let defaultNodeImage = ClusterHelper.nodeImage
 
-    /// One cluster node, described with the fields `k8s list` prints.
+    /// One cluster node, described with the fields `cluster list` prints.
     public struct Node: Sendable, Equatable {
         public struct PortMapping: Sendable, Equatable {
             public let hostPort: Int
@@ -68,9 +68,9 @@ public enum K8sClusters {
 
     public static func list() async throws -> [Node] {
         let snapshots = try await ContainerClient().list(
-            filters: ContainerListFilters(labels: [ResourceLabelKeys.plugin: K8sHelper.pluginName])
+            filters: ClusterHelper.nodeListFilters
         )
-        return K8sHelper.buildK8sRows(from: snapshots).map { row in
+        return ClusterHelper.buildClusterRows(from: snapshots).map { row in
             Node(
                 clusterName: row.clusterName,
                 id: row.snapshot.configuration.id,
@@ -123,13 +123,16 @@ public enum K8sClusters {
                 .invalidArgument,
                 message: "worker count must be between 0 and \(maximumWorkers)")
         }
-        if let cniManifestPath {
+        // "NONE" installs no CNI: nodes stay NotReady until the caller installs one, so the
+        // create waits for the API server and for workers to register, not for readiness.
+        let skipCNI = cniManifestPath?.uppercased() == ClusterHelper.noCNIName
+        if let cniManifestPath, !skipCNI {
             guard FileManager.default.fileExists(atPath: cniManifestPath) else {
                 throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
             }
         }
         // Fail before provisioning any node VM.
-        _ = try K8sHelper.kubernetesVersion(nodeImage: nodeImage)
+        _ = try ClusterHelper.kubernetesVersion(nodeImage: nodeImage)
 
         let workerNames = workers == 0 ? [] : (1...workers).map { "\(name)-worker-\($0)" }
         guard workerNames.allSatisfy({ nameValid($0) }) else {
@@ -139,7 +142,7 @@ public enum K8sClusters {
         }
 
         let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
-        let fqdn = K8sHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
+        let fqdn = ClusterHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
         let controlPlane = try LinuxNodeProvisioner(
             clusterName: name,
             labels: labels,
@@ -180,9 +183,9 @@ public enum K8sClusters {
                 if let fqdn { sans.append(contentsOf: [vmIP, fqdn]) }
 
                 await progressUpdate([.setDescription("Running kubeadm init")])
-                try await K8sHelper.prepareNode(
+                try await ClusterHelper.prepareNode(
                     nodeID: controlPlaneName, client: client, log: log)
-                try await K8sHelper.bootstrapControlPlane(
+                try await ClusterHelper.bootstrapControlPlane(
                     nodeID: controlPlaneName,
                     nodeImage: nodeImage,
                     apiServerSANs: sans,
@@ -193,25 +196,32 @@ public enum K8sClusters {
                     log: log)
 
                 guard hasWorkers else { return nil }
-                let join = try await K8sHelper.createJoinToken(
+                let join = try await ClusterHelper.createJoinToken(
                     nodeID: controlPlaneName, client: client)
                 return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
             },
+            workersMustBeReady: !skipCNI,
             finalizeCluster: {
-                await progressUpdate([.setDescription("Waiting for cluster to be ready")])
-                try await K8sHelper.waitForReady(
-                    containerId: name, client: client, log: log)
+                if skipCNI {
+                    await progressUpdate([.setDescription("Waiting for API server")])
+                    try await ClusterHelper.waitForAPIServer(
+                        containerId: name, client: client, log: log)
+                } else {
+                    await progressUpdate([.setDescription("Waiting for cluster to be ready")])
+                    try await ClusterHelper.waitForReady(
+                        containerId: name, client: client, log: log)
+                }
             },
             log: log,
             progressUpdate: progressUpdate)
 
         await progressUpdate([.setDescription("Writing kubeconfig")])
         do {
-            let rawConfig = try await K8sHelper.fetchConfig(
+            let rawConfig = try await ClusterHelper.fetchConfig(
                 containerId: name, client: client, log: log)
-            let kubeConfig = try await K8sHelper.transformConfig(
+            let kubeConfig = try await ClusterHelper.transformConfig(
                 rawConfig, containerId: name, fqdn: fqdn, client: client)
-            try K8sHelper.mergeConfig(
+            try ClusterHelper.mergeConfig(
                 kubeConfig, containerId: name, setCurrentContext: true, log: log)
         } catch {
             // Not fatal: the cluster is up, and only the kubeconfig is missing. Reported
@@ -223,13 +233,13 @@ public enum K8sClusters {
     }
 
     /// The cluster's kubeconfig as YAML, rewritten to reach the API server from this host —
-    /// what `k8s write-config` writes, returned instead so an embedder can put it where the
+    /// what `cluster write-config` writes, returned instead so an embedder can put it where the
     /// user asks.
     public static func kubeconfigYAML(name: String = K8sClusters.defaultName, log: Logger) async throws -> String {
         let client = ContainerClient()
-        let fqdn = await K8sHelper.detectFQDN(name: name)
-        let rawConfig = try await K8sHelper.fetchConfig(containerId: name, client: client, log: log)
-        let config = try await K8sHelper.transformConfig(rawConfig, containerId: name, fqdn: fqdn, client: client)
+        let fqdn = await ClusterHelper.detectFQDN(name: name)
+        let rawConfig = try await ClusterHelper.fetchConfig(containerId: name, client: client, log: log)
+        let config = try await ClusterHelper.transformConfig(rawConfig, containerId: name, fqdn: fqdn, client: client)
         return try YAMLEncoder().encode(config)
     }
 
@@ -238,14 +248,13 @@ public enum K8sClusters {
     public static func start(name: String = K8sClusters.defaultName, adoptLegacy: Bool = false, log: Logger) async throws {
         let client = ContainerClient()
         let controlPlane = try await client.get(id: name)
-        guard controlPlane.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-            throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
+        guard ClusterHelper.ownsNode(controlPlane.configuration.labels) else {
+            throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
         }
 
         let listed = try await client.list(
-            filters: ContainerListFilters(
-                labels: [ResourceLabelKeys.plugin: K8sHelper.pluginName]))
-        let workers = K8sHelper.buildK8sRows(from: listed)
+            filters: ClusterHelper.nodeListFilters)
+        let workers = ClusterHelper.buildClusterRows(from: listed)
             .filter { $0.clusterName == name && $0.snapshot.id != name }
             .map(\.snapshot)
             .sorted { $0.id < $1.id }
@@ -254,27 +263,27 @@ public enum K8sClusters {
         // old nodes need the user's explicit CLI choice, bound to each observed incarnation.
         try await client.prepareWritableSysfs(
             [controlPlane] + workers, role: .kubernetes, adoptLegacy: adoptLegacy,
-            adoptionCommand: "container k8s start --name \(name) --adopt-legacy")
+            adoptionCommand: "container cluster start --name \(name) --adopt-legacy")
         try Task.checkCancellation()
         try await startNodeIfNeeded(controlPlane, client: client, log: log)
         // Idempotent, and it heals clusters created before the loopback pin existed: their
         // admin kubeconfigs still name whatever address the node had at kubeadm init.
         try Task.checkCancellation()
-        try await K8sHelper.pinAdminKubeconfigsToLoopback(nodeID: name, client: client)
+        try await ClusterHelper.pinAdminKubeconfigsToLoopback(nodeID: name, client: client)
         for worker in workers {
             try Task.checkCancellation()
             try await startNodeIfNeeded(worker, client: client, log: log)
         }
         try Task.checkCancellation()
-        try await K8sHelper.waitForReady(containerId: name, client: client, log: log)
+        try await ClusterHelper.waitForReady(containerId: name, client: client, log: log)
 
         do {
-            let fqdn = await K8sHelper.detectFQDN(name: name)
-            let rawConfig = try await K8sHelper.fetchConfig(
+            let fqdn = await ClusterHelper.detectFQDN(name: name)
+            let rawConfig = try await ClusterHelper.fetchConfig(
                 containerId: name, client: client, log: log)
-            let config = try await K8sHelper.transformConfig(
+            let config = try await ClusterHelper.transformConfig(
                 rawConfig, containerId: name, fqdn: fqdn, client: client)
-            try K8sHelper.mergeConfig(config, containerId: name, log: log)
+            try ClusterHelper.mergeConfig(config, containerId: name, log: log)
         } catch {
             log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
         }
@@ -285,8 +294,8 @@ public enum K8sClusters {
         client: ContainerClient,
         log: Logger
     ) async throws {
-        guard node.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-            throw ContainerizationError(.invalidArgument, message: "\(node.id) is not a k8s node")
+        guard ClusterHelper.ownsNode(node.configuration.labels) else {
+            throw ContainerizationError(.invalidArgument, message: "\(node.id) is not a cluster node")
         }
         guard node.status != .running else { return }
         let io = try ProcessIO.create(tty: false, interactive: false, detach: true)
@@ -294,7 +303,7 @@ public enum K8sClusters {
         let process = try await client.bootstrap(id: node.id, stdio: io.stdio)
         try await process.start()
         try io.closeAfterStart()
-        try await K8sHelper.waitForNodeBooted(containerId: node.id, client: client, log: log)
+        try await ClusterHelper.waitForNodeBooted(containerId: node.id, client: client, log: log)
     }
 
     /// Stop every node of a cluster, workers first and the control plane last, so no worker
@@ -309,11 +318,11 @@ public enum K8sClusters {
     /// between is refused rather than stopped.
     static func stop(name: String, containers: any K8sClusterContainers, log: Logger) async throws {
         let listed = try await containers.listNodes()
-        let clusterNodes = K8sHelper.buildK8sRows(from: listed)
+        let clusterNodes = ClusterHelper.buildClusterRows(from: listed)
             .filter { $0.clusterName == name }
             .map(\.snapshot)
         guard let controlPlane = clusterNodes.first(where: { $0.id == name }) else {
-            throw ContainerizationError(.notFound, message: "k8s cluster \(name) not found")
+            throw ContainerizationError(.notFound, message: "cluster \(name) not found")
         }
         var nodes = clusterNodes.filter { $0.id != name }
         nodes.sort { $0.id > $1.id }
@@ -325,7 +334,10 @@ public enum K8sClusters {
                 log.debug("cluster node already stopped", metadata: ["name": "\(node.id)"])
                 continue
             }
-            var requiredLabels = nodeLabels
+            guard ClusterHelper.ownsNode(node.configuration.labels) else {
+                throw ContainerizationError(.invalidArgument, message: "\(node.id) is not a cluster node")
+            }
+            var requiredLabels = nodeLabels(of: node)
             if node.configuration.labels[ResourceLabelKeys.cluster] != nil {
                 requiredLabels[ResourceLabelKeys.cluster] = name
             }
@@ -353,7 +365,13 @@ public enum K8sClusters {
     }
 
     /// The labels a container must carry to be treated as a cluster node here.
-    static var nodeLabels: [String: String] { [ResourceLabelKeys.plugin: K8sHelper.pluginName] }
+    static var nodeLabels: [String: String] { [ResourceLabelKeys.plugin: ClusterHelper.pluginName] }
+
+    /// The plugin label a stop or delete of `node` requires: the one it carries, already checked
+    /// to be this plugin's under its current or its earlier name.
+    static func nodeLabels(of node: ContainerSnapshot) -> [String: String] {
+        [ResourceLabelKeys.plugin: node.configuration.labels[ResourceLabelKeys.plugin] ?? ClusterHelper.pluginName]
+    }
 
     /// The delete, with its container access injectable.
     ///
@@ -368,7 +386,7 @@ public enum K8sClusters {
         log: Logger
     ) async throws {
         let listed = try await containers.listNodes()
-        let clusterNodes = K8sHelper.buildK8sRows(from: listed)
+        let clusterNodes = ClusterHelper.buildClusterRows(from: listed)
             .filter { $0.clusterName == name }
             .map(\.snapshot)
         let controlPlane: ContainerSnapshot?
@@ -391,7 +409,7 @@ public enum K8sClusters {
                     log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
                     // With an ownership condition, no observed node means no proof that
                     // this caller owns a same-name kubeconfig entry either.
-                    if requiredLabels == nil { try K8sHelper.removeConfig(containerId: name, log: log) }
+                    if requiredLabels == nil { try ClusterHelper.removeConfig(containerId: name, log: log) }
                     return
                 }
                 log.debug(
@@ -400,8 +418,8 @@ public enum K8sClusters {
             }
         }
         if let controlPlane {
-            guard controlPlane.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
-                throw ContainerizationError(.invalidArgument, message: "\(name) is not a k8s cluster")
+            guard ClusterHelper.ownsNode(controlPlane.configuration.labels) else {
+                throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
             }
             if let expectedControlPlaneIncarnation,
                 controlPlane.incarnation != expectedControlPlaneIncarnation
@@ -424,16 +442,16 @@ public enum K8sClusters {
             }
         }
         for node in nodes {
-            guard node.configuration.labels[ResourceLabelKeys.plugin] == K8sHelper.pluginName else {
+            guard ClusterHelper.ownsNode(node.configuration.labels) else {
                 throw ContainerizationError(
-                    .invalidArgument, message: "\(node.id) is not a k8s cluster node")
+                    .invalidArgument, message: "\(node.id) is not a cluster node")
             }
             if let owner = node.configuration.labels[ResourceLabelKeys.cluster], owner != name {
                 throw ContainerizationError(
                     .invalidArgument,
-                    message: "\(node.id) belongs to k8s cluster \(owner), not \(name)")
+                    message: "\(node.id) belongs to cluster \(owner), not \(name)")
             }
-            var requirements = (requiredLabels ?? [:]).merging(nodeLabels) { _, plugin in plugin }
+            var requirements = (requiredLabels ?? [:]).merging(nodeLabels(of: node)) { _, plugin in plugin }
             if node.configuration.labels[ResourceLabelKeys.cluster] != nil {
                 requirements[ResourceLabelKeys.cluster] = name
             }
@@ -459,7 +477,7 @@ public enum K8sClusters {
             }
         }
 
-        try K8sHelper.removeConfig(containerId: name, log: log)
+        try ClusterHelper.removeConfig(containerId: name, log: log)
     }
 }
 
@@ -478,8 +496,7 @@ protocol K8sClusterContainers: Sendable {
 extension ContainerClient: K8sClusterContainers {
     func listNodes() async throws -> [ContainerSnapshot] {
         try await list(
-            filters: ContainerListFilters(
-                labels: [ResourceLabelKeys.plugin: K8sHelper.pluginName]))
+            filters: ClusterHelper.nodeListFilters)
     }
 
     func stop(

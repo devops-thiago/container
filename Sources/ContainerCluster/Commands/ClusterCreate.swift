@@ -16,11 +16,8 @@
 
 import ArgumentParser
 import ContainerAPIClient
-import ContainerClusterServiceClient
 import ContainerLog
-import ContainerPersistence
 import ContainerResource
-import ContainerizationError
 import Darwin
 import Foundation
 import Logging
@@ -31,13 +28,11 @@ public struct ClusterCreate: AsyncParsableCommand {
 
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create and start a local Kubernetes cluster and optional worker nodes",
-        discussion: """
-            --cpus and --memory size the control-plane node, or the single node if no workers are specified \
-            (default 1/4 of host CPUs and memory, minimum 2 CPUs and 2g). \
-            Size workers with --workers count=<n>,cpus=<n>,memory=<size>; a group's count defaults to 1, and cpus and memory left out default to the single-node sizes: 1/4 of host CPUs and memory (minimum 2 CPUs and 2g).
-            """
+        abstract: "Create and start a local Kubernetes cluster and optional worker nodes"
     )
+
+    @Option(name: .customLong("label"), help: "Set a key=value label on each node")
+    var labels: [String] = []
 
     @Option(name: .long, help: "Cluster name")
     var name: String = ClusterHelper.defaultName
@@ -60,61 +55,18 @@ public struct ClusterCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Optional path to a CNI manifest to apply, or \"NONE\" to skip installing a CNI.")
     var cni: String?
 
-    @Option(
-        name: .long,
-        help: "Worker nodes to create: a number, or count=<n>,cpus=<n>,memory=<size> (repeat for groups of differently sized workers)",
-        transform: { try WorkerGroup(parsing: $0) })
-    var workers: [WorkerGroup] = []
-
-    @Flag(help: "Let nodes pull images from the local image store")
-    var sharedImageStore = false
+    @Option(name: .long, help: "Number of worker nodes to create, 0...\(K8sClusters.maximumWorkers)")
+    var workers: Int = 0
 
     public func validate() throws {
-        // Fail before anything is created, the same as invalid --workers values do.
-        do {
-            if let cpus = resourceFlags.cpus { _ = try Parser.cpus(cpus) }
-            if let memory = resourceFlags.memory { _ = try Parser.memoryInBytes(memory) }
-        } catch {
-            throw ValidationError(wrapping: error)
-        }
-
-        var total: UInt = 0
-        for group in workers {
-            // Compare against the remaining room so the running total can't overflow.
-            guard group.count <= ClusterConfiguration.maxWorkers - total else {
-                throw ValidationError("--workers must total at most \(ClusterConfiguration.maxWorkers) worker nodes")
-            }
-            total += group.count
+        guard (0...K8sClusters.maximumWorkers).contains(workers) else {
+            throw ValidationError("--workers must be between 0 and \(K8sClusters.maximumWorkers)")
         }
     }
 
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: ClusterHelper.pluginName)
-
-        let skipCNI = cni?.uppercased() == ClusterHelper.noCNIName
-        if let cni, !skipCNI {
-            guard FileManager.default.fileExists(atPath: cni) else {
-                throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cni)")
-            }
-        }
-
-        let containerSystemConfig: ContainerSystemConfig = try await ClientHealthCheck.loadContainerSystemConfig()
-        let fqdn = ClusterHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
-
-        // validate() has already bounded the total by ClusterConfiguration.maxWorkers.
-        let workerCount = workers.reduce(0) { $0 + Int($1.count) }
-
-        // Validates the name, node image and worker count; fails before provisioning the node VM.
-        let configuration = try ClusterConfiguration.make(
-            name: name,
-            nodeImage: nodeImage,
-            remove: remove,
-            sharedImageStore: sharedImageStore,
-            workers: UInt(workerCount),
-            cni: cni,
-            fqdn: fqdn
-        )
 
         let isTTY = isatty(FileHandle.standardError.fileDescriptor) == 1
         // TotalTasks include:
@@ -124,7 +76,7 @@ public struct ClusterCreate: AsyncParsableCommand {
             showTasks: true,
             showItems: true,
             ignoreSmallSize: true,
-            totalTasks: 4 + workerCount,
+            totalTasks: 4 + workers,
             clearOnFinish: isTTY,
             outputMode: isTTY ? .ansi : .plain
         )
@@ -133,64 +85,25 @@ public struct ClusterCreate: AsyncParsableCommand {
         defer { progress.finish() }
         progress.start()
 
-        let controlPlane = try LinuxNodeProvisioner(
+        let result = try await K8sClusters.create(
             name: name,
-            clusterName: name,
-            roles: workerCount == 0 ? [StandardRoles.controlPlane, StandardRoles.worker] : [StandardRoles.controlPlane],
+            labels: Utility.parseKeyValuePairs(labels),
             nodeImage: nodeImage,
             cpus: resourceFlags.cpus,
             memory: resourceFlags.memory,
-            registryScheme: registryFlags.scheme,
-            maxConcurrentDownloads: imageFetchFlags.maxConcurrentDownloads,
-            remove: remove,
-            containerSystemConfig: containerSystemConfig,
-            fqdn: fqdn,
-            sharedImageStore: sharedImageStore
+            workers: workers,
+            cniManifestPath: cni,
+            autoRemove: remove,
+            registry: registryFlags,
+            imageFetch: imageFetchFlags,
+            log: log,
+            progressUpdate: progress.handler
         )
-        // Workers are numbered across groups.
-        var workerNodes: [LinuxNodeProvisioner] = []
-        for group in workers {
-            for _ in 0..<group.count {
-                workerNodes.append(
-                    try LinuxNodeProvisioner(
-                        name: ClusterHelper.workerName(cluster: name, index: workerNodes.count + 1),
-                        clusterName: name,
-                        roles: [StandardRoles.worker],
-                        nodeImage: nodeImage,
-                        cpus: group.cpus,
-                        memory: group.memory,
-                        registryScheme: registryFlags.scheme,
-                        maxConcurrentDownloads: imageFetchFlags.maxConcurrentDownloads,
-                        remove: remove,
-                        containerSystemConfig: containerSystemConfig,
-                        sharedImageStore: sharedImageStore
-                    ))
-            }
-        }
-
-        let clusterBootstrapper = ClusterBootstrapper(
-            name: name,
-            kubernetesVersion: configuration.kubernetesVersion,
-            cni: cni,
-            fqdn: fqdn,
-            sharedImageStore: sharedImageStore,
-            controlPlane: controlPlane,
-            workers: workerNodes
-        )
-
-        // Record the cluster before provisioning. Fails `.exists` for a live duplicate and replaces stale records.
-        let clusterClient = ClusterClient()
-        _ = try await clusterClient.create(configuration: configuration)
-
-        do {
-            try await clusterBootstrapper.create(progress: { progress.set(description: $0) }, log: log)
-        } catch {
-            // `.exists` means a container with this name is already there; the record may belong to another live create.
-            if (error as? ContainerizationError)?.code != .exists { try? await clusterClient.delete(name: name) }
-            throw error
-        }
 
         progress.finish()
+        if !result.kubeconfigWritten {
+            log.info("cluster is running; use 'container cluster write-config --name \(name)' to write the kubeconfig")
+        }
         print(name)
     }
 }

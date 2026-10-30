@@ -20,7 +20,7 @@ import Logging
 import Synchronization
 import Testing
 
-@testable import ContainerK8s
+@testable import ContainerCluster
 
 private final class ReadinessClock: Sendable {
     let instant = Mutex(ContinuousClock.now)
@@ -35,7 +35,7 @@ struct ReadinessDeadlineTests {
     func lateReply(pods: Bool, code: Int32) async {
         let clock = ReadinessClock()
         do {
-            try await K8sHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
+            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
                 if pods && arguments.contains("node") { return 0 }
                 #expect(deadline == clock.now().advanced(by: .seconds(300)))
                 clock.advance(.seconds(301))
@@ -53,10 +53,10 @@ struct ReadinessDeadlineTests {
     func healDeadline() async {
         let clock = ReadinessClock()
         let heals = Mutex(0)
-        var timing = K8sHelper.ReadinessTiming()
+        var timing = ClusterHelper.ReadinessTiming()
         timing.retry = .seconds(120)
         do {
-            try await K8sHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
+            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
                 if arguments.contains("node") { return 0 }
                 if arguments.contains("restart") {
                     heals.withLock { $0 += 1 }
@@ -79,10 +79,10 @@ struct ReadinessDeadlineTests {
         let clock = ReadinessClock()
         let start = clock.now()
         let heals = Mutex(0)
-        var timing = K8sHelper.ReadinessTiming()
+        var timing = ClusterHelper.ReadinessTiming()
         timing.retry = .seconds(120)
         await #expect(throws: ContainerizationError.self) {
-            try await K8sHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, _ in
+            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, _ in
                 if arguments.contains("node") { return 0 }
                 if arguments.contains("restart") { heals.withLock { $0 += 1 } }
                 return 1
@@ -96,7 +96,7 @@ struct ReadinessDeadlineTests {
     func success() async throws {
         let clock = ReadinessClock()
         let calls = Mutex(0)
-        try await K8sHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
+        try await ClusterHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
             #expect(!arguments.contains("restart"))
             #expect(deadline == clock.now().advanced(by: .seconds(300)))
             calls.withLock { $0 += 1 }

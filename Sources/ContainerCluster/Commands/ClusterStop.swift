@@ -21,7 +21,7 @@ import ContainerResource
 import ContainerizationError
 import Logging
 
-public struct K8sStop: AsyncParsableCommand {
+public struct ClusterStop: AsyncParsableCommand {
     public init() {}
 
     public static let configuration = CommandConfiguration(
@@ -29,12 +29,12 @@ public struct K8sStop: AsyncParsableCommand {
         abstract: "Stop a Kubernetes cluster, keeping its nodes",
     )
 
-    @Option(name: .long, help: "Cluster name (default: \(K8sHelper.defaultName))")
-    var name: String = K8sHelper.defaultName
+    @Option(name: .long, help: "Cluster name (default: \(ClusterHelper.defaultName))")
+    var name: String = ClusterHelper.defaultName
 
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
-        let log = Logger(label: K8sHelper.pluginName)
+        let log = Logger(label: ClusterHelper.pluginName)
 
         try await K8sClusters.stop(name: name, log: log)
         print(name)
