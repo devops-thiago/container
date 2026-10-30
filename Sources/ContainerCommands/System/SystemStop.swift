@@ -259,7 +259,7 @@ extension Application {
 
                 do {
                     if try !ServiceManager.isRegistered(
-                        fullServiceLabel: jobLabel,
+                        fullServiceLabel: fullLabel,
                         timeout: operationTimeout
                     ) {
                         return
