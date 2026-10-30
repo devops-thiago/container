@@ -15,9 +15,13 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerCluster
+import Foundation
 
 @main struct ClusterPlugin {
     static func main() async {
-        await ClusterCommand.main()
+        let invokedAs = URL(fileURLWithPath: CommandLine.arguments[0]).lastPathComponent
+        await ClusterCommandContext.$invokedAs.withValue(invokedAs) {
+            await ClusterCommand.main()
+        }
     }
 }

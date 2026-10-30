@@ -29,7 +29,7 @@ public struct ClusterLoadImage: AsyncParsableCommand {
     )
 
     @Option(name: .long, help: "Cluster name")
-    var name: String = ClusterHelper.defaultName
+    var name: String = ClusterCommandContext.defaultName
 
     @Argument(help: "Image reference to load (e.g. demo-api:latest)")
     var image: String

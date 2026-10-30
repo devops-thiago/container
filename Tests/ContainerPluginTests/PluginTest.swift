@@ -20,6 +20,22 @@ import Testing
 @testable import ContainerPlugin
 
 struct PluginTest {
+    @Test(arguments: [true, false])
+    func onlyDeclaredCLIAliasesKeepTheirInvocation(isCLI: Bool) {
+        let binary = URL(fileURLWithPath: "/fixture/cluster/bin/cluster")
+        let plugin = Plugin(
+            binaryURL: binary,
+            config: PluginConfig(
+                abstract: "cluster", author: "Apple",
+                servicesConfig: isCLI ? nil : .init(loadAtBoot: false, runAtLoad: false, services: [], defaultArguments: []),
+                aliases: ["k8s"]))
+        #expect(plugin.executionArguments(args: []) == [binary.path])
+        #expect(plugin.executionArguments(args: ["cluster", "stop"]) == [binary.path, "stop"])
+        #expect(plugin.executionArguments(args: ["unlisted", "stop"]) == [binary.path, "stop"])
+        #expect(plugin.executionArguments(args: ["k8s", "stop", "--name", "chosen"]) == [isCLI ? "k8s" : binary.path, "stop", "--name", "chosen"])
+        #expect(plugin.binaryURL == binary, "the alias changes argv[0], never which binary is executed")
+    }
+
     @Test
     func testCLIPlugin() async throws {
         let config = PluginConfig(

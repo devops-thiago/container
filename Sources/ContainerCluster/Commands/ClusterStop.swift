@@ -29,8 +29,8 @@ public struct ClusterStop: AsyncParsableCommand {
         abstract: "Stop a Kubernetes cluster, keeping its nodes",
     )
 
-    @Option(name: .long, help: "Cluster name (default: \(ClusterHelper.defaultName))")
-    var name: String = ClusterHelper.defaultName
+    @Option(name: .long, help: "Cluster name (default: \(ClusterCommandContext.defaultName))")
+    var name: String = ClusterCommandContext.defaultName
 
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }

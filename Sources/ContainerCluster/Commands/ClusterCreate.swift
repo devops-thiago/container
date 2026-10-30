@@ -35,7 +35,7 @@ public struct ClusterCreate: AsyncParsableCommand {
     var labels: [String] = []
 
     @Option(name: .long, help: "Cluster name")
-    var name: String = ClusterHelper.defaultName
+    var name: String = ClusterCommandContext.defaultName
 
     @Flag(name: [.customLong("rm"), .long], help: "Remove the cluster container after it stops")
     var remove: Bool = false

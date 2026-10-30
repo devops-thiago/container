@@ -100,10 +100,20 @@ extension Plugin {
 }
 
 extension Plugin {
-    public func exec(args: [String]) throws {
+    func executionArguments(args: [String]) -> [String] {
+        guard let command = args.first else { return [self.binaryURL.path] }
         var args = args
+        // Keep a declared CLI alias in argv[0]. The executable path still selects the
+        // binary; the plugin can now preserve that spelling's compatibility defaults.
+        if !config.isCLI || !(config.aliases ?? []).contains(command) {
+            args[0] = self.binaryURL.path
+        }
+        return args
+    }
+
+    public func exec(args: [String]) throws {
         let executable = self.binaryURL.path
-        args[0] = executable
+        let args = executionArguments(args: args)
         let argv = args.map { strdup($0) } + [nil]
         guard execvp(executable, argv) != -1 else {
             throw POSIXError.fromErrno()

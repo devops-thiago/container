@@ -225,6 +225,7 @@ let package = Package(
                 "ContainerAPIClient",
                 "ContainerCluster",
                 "ContainerClusterServiceClient",
+                "ContainerPlugin",
                 "ContainerResource",
                 "Yams",
             ]
