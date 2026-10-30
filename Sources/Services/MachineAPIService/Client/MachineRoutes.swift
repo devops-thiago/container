@@ -27,6 +27,12 @@ public enum MachineRoutes: String {
     case setDefault
     /// Boot a container machine.
     case bootMachine
+    /// Boot once and identify the request responsible for account setup.
+    case bootMachineForSetup
+    /// Publish successful account setup for the same VM and owning request.
+    case completeMachineSetup
+    /// Roll back only the VM still owned by a failed setup request.
+    case stopMachineSetup
     /// Stop a container machine.
     case stopMachine
     /// Inspect a container machine.
