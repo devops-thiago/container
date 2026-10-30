@@ -1306,6 +1306,8 @@ container machine create --virtualization --kernel ./vmlinux-kvm alpine:3.22
 
 Runs a command in a container machine, booting it first if needed. With no command, it opens an interactive login shell. By default the command runs as a user matching the host user.
 
+Command arguments are passed literally, preserving spaces and empty values. For shell expansion, pipelines, or redirection, invoke a shell explicitly, for example `container machine run sh -c 'printf "%s\n" "$HOME"'`. Older versions reconstructed the arguments as shell text; commands that depended on that implicit interpretation must now use an explicit shell.
+
 **Usage**
 
 ```bash

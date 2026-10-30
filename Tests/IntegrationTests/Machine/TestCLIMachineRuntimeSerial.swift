@@ -118,6 +118,25 @@ struct TestCLIMachineRuntimeSerial {
 
     // MARK: - Run tests
 
+    @Test func testRunLiteralArgumentsAndExplicitShell() async throws {
+        try await ContainerFixture.with { f in
+            let name = "\(f.testID)-machine"
+            f.addCleanup { f.cleanupMachine(name) }
+            try f.doMachineCreate(name: name, image: machineImage, extraArgs: ["--home-mount", "none"])
+            let output = try f.doMachineRun(
+                name: name,
+                command: ["printf", "%s|", "before", "two words", "", "$HOME", "$(printf injected)", "after"])
+            #expect(output == "before|two words||$HOME|$(printf injected)|after|")
+            let shell = try f.runMachine([
+                "run", "-n", name, "sh", "-c", "printf '%s' \"$1\"; exit 23", "audit-shell", "two words",
+            ])
+            #expect(shell.status == 23)
+            #expect(shell.output == "two words")
+            let uid = try f.doMachineRun(name: name, command: ["id", "-u"])
+            #expect(uid.trimmingCharacters(in: .whitespacesAndNewlines) == "\(getuid())")
+        }
+    }
+
     @Test func testRunSimpleCommand() async throws {
         try await ContainerFixture.with { f in
             let name = "\(f.testID)-machine"
@@ -187,7 +206,7 @@ struct TestCLIMachineRuntimeSerial {
 
             let output = try f.doMachineRun(
                 name: name, root: true, env: ["MY_VAR=hello_world"],
-                command: ["echo", "$MY_VAR"])
+                command: ["printenv", "MY_VAR"])
             #expect(output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello_world")
         }
     }
@@ -294,7 +313,7 @@ struct TestCLIMachineRuntimeSerial {
             try f.doMachineBoot(name: name)
             try await f.waitForMachineStatus(name, status: "running")
 
-            let output = try f.doMachineRun(name: name, root: true, command: ["echo", "$0"])
+            let output = try f.doMachineRun(name: name, root: true, command: ["/bin/sh", "-c", "echo \"$0\""])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(output == "/bin/sh", "alpine shell should expand $0 to /bin/sh")
         }
@@ -308,7 +327,7 @@ struct TestCLIMachineRuntimeSerial {
             try f.doMachineBoot(name: name)
             try await f.waitForMachineStatus(name, status: "running")
 
-            let result = try f.runMachine(["run", "-n", name, "--root", "exit", "42"])
+            let result = try f.runMachine(["run", "-n", name, "--root", "sh", "-c", "exit 42"])
             #expect(result.status == 42, "exit code should propagate from command")
         }
     }
@@ -324,7 +343,7 @@ struct TestCLIMachineRuntimeSerial {
             let result = try f.runMachine([
                 "run", "-n", name, "--root",
                 "-e", "VAR1=one", "-e", "VAR2=two", "-e", "VAR3=three",
-                "echo", "$VAR1-$VAR2-$VAR3",
+                "sh", "-c", "echo \"$VAR1-$VAR2-$VAR3\"",
             ])
             #expect(result.status == 0)
             #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "one-two-three")
@@ -369,7 +388,7 @@ struct TestCLIMachineRuntimeSerial {
 
             let result = try f.runMachine([
                 "run", "-n", name, "--user", "1000:1000",
-                "echo", "$(id -u):$(id -g)",
+                "sh", "-c", "echo \"$(id -u):$(id -g)\"",
             ])
             #expect(result.status == 0)
             #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "1000:1000")
@@ -388,7 +407,7 @@ struct TestCLIMachineRuntimeSerial {
             try "TEST_VAR=from_file\n".write(toFile: envFile.string, atomically: true, encoding: .utf8)
 
             let result = try f.runMachine([
-                "run", "-n", name, "--root", "--env-file", envFile.string, "echo", "$TEST_VAR",
+                "run", "-n", name, "--root", "--env-file", envFile.string, "printenv", "TEST_VAR",
             ])
             #expect(result.status == 0)
             #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "from_file")
@@ -572,7 +591,7 @@ struct TestCLIMachineRuntimeSerial {
             try f.doMachineBoot(name: name)
             try await f.waitForMachineStatus(name, status: "running")
 
-            let home = try f.doMachineRun(name: name, command: ["echo", "$HOME"])
+            let home = try f.doMachineRun(name: name, command: ["printenv", "HOME"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(home == "/home/\(NSUserName())")
         }
@@ -621,7 +640,7 @@ struct TestCLIMachineRuntimeSerial {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let username = try f.doMachineRun(name: name, command: ["id", "-un"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let home = try f.doMachineRun(name: name, command: ["echo", "$HOME"])
+            let home = try f.doMachineRun(name: name, command: ["printenv", "HOME"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(uid == "1500")
             #expect(gid == "1600")
@@ -665,7 +684,7 @@ struct TestCLIMachineRuntimeSerial {
             try f.doMachineBoot(name: name)
             try await f.waitForMachineStatus(name, status: "running")
 
-            let home = try f.doMachineRun(name: name, command: ["echo", "$HOME"])
+            let home = try f.doMachineRun(name: name, command: ["printenv", "HOME"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(home == "/srv/devhome")
 
@@ -1038,7 +1057,7 @@ struct TestCLIMachineRuntimeSerial {
 
             let sockValue = try f.doMachineRun(
                 name: name, root: true,
-                command: ["echo", "$SSH_AUTH_SOCK"]
+                command: ["printenv", "SSH_AUTH_SOCK"]
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(sockValue == "/var/host-services/ssh-auth.sock")
@@ -1046,7 +1065,7 @@ struct TestCLIMachineRuntimeSerial {
             let exists = try f.doMachineRun(
                 name: name, root: true,
                 command: [
-                    "[ -S /var/host-services/ssh-auth.sock ]", "&&", "echo", "exists", "||", "echo", "missing",
+                    "sh", "-c", "[ -S /var/host-services/ssh-auth.sock ] && echo exists || echo missing",
                 ]
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             #expect(exists == "exists")
