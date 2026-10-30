@@ -70,6 +70,33 @@ public struct PluginLoader: Sendable {
         self.log = log
     }
 
+    /// Removes the standard helper's log after its resource has been deleted. Call while
+    /// holding the resource's lifecycle lock, before the same ID can be created again.
+    /// Custom plugins have no common log naming contract, so their files are left alone.
+    public func removeInstanceLog(pluginName: String, instanceId: String) throws {
+        guard let logRoot,
+            pluginName == "container-runtime-linux" || pluginName == "container-network-vmnet"
+        else { return }
+        guard !instanceId.isEmpty, instanceId != ".", instanceId != "..",
+            !instanceId.utf8.contains(0), !instanceId.contains("/")
+        else { throw ContainerizationError(.invalidArgument, message: "invalid helper instance ID") }
+
+        let directory: FileDescriptor
+        do {
+            directory = try .open(logRoot, .readOnly, options: [.directory, .closeOnExec])
+        } catch let error as Errno where error == .noSuchFileOrDirectory {
+            return
+        }
+        defer { try? directory.close() }
+        // unlinkat removes a leaf symlink itself, never its target or a directory tree.
+        try "\(pluginName)-\(instanceId).log".withCString { name in
+            if unlinkat(directory.rawValue, name, 0) != 0 {
+                let error = Errno(rawValue: errno)
+                if error != .noSuchFileOrDirectory { throw error }
+            }
+        }
+    }
+
     public static func isValidLifecycleGeneration(_ value: String) -> Bool {
         !value.isEmpty
             && value.utf8.allSatisfy {
