@@ -170,6 +170,61 @@ struct PluginLoaderTest {
     }
 
     @Test
+    func testFindPluginByAlias() async throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try FileManager.default.createDirectory(at: tempURL, withIntermediateDirectories: true)
+
+        let cluster = Plugin(
+            binaryURL: tempURL.appending(path: "cluster/bin/cluster"),
+            config: PluginConfig(abstract: "cluster", author: "Apple", servicesConfig: nil, aliases: ["k8s"]))
+        let service = Plugin(
+            binaryURL: tempURL.appending(path: "service/bin/service"),
+            config: PluginConfig(
+                abstract: "service", author: "Apple",
+                servicesConfig: .init(loadAtBoot: false, runAtLoad: false, services: [], defaultArguments: []),
+                aliases: ["svc"]))
+        let factory = try MockPluginFactory(tempURL: tempURL, plugins: ["cluster": cluster, "service": service])
+        let loader = try PluginLoader(
+            appRoot: tempURL,
+            installRoot: URL(filePath: "/usr/local/"),
+            logRoot: nil,
+            pluginDirectories: [tempURL],
+            pluginFactories: [factory]
+        )
+
+        #expect(loader.findPlugin(name: "cluster")?.name == "cluster")
+        #expect(loader.findPlugin(name: "k8s")?.name == "cluster")
+        // Only a CLI plugin answers to an alias.
+        #expect(loader.findPlugin(name: "svc") == nil)
+        #expect(loader.findPlugin(name: "kube") == nil)
+    }
+
+    @Test
+    func testPluginInstalledUnderAnAliasNameWins() async throws {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try FileManager.default.createDirectory(at: tempURL, withIntermediateDirectories: true)
+
+        let cluster = Plugin(
+            binaryURL: tempURL.appending(path: "cluster/bin/cluster"),
+            config: PluginConfig(abstract: "cluster", author: "Apple", servicesConfig: nil, aliases: ["k8s"]))
+        let k8s = Plugin(
+            binaryURL: tempURL.appending(path: "k8s/bin/k8s"),
+            config: PluginConfig(abstract: "k8s", author: "Apple", servicesConfig: nil))
+        let factory = try MockPluginFactory(tempURL: tempURL, plugins: ["cluster": cluster, "k8s": k8s])
+        let loader = try PluginLoader(
+            appRoot: tempURL,
+            installRoot: URL(filePath: "/usr/local/"),
+            logRoot: nil,
+            pluginDirectories: [tempURL],
+            pluginFactories: [factory]
+        )
+
+        #expect(loader.findPlugin(name: "k8s")?.name == "k8s")
+    }
+
+    @Test
     func testFindPluginForExecutableNoMatch() async throws {
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: tempURL) }

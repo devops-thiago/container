@@ -115,7 +115,8 @@ extension Plugin {
         guard !self.name.isEmpty else {
             return ""
         }
-        let namePadded = name.padding(toLength: padding, withPad: " ", startingAt: 0)
+        let names = ([name] + (config.aliases ?? [])).joined(separator: ", ")
+        let namePadded = names.padding(toLength: max(padding, names.count + 1), withPad: " ", startingAt: 0)
         return "  " + namePadded + self.config.abstract
     }
 }

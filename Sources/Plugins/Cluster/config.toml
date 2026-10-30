@@ -1,3 +1,4 @@
 abstract = "Local Kubernetes development cluster management (EXPERIMENTAL)"
 author = "Apple"
 version = 0.1
+aliases = ["k8s"]

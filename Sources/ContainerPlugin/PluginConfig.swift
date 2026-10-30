@@ -95,10 +95,16 @@ public struct PluginConfig: Sendable, Codable {
     /// that does not publish any XPC services.
     public let servicesConfig: ServicesConfig?
 
-    public init(abstract: String, author: String?, servicesConfig: ServicesConfig?) {
+    /// Other command names a CLI plugin answers to, beside its own. `container <alias> ...`
+    /// runs the plugin exactly as `container <name> ...` does. A plugin installed under the
+    /// alias's own name takes precedence over the alias.
+    public let aliases: [String]?
+
+    public init(abstract: String, author: String?, servicesConfig: ServicesConfig?, aliases: [String]? = nil) {
         self.abstract = abstract
         self.author = author
         self.servicesConfig = servicesConfig
+        self.aliases = aliases
     }
 }
 

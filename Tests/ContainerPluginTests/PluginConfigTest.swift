@@ -120,4 +120,31 @@ struct PluginConfigTest {
         let config = try PluginConfig(configURL: configURL)
         #expect(config == nil)
     }
+
+    @Test
+    func testCLIPluginConfigAliases() async throws {
+        let tempURL = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: .temporaryDirectory,
+            create: true
+        )
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        let configURL = tempURL.appending(path: "config.toml")
+        try """
+        abstract = "Local Kubernetes development cluster management"
+        author = "Apple"
+        version = 0.1
+        aliases = ["k8s"]
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+        let config = try #require(try PluginConfig(configURL: configURL))
+        #expect(config.isCLI)
+        #expect(config.aliases == ["k8s"])
+
+        try """
+        abstract = "No aliases"
+        author = "Apple"
+        """.write(to: configURL, atomically: true, encoding: .utf8)
+        #expect(try #require(try PluginConfig(configURL: configURL)).aliases == nil)
+    }
 }

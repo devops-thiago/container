@@ -255,8 +255,18 @@ extension PluginLoader {
         return plugins
     }
 
-    /// Locate a plugin with a specific name.
+    /// Locate a plugin with a specific name, or the CLI plugin that declares `name` as one of
+    /// its aliases. A plugin installed under `name` itself wins over an alias.
     public func findPlugin(name: String, log: Logger? = nil) -> Plugin? {
+        if let plugin = findPlugin(exactName: name, log: log) {
+            return plugin
+        }
+        return findPlugins().first { plugin in
+            plugin.config.isCLI && (plugin.config.aliases ?? []).contains(name)
+        }
+    }
+
+    private func findPlugin(exactName name: String, log: Logger?) -> Plugin? {
         do {
             for pluginDirectory in pluginDirectories {
                 for PluginFactory in pluginFactories {
