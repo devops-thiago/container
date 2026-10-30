@@ -65,7 +65,7 @@ extension Application {
                 sourceImage: sourceImage
             )
 
-            try await ImageLoad.load(from: FilePath(imageArchive.path()), log: log)
+            try await ImageLoad.load(from: FilePath(imageArchive.path(percentEncoded: false)), log: log)
         }
     }
 }
