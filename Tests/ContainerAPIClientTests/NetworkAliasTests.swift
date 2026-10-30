@@ -85,7 +85,9 @@ struct NetworkAliasTests {
             networks: [try Parser.network("devcontainer-net,alias=mysql"), try Parser.network("other")],
             dnsDomain: "test")
         #expect(attachments.map(\.options.hostname) == ["\(short).test.", short])
-        #expect(attachments[0].options.aliases == ["mysql"])
+        // Qualified with the default domain, as container 1.6.1 does; the guest's hosts file
+        // lists it bare as well.
+        #expect(attachments[0].options.aliases == ["mysql.test"])
         let builtin = try Utility.getAttachmentConfigurations(containerId: name, builtinNetworkId: "default", networks: [], dnsDomain: nil)
         #expect(builtin.map(\.options.hostname) == [short])
         // A name that fits is its own hostname, as before.

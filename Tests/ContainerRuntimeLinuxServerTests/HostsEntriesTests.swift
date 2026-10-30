@@ -112,6 +112,21 @@ struct HostsEntriesTests {
             ])
     }
 
+    @Test func aliasesQualifiedWithTheSearchDomainAreListedBareTooAndSubtreesNotAtAll() throws {
+        let database = try ContainerResource.Attachment(
+            network: "test", hostname: "shop-db-1", ipv4Address: CIDRv4("192.0.2.30/24"),
+            ipv4Gateway: IPv4Address("192.0.2.1"), ipv6Address: nil, macAddress: nil, aliases: ["mysql.test", ".shop.test", "db.internal"])
+        let entries = try RuntimeService.hostsEntries(
+            hostname: "shop-web-1", aliases: ["web.test", ".web.test"], primaryAddress: "192.0.2.10", peers: [database],
+            searchDomain: "test", extraHosts: [], gateway: nil)
+        #expect(
+            entries.map(\.rendered) == [
+                "127.0.0.1 localhost",
+                "192.0.2.10 shop-web-1 web.test web",
+                "192.0.2.30 shop-db-1 shop-db-1.test mysql.test mysql db.internal",
+            ])
+    }
+
     @Test func anExplicitHostStillWinsOverAPeersAlias() throws {
         let database = try ContainerResource.Attachment(
             network: "test", hostname: "shop-db-1", ipv4Address: CIDRv4("192.0.2.30/24"),

@@ -134,6 +134,27 @@ public actor RuntimeService {
     /// `.internal` is reserved for private use, so it can never collide with a real zone.
     static let defaultSearchDomain = "container.internal"
 
+    /// The names an attachment alias is listed under in a hosts file. A subtree alias
+    /// (`.gateway.test`) matches names below it, which a hosts file cannot hold, so it has
+    /// none. An alias qualified with the search domain, as a default DNS domain qualifies
+    /// `--network …,alias=db` into `db.test`, is listed bare too, so `db` resolves as Docker
+    /// resolves a service name.
+    static func hostsNames(forAlias alias: String, searchDomain: String) -> [String] {
+        let name = alias.hasSuffix(".") ? String(alias.dropLast()) : alias
+        guard !name.isEmpty, !name.hasPrefix(".") else { return [] }
+        let suffix = ".\(searchDomain)"
+        if name.count > suffix.count, name.lowercased().hasSuffix(suffix.lowercased()) {
+            return [name, String(name.dropLast(suffix.count))]
+        }
+        return [name]
+    }
+
+    /// `names` in order, each once.
+    static func uniqueNames(_ names: [String]) -> [String] {
+        var seen = Set<String>()
+        return names.filter { seen.insert($0).inserted }
+    }
+
     /// Build the guest's hosts entries without requiring a VM or real network.
     static func hostsEntries(
         hostname: String, aliases: [String] = [], primaryAddress: String?, peers: [Attachment], searchDomain: String,
@@ -146,7 +167,8 @@ public actor RuntimeService {
             hostsEntries.append(
                 Hosts.Entry(
                     ipAddress: primaryAddress,
-                    hostnames: [hostname] + aliases.filter { $0 != hostname },
+                    hostnames: Self.uniqueNames(
+                        [hostname] + aliases.flatMap { Self.hostsNames(forAlias: $0, searchDomain: searchDomain) }),
                 ))
         }
         // The containers already on this network, by bare name and qualified with the
@@ -159,8 +181,9 @@ public actor RuntimeService {
             hostsEntries.append(
                 Hosts.Entry(
                     ipAddress: peer.ipv4Address.address.description,
-                    hostnames: [peer.hostname, "\(peer.hostname).\(searchDomain)"]
-                        + peer.aliases.filter { $0 != peer.hostname },
+                    hostnames: Self.uniqueNames(
+                        [peer.hostname, "\(peer.hostname).\(searchDomain)"]
+                            + peer.aliases.flatMap { Self.hostsNames(forAlias: $0, searchDomain: searchDomain) }),
                 ))
         }
         // Docker Desktop's names for the Mac, on every network, unless an explicit host
