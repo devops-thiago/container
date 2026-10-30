@@ -160,7 +160,7 @@ container build -t local/ubuntu-machine:latest .
 container machine create local/ubuntu-machine:latest --name ubuntu
 ```
 
-On every boot, `container` provisions the container machine user by directly editing `/etc/passwd`, `/etc/group`, and `/etc/shadow` — no distro-specific tooling (`useradd`, `adduser`, etc.) required. This is idempotent and safe to re-run: it's a no-op for anything that already exists, and it reapplies passwordless sudo access each time in case anything in the image removed it.
+On each actual boot, the default setup creates or checks the requested account using `/etc/passwd`, `/etc/group`, and `/etc/shadow`. It refuses a different account with the same UID or username, and refuses to take over an existing home path when creating a new account. It reapplies the account’s passwordless sudo entry. Opening another shell on a running machine reuses that VM without repeating setup.
 
 By default the account matches your host user (username, uid, gid, and home directory `/home/<user>`). Override any of these at creation time:
 
@@ -169,3 +169,25 @@ container machine create --user devuser --uid 1500 --gid 1600 --home /srv/devhom
 ```
 
 `--user` accepts the format `name|uid[:gid]` (i.e. `name`, `uid`, `name:gid`, or `uid:gid` — the group must be numeric, since there's no existing account to resolve a group name against). `--uid`/`--gid` set the pieces `--user` didn't specify; any piece left fully unset falls back to the host user's.
+
+
+### Custom first-boot account setup
+
+An image can provide an executable `/etc/machine/create-user.sh` in place of the default account setup. It runs as root **inside the guest**, with these environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `CONTAINER_USER` | Requested account name |
+| `CONTAINER_UID` | Requested numeric user ID |
+| `CONTAINER_GID` | Requested numeric group ID |
+| `CONTAINER_HOME` | Requested guest home directory |
+| `CONTAINER_MACHINE_ID` | Machine name |
+| `CONTAINER_SHELL` | Shell resolved from the image’s account defaults, falling back to `/bin/bash` on Debian/Ubuntu or `/bin/sh` otherwise |
+
+The hook is responsible for creating the account and setting up its home with those IDs. Exit nonzero if setup fails. A failed or interrupted attempt can be retried, so the hook should handle any partial changes it made before failing.
+
+A successful initialization is retained with the machine’s data. While the requested account exists, the hook does not run again for another shell, a stop/start, or an engine update. Images that already supply the requested account retain the earlier behavior: first use accepts that account without running the hook. If the account is missing on a later boot, the hook runs again, as in earlier releases; the initialization marker alone does not replace the account check. A recorded failed hook attempt is retried even if it created the account before failing.
+
+An already initialized machine keeps its state when upgraded. Replacing its hook does not turn it into an upgrade script. Without a custom hook, the default account checks still run on each actual boot.
+
+The hook gets the machine’s existing guest mounts and permissions. It does not execute on macOS or grant access to additional host folders.

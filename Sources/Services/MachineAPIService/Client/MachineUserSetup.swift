@@ -20,7 +20,12 @@
 /// /etc/group, /etc/passwd, and /etc/shadow rather than relying on
 /// image-specific tools (useradd, adduser, etc.).
 ///
-/// Safe to run on every boot: user/shadow creation and home directory
+/// Custom images may supply `/etc/machine/create-user.sh` for first-time account
+/// setup. Existing accounts retain the legacy skip behavior; a missing account
+/// still runs the hook even if an old initialization marker exists. A failed hook
+/// is retried, including when it partially created the account before failing.
+///
+/// The default setup is safe to run on every boot: user/shadow creation and home directory
 /// population only happen once (guarded by looking the account up by both
 /// uid and username), while the sudoers entry is cheaply reasserted every
 /// run. If the image already has a *different* account using the requested
@@ -29,8 +34,9 @@
 /// resolving to the wrong account, creating a duplicate/ambiguous passwd
 /// entry, or recursively chowning pre-existing content that isn't ours.
 ///
-/// Expects CONTAINER_USER, CONTAINER_UID, CONTAINER_GID, and CONTAINER_HOME
-/// to be set in the environment.
+/// Expects CONTAINER_USER, CONTAINER_UID, CONTAINER_GID, CONTAINER_HOME, and
+/// CONTAINER_MACHINE_ID in the environment. Exports the resolved CONTAINER_SHELL
+/// for custom hooks. All execution occurs inside the guest.
 public enum MachineUserSetup {
     public static let script = #"""
         set -e
@@ -46,6 +52,34 @@ public enum MachineUserSetup {
                     && [ -n "${SHELL:-}" ] \
                     && echo "${SHELL}") || CONTAINER_SHELL=/bin/sh ;;
         esac
+        export CONTAINER_SHELL
+
+        custom_setup=/etc/machine/create-user.sh
+        initialized=/etc/.machine.initialized
+        if [ -e "${custom_setup}" ] || [ -L "${custom_setup}" ]; then
+            marker=$(cat "${initialized}" 2>/dev/null) || marker=
+            case "${marker}" in
+                ""|1|setup-pending) ;;
+                *)
+                    echo "container machine: unrecognized account setup state; leaving it unchanged" >&2
+                    exit 1 ;;
+            esac
+
+            # Older images may already supply the requested user. Preserve that
+            # first-use behavior, but retry a hook that created the user then failed.
+            if [ "${marker}" != "setup-pending" ] && id "${CONTAINER_USER}" >/dev/null 2>&1; then
+                printf '1\n' > "${initialized}"
+                exit 0
+            fi
+            if [ ! -f "${custom_setup}" ] || [ ! -x "${custom_setup}" ]; then
+                echo "container machine: custom account setup must be an executable file: ${custom_setup}" >&2
+                exit 1
+            fi
+            printf 'setup-pending\n' > "${initialized}"
+            "${custom_setup}"
+            printf '1\n' > "${initialized}"
+            exit 0
+        fi
 
         if ! getent group "${CONTAINER_GID}" >/dev/null 2>&1; then
             echo "${CONTAINER_USER}:x:${CONTAINER_GID}:" >> /etc/group
@@ -80,5 +114,6 @@ public enum MachineUserSetup {
         sudoers_file=$(echo "${CONTAINER_USER}" | tr '.' '_')
         echo "${CONTAINER_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${sudoers_file}"
         chmod 440 "/etc/sudoers.d/${sudoers_file}"
+        printf '1\n' > /etc/.machine.initialized
         """#
 }
