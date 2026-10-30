@@ -5,10 +5,10 @@
 # before handing off to the real system init:
 #
 #   1. Open a user shell when invoked with the "-s" flag.
-#      Looks up the current user's shell from /etc/passwd and execs into it,
-#      falling back to /bin/sh. If additional arguments follow "-s", runs them
-#      as a command via "<shell> -c <args>" instead of dropping into an
-#      interactive session.
+#      With no command, looks up the current user's shell from /etc/passwd
+#      and execs into it, falling back to /bin/sh. Otherwise executes the
+#      command with its original arguments. Shell expressions require an
+#      explicit shell command, such as `sh -c 'echo "$HOME"'`.
 #
 #   2. Boot the system when invoked with no flags.
 #      Sets the hostname to CONTAINER_MACHINE_ID and execs /sbin/init to hand
@@ -24,7 +24,7 @@ if [ "$1" = "-s" ]; then
     shift
     USER_SHELL=$(grep "^$(id -un):" /etc/passwd 2>/dev/null | cut -d: -f7)
     if [ $# -gt 0 ]; then
-        exec "${USER_SHELL:-/bin/sh}" -c "$*"
+        exec "$@"
     else
         exec "${USER_SHELL:-/bin/sh}"
     fi
