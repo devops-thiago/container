@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerPersistence
 import Foundation
 import SystemPackage
 
@@ -45,7 +46,8 @@ extension Application {
             let snapshot = try await client.get(id: id)
             let platform = snapshot.configuration.platform
             let sourceImage = try await ClientImage(description: snapshot.configuration.image).config(for: platform)
-            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            // The images helper loads this archive in a different sandbox from the CLI.
+            let tempDir = try PathUtils.sharedTemporaryDirectory().appendingPathComponent(UUID().uuidString)
 
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
             defer {

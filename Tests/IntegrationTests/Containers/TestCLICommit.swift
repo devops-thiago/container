@@ -51,8 +51,11 @@ struct TestCLICommitCommand {
                     try f.doStop(name)
                 }
 
+                let expectedState = stopBeforeCommit ? "stopped" : "running"
+                #expect(try f.inspectContainer(name).status.state == expectedState)
                 let result = try f.run(["commit", name, reference])
                 try result.check("commit failed")
+                #expect(try f.inspectContainer(name).status.state == expectedState)
                 #expect(result.output.trimmingCharacters(in: .whitespacesAndNewlines) == reference)
                 #expect(try f.isImagePresent(reference))
                 try assertCommittedImageMetadata(f, reference: reference)
