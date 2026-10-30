@@ -178,13 +178,15 @@ An alias that contains `*` is rejected. Use the leading-dot form instead, which 
 
 ### Rules for aliases
 
-* A name with a leading dot must be below a name that the same network attachment owns, which is its own hostname or one of its exact aliases. `gateway.test` with `.gateway.test` is allowed. `.apps.test` on a container that has no `apps.test` name is not.
+* A name with a leading dot must be below the attachment's hostname or an exact alias that no other container uses. `gateway.test` with `.gateway.test` is allowed. A private alias `apps.test` can also root `.apps.test`, but sharing `apps.test` does not grant the namespace below it.
 * The part after the leading dot of a subtree alias needs at least two labels. When a default DNS domain is configured, a name without a dot gets the domain, as described above. When none is configured, an exact alias with a single label, such as `db`, is kept as Docker keeps a service name: other containers on the network find it in their hosts files, but macOS never sends queries for it to the container DNS service. A subtree alias such as `.test` is rejected.
-* A hostname is unique across all containers, whether they are running or stopped. An exact alias may be shared, as Docker allows: containers that declare the same alias, such as the replicas of a Compose service, all answer to it, and a lookup returns every address. An alias may also equal another container's name.
+* A hostname is unique across all containers, whether they are running or stopped. An exact alias may be shared, as Docker allows: containers that declare the same alias, such as the replicas of a Compose service, all answer to it, and a lookup returns every address. An alias may also equal another container's name. An exact alias used as a private subtree root remains exclusive until its owner is removed.
 * A container can have at most 32 aliases for each network.
 * Aliases are fixed when the container is created.
 
 The exact name always wins over a subtree. If another container is named `db.gateway.test`, then `db.gateway.test` goes to that container, and the other names below `gateway.test` go to the gateway.
+
+Namespace ownership is checked again when saved containers start and when their addresses are restored. Conflicting saved claims are refused with an error; their configuration and workload data are retained. Malformed legacy aliases that were already omitted from DNS remain omitted.
 
 ### Things to know
 
