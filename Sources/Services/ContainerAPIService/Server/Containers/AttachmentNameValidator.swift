@@ -20,8 +20,8 @@ import DNSServer
 
 /// Validates the DNS names that the network attachments of a new container claim.
 ///
-/// A container claims the hostname of each attachment and the aliases it declares. Exact names must be
-/// unique across all containers, whether they are running or stopped. A subtree alias such as
+/// A container claims the hostname of each attachment, which must be unique across all containers,
+/// whether they are running or stopped. Its exact aliases may be shared, as Docker allows. A subtree alias such as
 /// `.example.test` must be rooted at a name that the same attachment owns, so a container cannot claim
 /// the part of the namespace below another container's name.
 enum AttachmentNameValidator {
@@ -40,13 +40,15 @@ enum AttachmentNameValidator {
     ///   - existing: The attachments of every existing container.
     /// - Throws: `ContainerizationError` with code `.exists` if a hostname or alias is already claimed,
     ///   and with code `.invalidArgument` if an alias is malformed or breaks a rule.
-    static func validate(networks: [AttachmentConfiguration], existing: [AttachmentConfiguration]) throws {
+    static func validate(
+        networks: [AttachmentConfiguration], existing: [AttachmentConfiguration], tolerant: Bool = false
+    ) throws {
+        // Only hostnames are exclusive. As Docker allows, an exact alias may be shared by several
+        // containers on a network, may be declared on several networks, and may be another
+        // container's hostname; a shared alias resolves to every container that holds it.
         var claimed = Set<String>()
         for attachment in existing {
             claimed.insert(AttachmentOptions.canonicalHostname(attachment.options.hostname))
-            for alias in attachment.options.aliases {
-                claimed.insert(Self.canonicalAlias(alias))
-            }
         }
 
         var conflictingHostnames = [String]()
@@ -57,43 +59,15 @@ enum AttachmentNameValidator {
             throw ContainerizationError(.exists, message: "hostname(s) already exist: \(conflictingHostnames)")
         }
 
-        let ownHostnames = Set(networks.map { AttachmentOptions.canonicalHostname($0.options.hostname) })
-        var ownAliases = Set<String>()
-        var conflictingAliases = [String]()
-        for attachment in networks {
-            let aliases = attachment.options.aliases
-            guard !aliases.isEmpty else {
-                continue
-            }
-
+        for attachment in networks where !attachment.options.aliases.isEmpty {
             // The rules that depend only on this attachment are shared with the network helper.
-            let rules: [DNSMatchRule]
             do {
                 let hostname = try? DNSName(AttachmentOptions.canonicalHostname(attachment.options.hostname))
-                rules = try AliasPolicy.validate(aliases: aliases, hostname: hostname, network: attachment.network)
+                _ = try AliasPolicy.validate(
+                    aliases: attachment.options.aliases, hostname: hostname, network: attachment.network, tolerant: tolerant)
             } catch let violation as AliasPolicy.Violation {
                 throw ContainerizationError(.invalidArgument, message: violation.description)
             }
-
-            // The rules that involve the other attachments and the other containers.
-            for (alias, rule) in zip(aliases, rules) {
-                guard case .exact = rule else {
-                    continue
-                }
-                let name = rule.description
-                guard !ownHostnames.contains(name) else {
-                    throw ContainerizationError(.invalidArgument, message: "alias \"\(alias)\" is already a hostname of the container")
-                }
-                guard ownAliases.insert(name).inserted else {
-                    throw ContainerizationError(.invalidArgument, message: "alias \"\(alias)\" is declared on more than one network")
-                }
-                if claimed.contains(name) {
-                    conflictingAliases.append(alias)
-                }
-            }
-        }
-        guard conflictingAliases.isEmpty else {
-            throw ContainerizationError(.exists, message: "alias(es) already exist: \(conflictingAliases)")
         }
     }
 
@@ -106,7 +80,9 @@ enum AttachmentNameValidator {
     /// - Throws: `ContainerizationError` with code `.invalidState` if the stored names break a rule.
     static func validateStored(id: String, networks: [AttachmentConfiguration]) throws {
         do {
-            try validate(networks: networks, existing: [])
+            // Tolerant: a container an earlier engine stored, with names it accepted then, must
+            // still start; a name that breaks today's rules is only left out of DNS.
+            try validate(networks: networks, existing: [], tolerant: true)
         } catch let error as ContainerizationError {
             throw ContainerizationError(
                 .invalidState,

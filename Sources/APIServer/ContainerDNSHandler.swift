@@ -32,13 +32,13 @@ struct ContainerDNSHandler: DNSHandler {
         guard let question = query.questions.first else {
             return nil
         }
-        let record: ResourceRecord?
+        let records: [ResourceRecord]
         switch question.type {
         case ResourceRecordType.host:
-            record = try await answerHost(question: question)
+            records = try await answerHost(question: question)
         case ResourceRecordType.host6:
             let result = try await answerHost6(question: question)
-            if result.record == nil && result.hostnameExists {
+            if result.records.isEmpty && result.hostnameExists {
                 // Return NODATA (noError with empty answers) when hostname exists but has no IPv6.
                 // This is required because musl libc has issues when A record exists but AAAA returns NXDOMAIN.
                 // musl treats NXDOMAIN on AAAA as "domain doesn't exist" and fails DNS resolution entirely.
@@ -51,7 +51,7 @@ struct ContainerDNSHandler: DNSHandler {
                     answers: []
                 )
             }
-            record = result.record
+            records = result.records
         default:
             return Message(
                 id: query.id,
@@ -62,7 +62,7 @@ struct ContainerDNSHandler: DNSHandler {
             )
         }
 
-        guard let record else {
+        guard !records.isEmpty else {
             return nil
         }
 
@@ -71,7 +71,7 @@ struct ContainerDNSHandler: DNSHandler {
             type: .response,
             returnCode: .noError,
             questions: query.questions,
-            answers: [record]
+            answers: records
         )
     }
 
@@ -97,34 +97,39 @@ struct ContainerDNSHandler: DNSHandler {
         return try await networkService.lookup(hostname: firstLabel) != nil ? firstLabel : nil
     }
 
-    private func answerHost(question: Question) async throws -> ResourceRecord? {
-        guard let hostname = try await registeredName(for: question),
-            let ipAllocation = try await networkService.lookup(hostname: hostname)
-        else {
-            return nil
+    /// One A record per attachment the name resolves to: an alias several containers share
+    /// answers with every address that holds it, as Docker's DNS does.
+    private func answerHost(question: Question) async throws -> [ResourceRecord] {
+        guard let hostname = try await registeredName(for: question) else {
+            return []
         }
-        let ipv4 = ipAllocation.ipv4Address.address.description
-        guard let ip = try? IPv4Address(ipv4) else {
-            throw DNSResolverError.serverError("failed to parse IP address: \(ipv4)")
+        return try await networkService.lookupAll(hostname: hostname).map { attachment in
+            let ipv4 = attachment.ipv4Address.address.description
+            guard let ip = try? IPv4Address(ipv4) else {
+                throw DNSResolverError.serverError("failed to parse IP address: \(ipv4)")
+            }
+            return HostRecord<IPv4Address>(name: question.name, ttl: ttl, ip: ip)
         }
-
-        return HostRecord<IPv4Address>(name: question.name, ttl: ttl, ip: ip)
     }
 
-    private func answerHost6(question: Question) async throws -> (record: ResourceRecord?, hostnameExists: Bool) {
-        guard let hostname = try await registeredName(for: question),
-            let ipAllocation = try await networkService.lookup(hostname: hostname)
-        else {
-            return (nil, false)
+    private func answerHost6(question: Question) async throws -> (records: [ResourceRecord], hostnameExists: Bool) {
+        guard let hostname = try await registeredName(for: question) else {
+            return ([], false)
         }
-        guard let ipv6Address = ipAllocation.ipv6Address else {
-            return (nil, true)
+        let attachments = try await networkService.lookupAll(hostname: hostname)
+        guard !attachments.isEmpty else {
+            return ([], false)
         }
-        let ipv6 = ipv6Address.address.description
-        guard let ip = try? IPv6Address(ipv6) else {
-            throw DNSResolverError.serverError("failed to parse IPv6 address: \(ipv6)")
+        let records: [ResourceRecord] = try attachments.compactMap { attachment in
+            guard let ipv6Address = attachment.ipv6Address else {
+                return nil
+            }
+            let ipv6 = ipv6Address.address.description
+            guard let ip = try? IPv6Address(ipv6) else {
+                throw DNSResolverError.serverError("failed to parse IPv6 address: \(ipv6)")
+            }
+            return HostRecord<IPv6Address>(name: question.name, ttl: ttl, ip: ip)
         }
-
-        return (HostRecord<IPv6Address>(name: question.name, ttl: ttl, ip: ip), true)
+        return (records, true)
     }
 }

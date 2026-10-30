@@ -412,6 +412,7 @@ let package = Package(
                 "ContainerRuntimeClient",
                 "ContainerTestSupport",
                 "ContainerXPC",
+                "DNSServer",
             ]
         ),
         .target(

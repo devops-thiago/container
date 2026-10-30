@@ -85,7 +85,9 @@ public actor DefaultNetworkService: NetworkService {
         let rules: [DNSMatchRule]
         do {
             let name = try? DNSName(AttachmentOptions.canonicalHostname(hostname))
-            rules = try AliasPolicy.validate(aliases: aliases, hostname: name, network: network.id)
+            // Tolerant: the API server validated a new container's aliases strictly at create,
+            // and a stored container's names that break today's rules are only left out of DNS.
+            rules = try AliasPolicy.validate(aliases: aliases, hostname: name, network: network.id, tolerant: true)
         } catch {
             throw ContainerizationError(.invalidArgument, message: "invalid aliases for \(hostname): \(error)")
         }
@@ -160,6 +162,13 @@ public actor DefaultNetworkService: NetworkService {
 
     @Sendable
     public func lookup(name: String) async throws -> NetworkMatch? {
+        try await lookupAll(name: name).first
+    }
+
+    /// Every attachment `name` resolves to on this network, first match first: a shared exact
+    /// alias resolves to each attachment holding it, as Docker's DNS answers.
+    @Sendable
+    public func lookupAll(name: String) async throws -> [NetworkMatch] {
         log.debug("enter", metadata: ["func": "\(#function)"])
         defer { log.debug("exit", metadata: ["func": "\(#function)"]) }
 
@@ -167,22 +176,20 @@ public actor DefaultNetworkService: NetworkService {
             throw ContainerizationError(.invalidState, message: "network \(network.id) must be running")
         }
 
-        guard let match = try await allocator.match(name: name) else {
-            return nil
-        }
-        // Invariant: hostname -> index if and only if index -> MAC address
-        guard let macAddress = macAddresses[match.index] else {
-            return nil
-        }
-
-        let attachment = try makeAttachment(hostname: match.hostname, index: match.index, macAddress: macAddress, status: status)
-        switch match.kind {
-        case .hostname:
-            return NetworkMatch(attachment: attachment, kind: .hostname)
-        case .alias:
-            return NetworkMatch(attachment: attachment, kind: .alias)
-        case .subtree(let baseLabelCount):
-            return NetworkMatch(attachment: attachment, kind: .subtree(baseLabelCount: baseLabelCount))
+        return try await allocator.matches(name: name).compactMap { match in
+            // Invariant: hostname -> index if and only if index -> MAC address
+            guard let macAddress = macAddresses[match.index] else {
+                return nil
+            }
+            let attachment = try makeAttachment(hostname: match.hostname, index: match.index, macAddress: macAddress, status: status)
+            switch match.kind {
+            case .hostname:
+                return NetworkMatch(attachment: attachment, kind: .hostname)
+            case .alias:
+                return NetworkMatch(attachment: attachment, kind: .alias)
+            case .subtree(let baseLabelCount):
+                return NetworkMatch(attachment: attachment, kind: .subtree(baseLabelCount: baseLabelCount))
+            }
         }
     }
 

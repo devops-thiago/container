@@ -16,6 +16,7 @@
 
 import ContainerResource
 import ContainerizationError
+import DNSServer
 import Testing
 
 @testable import ContainerAPIService
@@ -64,14 +65,12 @@ struct AttachmentNameValidatorTests {
         }
     }
 
-    @Test("A hostname that an existing container has as an exact alias is rejected")
-    func hostnameConflictsWithAlias() {
-        expectError(.exists, containing: "hostname(s) already exist") {
-            try validate(
-                [attachment("api.test.")],
-                existing: [attachment("foo.test.", aliases: ["api.test"])]
-            )
-        }
+    @Test("A hostname that an existing container has as an exact alias is accepted, as Docker accepts it")
+    func hostnameMatchesAnotherContainersAlias() throws {
+        try validate(
+            [attachment("api.test.")],
+            existing: [attachment("foo.test.", aliases: ["api.test"])]
+        )
     }
 
     @Test("A hostname below an existing subtree alias is accepted")
@@ -92,51 +91,45 @@ struct AttachmentNameValidatorTests {
         )
     }
 
-    @Test("An exact alias that matches an existing hostname is rejected")
-    func aliasConflictsWithHostname() {
-        expectError(.exists, containing: "alias(es) already exist") {
-            try validate(
-                [attachment("foo.test.", aliases: ["bar.test"])],
-                existing: [attachment("bar.test.")]
-            )
-        }
+    @Test("An exact alias that matches another container's hostname is accepted, as Docker accepts it")
+    func aliasMatchesAnotherContainersHostname() throws {
+        try validate(
+            [attachment("foo.test.", aliases: ["bar.test"])],
+            existing: [attachment("bar.test.")]
+        )
     }
 
-    @Test("An exact alias that matches an existing alias is rejected")
-    func aliasConflictsWithAlias() {
-        expectError(.exists, containing: "alias(es) already exist") {
-            try validate(
-                [attachment("foo.test.", aliases: ["API.test."])],
-                existing: [attachment("bar.test.", aliases: ["api.test"])]
-            )
-        }
+    @Test("An exact alias another container holds is shared, as Compose replicas share a service name")
+    func aliasSharedWithAnotherContainer() throws {
+        try validate(
+            [attachment("web-2", aliases: ["web"])],
+            existing: [attachment("web-1", aliases: ["web"])]
+        )
+        try validate(
+            [attachment("foo.test.", aliases: ["API.test."])],
+            existing: [attachment("bar.test.", aliases: ["api.test"])]
+        )
     }
 
-    @Test("An exact alias that matches the container's own hostname is rejected")
-    func aliasMatchesOwnHostname() {
-        expectError(.invalidArgument, containing: "already a hostname") {
-            try validate([attachment("foo.test.", aliases: ["foo.test"])])
-        }
+    @Test("An exact alias that repeats the container's own hostname is accepted and adds nothing")
+    func aliasMatchesOwnHostname() throws {
+        try validate([attachment("foo.test.", aliases: ["foo.test"])])
     }
 
-    @Test("An exact alias that matches the hostname of another attachment of the container is rejected")
-    func aliasMatchesOtherOwnHostname() {
-        expectError(.invalidArgument, containing: "already a hostname") {
-            try validate([
-                attachment("foo.test.", aliases: ["bar.test"]),
-                attachment("bar.test", network: "other"),
-            ])
-        }
+    @Test("An exact alias that matches the hostname of another attachment of the container is accepted")
+    func aliasMatchesOtherOwnHostname() throws {
+        try validate([
+            attachment("foo.test.", aliases: ["bar.test"]),
+            attachment("bar.test", network: "other"),
+        ])
     }
 
-    @Test("The same exact alias on two networks is rejected")
-    func aliasOnTwoNetworks() {
-        expectError(.invalidArgument, containing: "more than one network") {
-            try validate([
-                attachment("foo.test.", aliases: ["api.test"]),
-                attachment("foo", network: "other", aliases: ["api.test"]),
-            ])
-        }
+    @Test("The same exact alias on two networks is accepted, as --network-alias gives every network")
+    func aliasOnTwoNetworks() throws {
+        try validate([
+            attachment("foo.test.", aliases: ["api.test"]),
+            attachment("foo", network: "other", aliases: ["api.test"]),
+        ])
     }
 
     @Test("An exact alias with a single label is accepted, as Docker accepts a service name", arguments: ["api", "API.", "localhost"])
@@ -256,13 +249,11 @@ struct AttachmentNameValidatorTests {
     func existingIncludesEveryContainer() {
         expectError(.exists) {
             try validate(
-                [attachment("foo.test.", aliases: ["api.test"])],
+                [attachment("b.test.")],
                 existing: [attachment("a.test."), attachment("b.test.", aliases: ["api.test"])]
             )
         }
     }
-
-    // MARK: - Stored configurations
 
     @Test("A stored configuration that follows the rules is accepted")
     func storedValid() throws {
@@ -277,44 +268,52 @@ struct AttachmentNameValidatorTests {
         try AttachmentNameValidator.validateStored(id: "foo", networks: [attachment("foo.test.")])
     }
 
-    @Test("A stored subtree alias below a name the attachment does not own is rejected")
-    func storedUnownedSubtree() {
-        expectError(.invalidState, containing: "container victim") {
-            try AttachmentNameValidator.validateStored(
-                id: "victim",
-                networks: [attachment("victim.test.", aliases: [".com.example"])]
-            )
-        }
+    @Test("A stored subtree alias below a name the attachment does not own is left out, not honoured")
+    func storedUnownedSubtree() throws {
+        try AttachmentNameValidator.validateStored(
+            id: "victim",
+            networks: [attachment("victim.test.", aliases: [".com.example"])]
+        )
+        let rules = try AliasPolicy.validate(
+            aliases: [".com.example"], hostname: try DNSName("victim.test"), network: "default", tolerant: true)
+        #expect(rules.isEmpty)
     }
 
-    @Test("A stored alias that is not a valid rule is rejected and the error names the container")
-    func storedMalformed() {
-        expectError(.invalidState, containing: "invalid alias") {
-            try AttachmentNameValidator.validateStored(
-                id: "victim",
-                networks: [attachment("victim.test.", aliases: ["*.victim.test"])]
-            )
-        }
+    @Test("A stored alias an earlier engine accepted but today's rules do not still lets the container start")
+    func storedMalformed() throws {
+        try AttachmentNameValidator.validateStored(
+            id: "legacy",
+            networks: [attachment("legacy", aliases: ["*.victim.test", "_internal", "db"])]
+        )
+        let rules = try AliasPolicy.validate(
+            aliases: ["*.victim.test", "_internal", "db"], hostname: try DNSName("legacy"), network: "default", tolerant: true)
+        #expect(rules.map(\.description) == ["db"])
     }
 
-    @Test("A stored configuration with too many aliases is rejected")
-    func storedTooMany() {
+    @Test("A stored configuration with more aliases than a new one may have still starts")
+    func storedTooMany() throws {
         let aliases = (0...AttachmentNameValidator.maximumAliasesPerAttachment).map { "alias\($0).test" }
-        expectError(.invalidState, containing: "at most") {
-            try AttachmentNameValidator.validateStored(id: "victim", networks: [attachment("victim.test.", aliases: aliases)])
-        }
+        try AttachmentNameValidator.validateStored(id: "legacy", networks: [attachment("legacy.test.", aliases: aliases)])
     }
 
-    @Test("A stored alias that is also a hostname of the container is rejected")
-    func storedAliasIsHostname() {
-        expectError(.invalidState, containing: "already a hostname") {
-            try AttachmentNameValidator.validateStored(
-                id: "victim",
-                networks: [
-                    attachment("victim.test.", aliases: ["db.test"]),
-                    attachment("db.test", network: "other"),
-                ]
-            )
-        }
+    @Test("A stored alias that is also a hostname of the container is accepted")
+    func storedAliasIsHostname() throws {
+        try AttachmentNameValidator.validateStored(
+            id: "victim",
+            networks: [
+                attachment("victim.test.", aliases: ["db.test"]),
+                attachment("db.test", network: "other"),
+            ]
+        )
+    }
+
+    @Test("A 1.6.0-shaped stored configuration whose alias another container shares starts")
+    func storedSharedAlias() throws {
+        // As SiliconShip 1.6.0 stored a Compose service: a bare service name, on every network.
+        let stored = [
+            attachment("shop-web-2", aliases: ["web", "shop-web-2"]),
+            attachment("shop-web-2", network: "frontend", aliases: ["web"]),
+        ]
+        try AttachmentNameValidator.validateStored(id: "shop-web-2", networks: stored)
     }
 }

@@ -41,8 +41,10 @@ actor AttachmentAllocator {
 
     private let allocator: any AddressAllocator<UInt32>
     private var hostnames: [String: UInt32] = [:]
-    // Exact aliases, as the canonical alias mapped to the canonical hostname that owns it.
-    private var exactAliases: [String: String] = [:]
+    // Exact aliases, as the canonical alias mapped to the canonical hostnames that hold it, in the
+    // order they registered it. As Docker allows, several hosts may share an exact alias, and an
+    // alias may be another host's hostname.
+    private var exactAliases: [String: [String]] = [:]
     // Subtree aliases, as the base name mapped to the canonical hostname that owns it.
     private var subtreeAliases: [DNSName: String] = [:]
     // The aliases registered for each canonical hostname, so that they can be removed with it.
@@ -62,31 +64,22 @@ actor AttachmentAllocator {
     /// Allocate a network address for a host, or hand another holder the one it has, and register
     /// aliases that resolve to it.
     ///
-    /// The allocation fails without changing any state if an alias is already in use by another host
-    /// on this network, either as a hostname or as an alias.
+    /// An exact alias may be shared: as Docker allows, every host that declares it holds it, and
+    /// it may also be another host's hostname. The allocation fails without changing any state if a
+    /// subtree alias is already held by another host on this network.
     ///
-    /// - Throws: `ContainerizationError` with code `.exists` if a name is already in use.
+    /// - Throws: `ContainerizationError` with code `.exists` if a subtree alias is already in use.
     @discardableResult
     func allocate(hostname: String, aliases: [DNSMatchRule] = []) async throws -> UInt32 {
         let hostname = AttachmentOptions.canonicalHostname(hostname)
-
-        if hostnames[hostname] == nil, let owner = exactAliases[hostname], owner != hostname {
-            throw ContainerizationError(.exists, message: "hostname \(hostname) is already an alias of \(owner)")
-        }
 
         var newAliases = [DNSMatchRule]()
         for rule in aliases where !newAliases.contains(rule) {
             switch rule {
             case .exact:
                 let name = rule.description
-                if hostnames[name] != nil || name == hostname {
-                    throw ContainerizationError(.exists, message: "alias \(name) is already a hostname")
-                }
-                if let owner = exactAliases[name] {
-                    if owner == hostname {
-                        continue
-                    }
-                    throw ContainerizationError(.exists, message: "alias \(name) is already an alias of \(owner)")
+                if name == hostname || exactAliases[name]?.contains(hostname) == true {
+                    continue
                 }
             case .subtree(let base):
                 if let owner = subtreeAliases[base] {
@@ -115,7 +108,7 @@ actor AttachmentAllocator {
         for rule in newAliases {
             switch rule {
             case .exact:
-                exactAliases[rule.description] = hostname
+                exactAliases[rule.description, default: []].append(hostname)
             case .subtree(let base):
                 subtreeAliases[base] = hostname
             }
@@ -145,7 +138,11 @@ actor AttachmentAllocator {
         for rule in aliasesByHostname.removeValue(forKey: hostname) ?? [] {
             switch rule {
             case .exact:
-                exactAliases.removeValue(forKey: rule.description)
+                let name = rule.description
+                exactAliases[name]?.removeAll { $0 == hostname }
+                if exactAliases[name]?.isEmpty == true {
+                    exactAliases.removeValue(forKey: name)
+                }
             case .subtree(let base):
                 subtreeAliases.removeValue(forKey: base)
             }
@@ -160,27 +157,42 @@ actor AttachmentAllocator {
         hostnames[AttachmentOptions.canonicalHostname(hostname)]
     }
 
-    /// Find the attachment that a name resolves to.
+    /// Find the attachment that a name resolves to first.
     ///
-    /// A hostname wins over an exact alias, and an exact alias wins over a subtree alias. Among subtree
-    /// aliases the one with the longest base wins.
+    /// A hostname wins over an exact alias, and an exact alias wins over a subtree alias. Among the
+    /// hosts sharing an exact alias the first to register it wins. Among subtree aliases the one with
+    /// the longest base wins.
     func match(name: String) async throws -> Match? {
+        try await matches(name: name).first
+    }
+
+    /// Every attachment that a name resolves to, as Docker's DNS answers a shared alias with every
+    /// address that holds it: the host with that hostname first, then each host holding the name as
+    /// an exact alias, in registration order. Only when nothing has the exact name does the subtree
+    /// alias with the longest base answer, alone.
+    func matches(name: String) async throws -> [Match] {
         let name = AttachmentOptions.canonicalHostname(name)
+        var result = [Match]()
         if let index = hostnames[name] {
-            return Match(index: index, hostname: name, kind: .hostname)
+            result.append(Match(index: index, hostname: name, kind: .hostname))
         }
-        if let owner = exactAliases[name], let index = hostnames[owner] {
-            return Match(index: index, hostname: owner, kind: .alias)
+        for owner in exactAliases[name] ?? [] where owner != name {
+            if let index = hostnames[owner], !result.contains(where: { $0.index == index }) {
+                result.append(Match(index: index, hostname: owner, kind: .alias))
+            }
+        }
+        guard result.isEmpty else {
+            return result
         }
         guard let dnsName = try? DNSName(name) else {
-            return nil
+            return []
         }
         for base in DNSMatchRule.subtreeBases(of: dnsName) {
             if let owner = subtreeAliases[base], let index = hostnames[owner] {
-                return Match(index: index, hostname: owner, kind: .subtree(baseLabelCount: base.labels.count))
+                return [Match(index: index, hostname: owner, kind: .subtree(baseLabelCount: base.labels.count))]
             }
         }
-        return nil
+        return []
     }
 
     /// Every current allocation, so a joining container can learn its peers' names.

@@ -268,17 +268,21 @@ struct AttachmentAllocatorTest {
         #expect(try await allocator.lookup(hostname: "web.gw.test.") == nil)
     }
 
-    @Test func testAliasAlreadyUsedByAnotherHostIsRejectedWithoutChangingState() async throws {
+    @Test func testAnExactAliasIsSharedAndResolvesToEveryHolder() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
-        try await allocator.allocate(hostname: "one.test.", aliases: rules("api.test"))
+        let web1 = try await allocator.allocate(hostname: "web-1", aliases: rules("web"))
+        let web2 = try await allocator.allocate(hostname: "web-2", aliases: rules("web"))
+        #expect(web1 != web2)
 
-        await #expect(throws: (any Error).self) {
-            try await allocator.allocate(hostname: "two.test.", aliases: rules("fresh.test", "api.test"))
-        }
+        // As Docker's DNS answers a shared alias: every holder, first registered first.
+        #expect(try await allocator.matches(name: "web.").map(\.index) == [web1, web2])
+        #expect(try await allocator.match(name: "web")?.hostname == "web-1")
 
-        #expect(try await allocator.lookup(hostname: "two.test.") == nil)
-        #expect(try await allocator.match(name: "fresh.test.") == nil)
-        #expect(try await allocator.match(name: "api.test.")?.hostname == "one.test")
+        // A holder that goes leaves the others answering.
+        try await allocator.deallocate(hostname: "web-1")
+        #expect(try await allocator.matches(name: "web").map(\.hostname) == ["web-2"])
+        try await allocator.deallocate(hostname: "web-2")
+        #expect(try await allocator.matches(name: "web").isEmpty)
     }
 
     @Test func testSubtreeAlreadyUsedByAnotherHostIsRejected() async throws {
@@ -291,26 +295,25 @@ struct AttachmentAllocatorTest {
         #expect(try await allocator.lookup(hostname: "two.test.") == nil)
     }
 
-    @Test func testAliasMatchingAHostnameIsRejected() async throws {
+    @Test func testAnAliasMayBeAnotherHostsHostname() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
-        try await allocator.allocate(hostname: "one.test.")
+        let one = try await allocator.allocate(hostname: "one.test.")
+        let two = try await allocator.allocate(hostname: "two.test.", aliases: rules("one.test"))
 
-        await #expect(throws: (any Error).self) {
-            try await allocator.allocate(hostname: "two.test.", aliases: rules("one.test"))
-        }
-        await #expect(throws: (any Error).self) {
-            try await allocator.allocate(hostname: "three.test.", aliases: rules("three.test"))
-        }
+        // The hostname answers first, then the host holding it as an alias.
+        #expect(try await allocator.matches(name: "one.test.").map(\.index) == [one, two])
+        // An alias repeating the host's own hostname adds nothing.
+        let three = try await allocator.allocate(hostname: "three.test.", aliases: rules("three.test"))
+        #expect(try await allocator.matches(name: "three.test.").map(\.index) == [three])
     }
 
-    @Test func testHostnameMatchingAnAliasIsRejected() async throws {
+    @Test func testAHostnameMayBeAnotherHostsAlias() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
-        try await allocator.allocate(hostname: "one.test.", aliases: rules("api.test"))
+        let one = try await allocator.allocate(hostname: "one.test.", aliases: rules("api.test"))
+        let api = try await allocator.allocate(hostname: "api.test.")
 
-        await #expect(throws: (any Error).self) {
-            try await allocator.allocate(hostname: "api.test.")
-        }
-        #expect(try await allocator.match(name: "api.test.")?.hostname == "one.test")
+        #expect(try await allocator.match(name: "api.test.")?.hostname == "api.test")
+        #expect(try await allocator.matches(name: "api.test.").map(\.index) == [api, one])
     }
 
     @Test func testAllocatingAgainWithTheSameAliasesIsIdempotent() async throws {
