@@ -224,8 +224,8 @@ struct DockerCLICompatTests {
         let run: Application.ContainerRun = try parse(arguments)
         #expect(!run.proxySignals)
         #expect(try run.managementFlags.attachStreams == [.stdout, .stderr])
-        // Neither stream is an arch: the host's stays.
-        #expect(run.managementFlags.arch == Arch.hostArchitecture().rawValue)
+        // Neither stream is an arch: none is asked for, so it comes from the image.
+        #expect(run.managementFlags.arch == nil)
         #expect(run.image == "alpine:3.20")
         #expect(run.arguments.first == "-c")
         #expect(run.arguments.last == "-")
@@ -242,7 +242,7 @@ struct DockerCLICompatTests {
         let created: Application.ContainerCreate = try parse(["create", "--arch", "amd64", "alpine"])
         #expect(created.managementFlags.arch == "amd64")
         let plain: Application.ContainerRun = try parse(["run", "alpine"])
-        #expect(plain.managementFlags.arch == Arch.hostArchitecture().rawValue)
+        #expect(plain.managementFlags.arch == nil)
         #expect(try plain.managementFlags.attachStreams.isEmpty)
     }
 

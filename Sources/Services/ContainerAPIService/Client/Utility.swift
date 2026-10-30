@@ -394,7 +394,8 @@ public struct Utility {
         }
         return [
             AttachmentConfiguration(
-                network: builtinNetworkId, options: AttachmentOptions(hostname: fqdn ?? hostname, macAddress: nil, mtu: 1280, aliases: try qualifyAliases(combined([]), dnsDomain: dnsDomain)))
+                network: builtinNetworkId,
+                options: AttachmentOptions(hostname: fqdn ?? hostname, macAddress: nil, mtu: 1280, aliases: try qualifyAliases(combined([]), dnsDomain: dnsDomain)))
         ]
     }
 

@@ -57,7 +57,7 @@ struct PendingCopyStartTests {
             destination: "/data", entries: [.init(name: "entry", isDirectory: false, mode: 0o640)],
             requester: nil, noOverwriteDirNonDir: true)
         #expect(record.version == 2)
-        try queue.commit(upload, record: record, container: configuration.id)
+        _ = try queue.commit(upload, record: record, container: configuration.id)
         try await f.start(service, configuration.id)
         let runtime = try #require(f.lastRuntime)
         #expect(runtime.noOverwritePolicies == [true])

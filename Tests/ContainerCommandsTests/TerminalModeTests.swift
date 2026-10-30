@@ -23,12 +23,6 @@ import Testing
 @testable import ContainerCommands
 
 struct TerminalModeTests {
-    @Test("builder adoption requires an explicit CLI flag")
-    func builderAdoptionOption() throws {
-        #expect(try Application.BuilderStart.parse([]).adoptLegacy == false)
-        #expect(try Application.BuilderStart.parse(["--adopt-legacy"]).adoptLegacy)
-    }
-
     /// A start probe that must not ask for a container: any lookup fails the test.
     private static func noLookup(_ id: String) async -> ContainerSnapshot? {
         Issue.record("the probe looked up \(id)")

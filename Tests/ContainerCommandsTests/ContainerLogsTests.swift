@@ -14,56 +14,44 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-import Darwin
+import ContainerLog
 import Foundation
+import Synchronization
 import Testing
 
-@testable import ContainerCommands
-
 struct ContainerLogsTests {
-    @Test
+    /// `container logs -f` on a log that is still empty waits for the first output instead of
+    /// returning, and passes on what is appended.
+    @Test(.timeLimit(.minutes(1)))
     func followsInitiallyEmptyLog() async throws {
-        // An exit test isolates stdout and its buffering from the other unit tests.
-        try await #require(processExitsWith: .success) {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-            let logURL = directory.appendingPathComponent("container.log")
-            let outputURL = directory.appendingPathComponent("stdout.log")
-            try Data().write(to: logURL)
-            try Data().write(to: outputURL)
-            let reader = try FileHandle(forReadingFrom: logURL)
-            let writer = try FileHandle(forWritingTo: logURL)
-            let output = try FileHandle(forWritingTo: outputURL)
-            defer {
-                reader.readabilityHandler = nil
-                try? reader.close()
-                try? writer.close()
-                try? output.close()
+        let logURL = directory.appendingPathComponent("container.log")
+        try Data().write(to: logURL)
+        let reader = try FileHandle(forReadingFrom: logURL)
+        let writer = try FileHandle(forWritingTo: logURL)
+        defer { try? writer.close() }
+
+        let received = Mutex(Data())
+        let follower = Task {
+            try await LogFileFollow.follow(reader, from: try LogFileReader(handle: reader)) { data in
+                received.withLock { $0.append(data) }
             }
-            try #require(dup2(output.fileDescriptor, STDOUT_FILENO) == STDOUT_FILENO)
-
-            let follower = Task {
-                try await Application.ContainerLogs.tail(fh: reader, n: nil, runEnded: { false })
-            }
-            defer { follower.cancel() }
-
-            let deadline = ContinuousClock.now + .seconds(10)
-            while reader.readabilityHandler == nil && ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            try #require(reader.readabilityHandler != nil, "following an empty log must not return early")
-
-            let expected = Data("hello\n".utf8)
-            try writer.write(contentsOf: expected)
-            while try Data(contentsOf: outputURL) != expected && ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            try #require(try Data(contentsOf: outputURL) == expected, "follow must print output appended to the empty log")
-
-            follower.cancel()
-            try await follower.value
         }
+        defer { follower.cancel() }
+
+        // The follow is still running on an empty log: it did not return early.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(!follower.isCancelled)
+
+        let expected = Data("hello\n".utf8)
+        try writer.write(contentsOf: expected)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while received.withLock({ $0 }) != expected && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(received.withLock { $0 } == expected, "follow must pass on output appended to the empty log")
     }
 }

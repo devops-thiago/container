@@ -17,6 +17,7 @@
 import ArgumentParser
 import ContainerAPIClient
 import ContainerLog
+import ContainerPersistence
 import ContainerPlugin
 import ContainerVersion
 import ContainerizationError

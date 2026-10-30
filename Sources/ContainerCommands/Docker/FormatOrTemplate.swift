@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ArgumentParser
+import ContainerResource
 
 /// A `--format` value: one of the command's own formats, or a Docker template
 /// (`{{json .}}`), which tools that drive the Docker CLI pass. Help lists only the formats.
