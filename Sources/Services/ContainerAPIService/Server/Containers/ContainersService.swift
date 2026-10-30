@@ -2360,6 +2360,15 @@ public actor ContainersService {
         // Always try to delete the bundle directory, even if it's incomplete.
         do {
             try bundle.delete()
+            // Preserve diagnostics if the bundle could not be removed. This is still
+            // under the lifecycle lock, before another container can reuse the ID.
+            if let runtime = config?.runtimeHandler ?? self.containers[id]?.snapshot.configuration.runtimeHandler {
+                do {
+                    try self.pluginLoader.removeInstanceLog(pluginName: runtime, instanceId: id)
+                } catch {
+                    self.log.warning("failed to remove deleted container's helper log", metadata: ["id": "\(id)", "error": "\(error)"])
+                }
+            }
         } catch {
             self.log.warning(
                 "failed to delete bundle for container",
