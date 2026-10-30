@@ -375,6 +375,11 @@ public actor NetworksService {
                 // deletion is underway, do not throw anything now
                 do {
                     try await self.store.delete(id)
+                    do {
+                        try self.pluginLoader.removeInstanceLog(pluginName: serviceState.configuration.plugin, instanceId: id)
+                    } catch {
+                        self.log.warning("failed to remove deleted network's helper log", metadata: ["id": "\(id)", "error": "\(error)"])
+                    }
                 } catch {
                     self.log.error(
                         "failed to delete network from configuration store",

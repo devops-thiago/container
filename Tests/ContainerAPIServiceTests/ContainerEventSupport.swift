@@ -25,6 +25,7 @@ import ContainerizationError
 import Foundation
 import Logging
 import Synchronization
+import SystemPackage
 import XPC
 
 @testable import ContainerAPIService
@@ -355,9 +356,10 @@ final class EventServiceFixture: Sendable {
     var runtimeCount: Int { runtimes.withLock { $0.count } }
 
     func service(
-        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { _ in }, labelPolicy: ContainerLabelPolicy = .fixed
+        restartDelay: @escaping @Sendable (Duration) async throws -> Void = { _ in }, labelPolicy: ContainerLabelPolicy = .fixed,
+        logRoot: FilePath? = nil
     ) throws -> ContainersService {
-        let loader = try loader()
+        let loader = try loader(logRoot: logRoot)
         let hooks = self.hooks()
         return try ContainersService(
             appRoot: root, pluginLoader: loader, containerSystemConfig: ContainerSystemConfig(), log: log, restartDelay: restartDelay,
@@ -365,7 +367,7 @@ final class EventServiceFixture: Sendable {
     }
 
     /// A plugin loader that finds the fixture's runtime plugin, which is never executed.
-    func loader() throws -> PluginLoader {
+    func loader(logRoot: FilePath? = nil) throws -> PluginLoader {
         try FileManager.default.createDirectory(at: containers, withIntermediateDirectories: true)
         let plugins = root.appendingPathComponent("plugins")
         let plugin = plugins.appendingPathComponent(runtimeName)
@@ -384,7 +386,7 @@ final class EventServiceFixture: Sendable {
             """.utf8
         ).write(to: plugin.appendingPathComponent("config.toml"))
         return try PluginLoader(
-            appRoot: root, installRoot: root, logRoot: nil,
+            appRoot: root, installRoot: root, logRoot: logRoot,
             pluginDirectories: [plugins], pluginFactories: [DefaultPluginFactory(logger: log)])
     }
 
