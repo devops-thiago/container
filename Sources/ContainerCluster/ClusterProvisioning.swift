@@ -37,7 +37,7 @@ extension K8sClusters {
         ) async throws -> JoinCredentials?
 
     /// Provision one control plane and its workers with deterministic rollback. Each worker
-    /// waits for Ready, or only to register when `workersMustBeReady` is false (no CNI).
+    /// waits for Ready, or only to register for the explicitly selected no-CNI policy.
     ///
     /// A node is put in `attempted` before provisioning starts, because provisioning can
     /// create its container and then fail while booting it. Rollback runs workers-first and
@@ -47,7 +47,8 @@ extension K8sClusters {
         controlPlane: any NodeProvisioner,
         workers: [WorkerNode],
         initializeControlPlane: @escaping ControlPlaneInitializer,
-        workersMustBeReady: Bool = true,
+        readinessPolicy: ClusterReadinessPolicy = .ready,
+        persistReadiness: @escaping @Sendable (ClusterReadinessPolicy) async throws -> Void,
         finalizeCluster: @escaping @Sendable () async throws -> Void = {},
         log: Logger,
         progressUpdate: @escaping ProgressUpdateHandler = { _ in }
@@ -62,6 +63,9 @@ extension K8sClusters {
             let address = try await controlPlane.address(name: name, log: log)
             try Task.checkCancellation()
             let credentials = try await initializeControlPlane(name, address, !workers.isEmpty)
+            try Task.checkCancellation()
+
+            try await persistReadiness(readinessPolicy)
             try Task.checkCancellation()
 
             if !workers.isEmpty && credentials == nil {
@@ -87,7 +91,7 @@ extension K8sClusters {
                     log: log)
                 try Task.checkCancellation()
                 // Without a CNI a node never reports Ready; registering is all it can do.
-                if workersMustBeReady {
+                if readinessPolicy == .ready {
                     try await worker.provisioner.waitForReady(name: worker.name, log: log)
                 } else {
                     try await worker.provisioner.waitForRegistered(name: worker.name, log: log)

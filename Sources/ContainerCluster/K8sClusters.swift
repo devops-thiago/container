@@ -125,7 +125,8 @@ public enum K8sClusters {
         }
         // "NONE" installs no CNI: nodes stay NotReady until the caller installs one, so the
         // create waits for the API server and for workers to register, not for readiness.
-        let skipCNI = cniManifestPath?.uppercased() == ClusterHelper.noCNIName
+        let readinessPolicy = ClusterReadinessPolicy.forCreation(cniManifestPath: cniManifestPath)
+        let skipCNI = readinessPolicy == .registered
         if let cniManifestPath, !skipCNI {
             guard FileManager.default.fileExists(atPath: cniManifestPath) else {
                 throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
@@ -200,7 +201,10 @@ public enum K8sClusters {
                     nodeID: controlPlaneName, client: client)
                 return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
             },
-            workersMustBeReady: !skipCNI,
+            readinessPolicy: readinessPolicy,
+            persistReadiness: { policy in
+                try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
+            },
             finalizeCluster: {
                 if skipCNI {
                     await progressUpdate([.setDescription("Waiting for API server")])
@@ -245,65 +249,13 @@ public enum K8sClusters {
 
     /// Start every stopped node in a cluster, control plane first, then wait for the whole
     /// cluster to answer again.
-    public static func start(name: String = K8sClusters.defaultName, adoptLegacy: Bool = false, log: Logger) async throws {
-        let client = ContainerClient()
-        let controlPlane = try await client.get(id: name)
-        guard ClusterHelper.ownsNode(controlPlane.configuration.labels) else {
-            throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
-        }
-
-        let listed = try await client.list(
-            filters: ClusterHelper.nodeListFilters)
-        let workers = ClusterHelper.buildClusterRows(from: listed)
-            .filter { $0.clusterName == name && $0.snapshot.id != name }
-            .map(\.snapshot)
-            .sorted { $0.id < $1.id }
-
-        // Check every node before starting any. Labels alone never grant writable /sys;
-        // old nodes need the user's explicit CLI choice, bound to each observed incarnation.
-        try await client.prepareWritableSysfs(
-            [controlPlane] + workers, role: .kubernetes, adoptLegacy: adoptLegacy,
-            adoptionCommand: "container cluster start --name \(name) --adopt-legacy")
-        try Task.checkCancellation()
-        try await startNodeIfNeeded(controlPlane, client: client, log: log)
-        // Idempotent, and it heals clusters created before the loopback pin existed: their
-        // admin kubeconfigs still name whatever address the node had at kubeadm init.
-        try Task.checkCancellation()
-        try await ClusterHelper.pinAdminKubeconfigsToLoopback(nodeID: name, client: client)
-        for worker in workers {
-            try Task.checkCancellation()
-            try await startNodeIfNeeded(worker, client: client, log: log)
-        }
-        try Task.checkCancellation()
-        try await ClusterHelper.waitForReady(containerId: name, client: client, log: log)
-
-        do {
-            let fqdn = await ClusterHelper.detectFQDN(name: name)
-            let rawConfig = try await ClusterHelper.fetchConfig(
-                containerId: name, client: client, log: log)
-            let config = try await ClusterHelper.transformConfig(
-                rawConfig, containerId: name, fqdn: fqdn, client: client)
-            try ClusterHelper.mergeConfig(config, containerId: name, log: log)
-        } catch {
-            log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
-        }
-    }
-
-    private static func startNodeIfNeeded(
-        _ node: ContainerSnapshot,
-        client: ContainerClient,
-        log: Logger
+    public static func start(
+        name: String = K8sClusters.defaultName, adoptLegacy: Bool = false,
+        readiness: ClusterReadinessPolicy? = nil, log: Logger
     ) async throws {
-        guard ClusterHelper.ownsNode(node.configuration.labels) else {
-            throw ContainerizationError(.invalidArgument, message: "\(node.id) is not a cluster node")
-        }
-        guard node.status != .running else { return }
-        let io = try ProcessIO.create(tty: false, interactive: false, detach: true)
-        defer { try? io.close() }
-        let process = try await client.bootstrap(id: node.id, stdio: io.stdio)
-        try await process.start()
-        try io.closeAfterStart()
-        try await ClusterHelper.waitForNodeBooted(containerId: node.id, client: client, log: log)
+        try await start(
+            name: name, adoptLegacy: adoptLegacy, readiness: readiness,
+            operations: LiveClusterStartup(client: ContainerClient(), log: log), log: log)
     }
 
     /// Stop every node of a cluster, workers first and the control plane last, so no worker

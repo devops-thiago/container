@@ -115,6 +115,7 @@ struct ClusterProvisioningTests {
                 await events.append("init:\(name):\(address):\(hasWorkers)")
                 return .init(token: "token", caCertHash: "sha256:hash")
             },
+            persistReadiness: { _ in },
             log: log)
 
         #expect(
@@ -147,7 +148,8 @@ struct ClusterProvisioningTests {
             controlPlane: controlPlane,
             workers: workers,
             initializeControlPlane: { _, _, _ in .init(token: "token", caCertHash: "sha256:hash") },
-            workersMustBeReady: false,
+            readinessPolicy: .registered,
+            persistReadiness: { _ in },
             log: log)
 
         let recorded = await events.values
@@ -179,6 +181,7 @@ struct ClusterProvisioningTests {
                 initializeControlPlane: { _, _, _ in
                     .init(token: "token", caCertHash: "sha256:hash")
                 },
+                persistReadiness: { _ in },
                 log: log)
         }
 
