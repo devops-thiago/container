@@ -20,6 +20,32 @@ import Testing
 @testable import ContainerNetworkServer
 
 struct AttachmentAllocatorTest {
+    @Test("An exact alias cannot steal a foreign namespace", arguments: [false, true])
+    func foreignSubtreeRejectedWithoutAllocating(existingIsAlias: Bool) async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 2)
+        let owner = existingIsAlias ? "peer.test" : "gateway.test"
+        let address = try await allocator.allocate(hostname: owner, aliases: existingIsAlias ? rules("Gateway.Test.") : [])
+        await #expect(throws: (any Error).self) {
+            try await allocator.allocate(hostname: "attacker.test", aliases: rules("gateway.test", ".gateway.test"))
+        }
+        #expect(try await allocator.lookup(hostname: "attacker.test") == nil)
+        #expect(try await allocator.match(name: "child.gateway.test") == nil)
+        #expect(try await allocator.match(name: "gateway.test")?.index == address)
+        // A rejected claim must not consume the second address or leave an alias behind.
+        _ = try await allocator.allocate(hostname: "innocent.test")
+    }
+
+    @Test("Private subtree ownership cannot be invalidated by a later exact claim", arguments: [false, true])
+    func privateSubtreeRootRemainsExclusive(asHostname: Bool) async throws {
+        let allocator = try AttachmentAllocator(lower: 100, size: 2)
+        let address = try await allocator.allocate(hostname: "owner.test", aliases: rules("apps.test", ".apps.test"))
+        await #expect(throws: (any Error).self) {
+            try await allocator.allocate(hostname: asHostname ? "apps.test" : "peer.test", aliases: asHostname ? [] : rules("apps.test"))
+        }
+        #expect(try await allocator.match(name: "child.apps.test")?.index == address)
+        _ = try await allocator.allocate(hostname: "innocent.test")
+    }
+
     @Test func testAllocateSingleHostname() async throws {
         let allocator = try AttachmentAllocator(lower: 100, size: 10)
 

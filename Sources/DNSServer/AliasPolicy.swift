@@ -19,8 +19,35 @@
 /// The API server checks these rules when a container is created, again when a stored container is
 /// started, and the network helper checks them again when it registers the aliases. Each of those
 /// reads the aliases from somewhere that can be wrong or malicious, so none of them takes the aliases
-/// on faith. Rules that involve other containers, such as a name that is already taken, are not here.
+/// on faith. Namespace ownership is checked separately against the caller's current reservations.
 public enum AliasPolicy {
+    /// An exact alias may be shared, but sharing it does not delegate the namespace below it.
+    /// A hostname owns its subtree; a different exact name can root a subtree only while it
+    /// remains exclusive. Check both directions before changing any reservations.
+    public static func validateNamespace(
+        hostname: DNSName?, aliases: [DNSMatchRule],
+        foreignExactName: (DNSName) -> Bool,
+        foreignSubtree: (DNSName) -> Bool,
+        foreignPrivateSubtree: (DNSName) -> Bool
+    ) throws {
+        func checkExact(_ name: DNSName) throws {
+            if foreignPrivateSubtree(name) {
+                throw Violation("name \(name.pqdn) is the exclusive root of another attachment's subtree alias")
+            }
+        }
+        if let hostname { try checkExact(hostname) }
+        for rule in aliases {
+            switch rule {
+            case .exact(let name):
+                try checkExact(name)
+            case .subtree(let base):
+                if foreignSubtree(base) || (base != hostname && foreignExactName(base)) {
+                    throw Violation("subtree alias .\(base.pqdn) cannot claim a name used by another attachment")
+                }
+            }
+        }
+    }
+
     /// The most aliases that a single attachment may declare.
     public static let maximumAliasesPerAttachment = 32
 
