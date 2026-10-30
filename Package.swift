@@ -860,6 +860,17 @@ let package = Package(
             ],
             path: "Sources/Services/MachineAPIService/Client"
         ),
+        .testTarget(
+            name: "MachineAPIServiceTests",
+            dependencies: [
+                "MachineAPIClient", "MachineAPIService", "ContainerAPIClient", "ContainerResource",
+                "ContainerPersistence", "ContainerXPC",
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationOCI", package: "containerization"),
+                .product(name: "SystemPackage", package: "swift-system"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
         .target(
             name: "MachineAPIService",
             dependencies: [

@@ -31,14 +31,19 @@ public struct ContainerClient: Sendable {
     private static let serviceIdentifier = ServiceIdentity.apiServerService
 
     private let xpcClient: XPCClient
+    private let makeGrantAwareClient: @Sendable () -> XPCClient
 
     /// Creates a new container client with a connection to the API server.
     public init() {
-        self.xpcClient = XPCClient(service: Self.serviceIdentifier)
+        self.init(xpcClient: XPCClient(service: Self.serviceIdentifier))
     }
 
-    init(xpcClient: XPCClient) {
+    init(
+        xpcClient: XPCClient,
+        makeGrantAwareClient: @escaping @Sendable () -> XPCClient = { XPCClient(service: ServiceIdentity.apiServerService) }
+    ) {
         self.xpcClient = xpcClient
+        self.makeGrantAwareClient = makeGrantAwareClient
     }
 
     @discardableResult
@@ -53,7 +58,7 @@ public struct ContainerClient: Sendable {
         // A grant-capable operation owns its connection. Local task cancellation can therefore
         // close exactly this request without disrupting other calls on the reusable client; the
         // API server observes that connection loss and cancels HostDirectoryGrants in turn.
-        let client = XPCClient(service: Self.serviceIdentifier)
+        let client = makeGrantAwareClient()
         let transport = GrantAwareTransport(
             send: { message, timeout in
                 try await client.send(message, responseTimeout: timeout)

@@ -92,27 +92,63 @@ public struct MachinesHarness: Sendable {
         return message.reply()
     }
 
+    private func bootInputs(_ message: XPCMessage) throws -> (id: String?, env: [String: String], bookmarks: [Data]) {
+        let id = message.string(key: MachineKeys.id.rawValue)
+        let env =
+            try message.dataNoCopy(key: MachineKeys.dynamicEnv.rawValue).map {
+                try JSONDecoder().decode([String: String].self, from: $0)
+            } ?? [:]
+        let bookmarks =
+            try message.dataNoCopy(key: MachineKeys.hostDirectoryBookmarks.rawValue).map {
+                try JSONDecoder().decode([Data].self, from: $0)
+            } ?? []
+        return (id, env, bookmarks)
+    }
+
     @Sendable
     public func boot(_ message: XPCMessage) async throws -> XPCMessage {
-        let id = message.string(key: MachineKeys.id.rawValue)
-
-        var dynamicEnv: [String: String] = [:]
-        if let dynamicEnvData = message.dataNoCopy(key: MachineKeys.dynamicEnv.rawValue) {
-            dynamicEnv = try JSONDecoder().decode([String: String].self, from: dynamicEnvData)
-        }
-
-        var bookmarks: [Data] = []
-        if let data = message.dataNoCopy(key: MachineKeys.hostDirectoryBookmarks.rawValue) {
-            bookmarks = try JSONDecoder().decode([Data].self, from: data)
-        }
-
-        let snapshot = try await service.boot(
-            id: id, dynamicEnv: dynamicEnv, hostDirectoryBookmarks: bookmarks)
-        let data = try JSONEncoder().encode(snapshot)
-
+        let inputs = try bootInputs(message)
+        let snapshot = try await service.boot(id: inputs.id, dynamicEnv: inputs.env, hostDirectoryBookmarks: inputs.bookmarks)
         let reply = message.reply()
-        reply.set(key: MachineKeys.snapshot.rawValue, value: data)
+        reply.set(key: MachineKeys.snapshot.rawValue, value: try JSONEncoder().encode(snapshot))
         return reply
+    }
+
+    @Sendable
+    public func bootForSetup(_ message: XPCMessage, session: XPCServerSession) async throws -> XPCMessage {
+        let inputs = try bootInputs(message)
+        let result = try await service.bootForSetup(id: inputs.id, dynamicEnv: inputs.env, hostDirectoryBookmarks: inputs.bookmarks)
+        if case .started(_, let lease) = result {
+            let service = self.service
+            await session.onDisconnect { await service.stopAfterSetupDisconnect(lease) }
+        }
+        let reply = message.reply()
+        reply.set(key: MachineKeys.bootResult.rawValue, value: try JSONEncoder().encode(result))
+        return reply
+    }
+
+    @Sendable
+    public func completeSetup(_ message: XPCMessage) async throws -> XPCMessage {
+        let lease = try setupLease(message)
+        let snapshot = try await service.completeSetup(lease)
+        let reply = message.reply()
+        reply.set(key: MachineKeys.snapshot.rawValue, value: try JSONEncoder().encode(snapshot))
+        return reply
+    }
+
+    @Sendable
+    public func stopSetup(_ message: XPCMessage) async throws -> XPCMessage {
+        let stopped = try await service.stopSetup(setupLease(message))
+        let reply = message.reply()
+        reply.set(key: MachineKeys.stopped.rawValue, value: stopped)
+        return reply
+    }
+
+    private func setupLease(_ message: XPCMessage) throws -> MachineSetupLease {
+        guard let data = message.dataNoCopy(key: MachineKeys.setupLease.rawValue) else {
+            throw ContainerizationError(.invalidArgument, message: "machine setup lease is required")
+        }
+        return try JSONDecoder().decode(MachineSetupLease.self, from: data)
     }
 
     @Sendable
