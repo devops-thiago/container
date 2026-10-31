@@ -23,7 +23,8 @@ import Testing
 @testable import ContainerRuntimeLinuxServer
 
 /// Time that moves only when the monitor sleeps or a check runs, and a script of what the
-/// checks come to. Nothing in these tests waits on a real clock or a guest.
+/// checks come to. Scheduling tests use this clock; shutdown tests use controlled
+/// gates and bounded watchdogs, without a guest.
 private final class Script: Sendable {
     private struct State {
         var now: Duration = .zero
@@ -169,14 +170,17 @@ struct HealthMonitorTests {
         await monitor.stop()
     }
 
-    @Test func stopAnswersEveryWaitAndDropsTheCheckUnderWay() async throws {
+    @Test func stopAnswersWaitersAndDrainsTheCheckForEveryCaller() async throws {
         let gate = Gate()
         let started = Gate()
+        let cleaned = Mutex(false)
+        let returned = Mutex<[Bool]>([])
         let made = HealthMonitor(
             check: HealthCheckConfiguration(test: ["CMD", "sleep", "60"]),
             probe: { _, _ in
                 await started.open()
                 await gate.wait()
+                cleaned.withLock { $0 = true }
                 return pass
             },
             sleep: { _ in },
@@ -185,12 +189,29 @@ struct HealthMonitorTests {
         await monitor.start()
         async let waited = monitor.wait(after: 0)
         await started.wait()
-        await monitor.stop()
+        let firstStop = Task {
+            await monitor.stop()
+            returned.withLock { $0.append(cleaned.withLock { $0 }) }
+        }
         let answer = await waited
         #expect(answer.finished)
         #expect(answer.generation == 0)
+        let secondStop = Task {
+            await monitor.stop()
+            returned.withLock { $0.append(cleaned.withLock { $0 }) }
+        }
+        // Neither stop may return while the probe is deliberately held in cleanup.
+        // The bound detects an early return; it does not control production timing.
+        let deadline = ContinuousClock.now + .seconds(1)
+        while returned.withLock({ $0.isEmpty }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(returned.withLock { $0.isEmpty }, "stop returned before the probe was drained")
         await gate.open()
-        // The check comes back after the stop, and is not recorded.
+        await firstStop.value
+        await secondStop.value
+        #expect(returned.withLock { $0 == [true, true] }, "every stop caller must join probe cleanup")
+        // A drained canceled check is not recorded as workload health.
         let later = await monitor.wait(after: 0)
         #expect(later.finished)
         #expect(later.generation == 0)
@@ -215,6 +236,91 @@ struct HealthMonitorTests {
 }
 
 struct HealthProbeTests {
+    @Test func cancellationDuringTimeoutJoinsTheSameUncancelledKill() async {
+        let killing = Gate()
+        let finishKill = Gate()
+        let killed = Gate()
+        let calls = Mutex(0)
+        let task = Task {
+            try await HealthProbe.wait(
+                timeout: .seconds(30),
+                sleep: { _ in },
+                for: { () async -> Int32 in
+                    await killed.wait()
+                    return 137
+                },
+                onTimeout: {
+                    calls.withLock { $0 += 1 }
+                    await killing.open()
+                    await finishKill.wait()
+                    #expect(!Task.isCancelled, "stopping the monitor canceled an in-flight kill RPC")
+                    await killed.open()
+                })
+        }
+        await killing.wait()
+        task.cancel()
+        await finishKill.open()
+        let result = await task.result
+        #expect(calls.withLock { $0 == 1 }, "timeout and cancellation killed the same probe twice")
+        if case .failure(let error) = result { #expect(error is CancellationError) } else { Issue.record("cancellation was reported as a health timeout") }
+    }
+
+    @Test func anOrdinaryWaitErrorIsPreservedWithoutKillingAnUnrelatedProcess() async {
+        enum ProbeFailure: Error { case waitFailed }
+        do {
+            let _: Int32? = try await HealthProbe.wait(
+                timeout: .seconds(30),
+                sleep: { try await Task.sleep(for: $0) },
+                for: { throw ProbeFailure.waitFailed },
+                onTimeout: { Issue.record("an ordinary wait failure must not invoke timeout cleanup") })
+            Issue.record("the wait failure was swallowed")
+        } catch { #expect(error is ProbeFailure) }
+    }
+
+    @Test func cancellationKillsAndReapsTheCheckBeforeReturning() async {
+        let started = Gate()
+        let sleeping = Gate()
+        let killed = Gate()
+        let killCalls = Mutex(0)
+        let reaped = Mutex(false)
+        let rescued = Mutex(false)
+        let task = Task {
+            try await HealthProbe.wait(
+                timeout: .seconds(30),
+                sleep: { duration in
+                    await sleeping.open()
+                    try await Task.sleep(for: duration)
+                },
+                for: { () async -> Int32 in
+                    await started.open()
+                    await killed.wait()
+                    reaped.withLock { $0 = true }
+                    return 137
+                },
+                onTimeout: {
+                    #expect(!Task.isCancelled, "cancellation must not cancel the guest kill RPC")
+                    killCalls.withLock { $0 += 1 }
+                    await killed.open()
+                })
+        }
+        await started.wait()
+        await sleeping.wait()
+        task.cancel()
+        // Release even the broken implementation, so its regression fails rather than hangs.
+        let watchdog = Task {
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            rescued.withLock { $0 = true }
+            await killed.open()
+        }
+        let result = await task.result
+        watchdog.cancel()
+        await watchdog.value
+        #expect(!rescued.withLock { $0 }, "canceling a health wait never killed its process")
+        #expect(killCalls.withLock { $0 == 1 })
+        #expect(reaped.withLock { $0 })
+        if case .failure(let error) = result { #expect(error is CancellationError) } else { Issue.record("cancellation unexpectedly returned a health result") }
+    }
+
     @Test func aCheckThatEndsInTimeReportsItsCode() async throws {
         let code = try await HealthProbe.wait(
             timeout: .seconds(30),
