@@ -1300,8 +1300,8 @@ public actor RuntimeService {
 
     private func stopHealthMonitor() async {
         guard let monitor = self.healthMonitor else { return }
-        self.healthMonitor = nil
         await monitor.stop()
+        if self.healthMonitor === monitor { self.healthMonitor = nil }
     }
 
     /// Run one health check in the guest, as `docker exec` would run it: the container's
@@ -1328,10 +1328,10 @@ public actor RuntimeService {
         }
         let outcome: HealthMonitor.Outcome
         do {
-            try await process.start()
             let status = try await HealthProbe.wait(
                 timeout: timeout,
                 sleep: { try await Task.sleep(for: $0) },
+                start: { try await process.start() },
                 for: { try await process.wait() },
                 onTimeout: { try? await process.kill(.kill) })
             if let status {
@@ -1342,11 +1342,15 @@ public actor RuntimeService {
         } catch {
             outcome = .init(exitCode: -1, output: "the health check could not be run: \(error)")
         }
-        do {
-            try await process.delete()
-        } catch {
-            self.log.debug("could not delete a health check process", metadata: ["error": "\(error)"])
-        }
+        // A canceled monitor still owns this process until its guest record is gone.
+        // Join an uncanceled cleanup task before allowing container teardown to start.
+        await Task {
+            do {
+                try await process.delete()
+            } catch {
+                self.log.debug("could not delete a health check process", metadata: ["error": "\(error)"])
+            }
+        }.value
         return outcome
     }
 

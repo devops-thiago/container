@@ -83,13 +83,16 @@ actor HealthMonitor {
         task = Task { await self.run() }
     }
 
-    /// Stop checking, and answer every wait. A check under way is abandoned: whatever it
-    /// comes to is not recorded, as the container is going away.
-    func stop() {
+    /// Stop checking and answer every health wait immediately, then drain the probe.
+    /// Container teardown must not race the probe's deletion of its guest process.
+    func stop() async {
         finished = true
-        task?.cancel()
-        task = nil
+        let stopping = task
+        stopping?.cancel()
         resumeWaiters()
+        // Retain the same task until it finishes: concurrent stops must join it too.
+        await stopping?.value
+        task = nil
     }
 
     /// Return once more than `generation` checks have been recorded, or the monitor has
@@ -146,34 +149,67 @@ enum HealthProbe {
     /// Wait for `wait`, unless `timeout` passes first. Then `onTimeout` runs, which is to
     /// kill the check, and the wait goes on until the check has ended, so that dying checks
     /// do not pile up. Returns nil when the timeout came first, whatever the killed check
-    /// then reports.
+    /// then reports. Cancellation also kills and drains the check, then throws
+    /// CancellationError. A timeout racing cancellation shares the same kill operation.
+    /// In-flight startup finishes before cancellation can kill the probe; interrupting
+    /// guest creation can leave a host handle with no guest record to delete. Startup
+    /// errors still propagate, and the timeout starts after setup, as before.
     static func wait<T: Sendable>(
         timeout: Duration,
         sleep: @escaping HealthMonitor.Sleep,
+        start: @escaping @Sendable () async throws -> Void = {},
         for wait: @escaping @Sendable () async throws -> T,
         onTimeout: @escaping @Sendable () async -> Void
     ) async throws -> T? {
+        try await Task { try await start() }.value
         let timedOut = TimeoutFlag()
+        let termination = Termination()
         return try await withThrowingTaskGroup(of: T?.self) { group in
             group.addTask { try await wait() }
             group.addTask {
                 try await sleep(timeout)
                 timedOut.set()
-                await onTimeout()
+                await termination.run(onTimeout)
                 return nil
             }
             let first: T?
+            var failure: (any Error)?
             do {
                 first = try await group.next() ?? nil
-            } catch  where timedOut.isSet {
+            } catch {
                 first = nil
+                failure = error
             }
+            if Task.isCancelled {
+                group.cancelAll()
+                // A guest wait may ignore task cancellation. Kill and reap it before
+                // leaving the group, joining a timeout's kill if it already started.
+                await termination.run(onTimeout)
+                throw CancellationError()
+            }
+            if let failure, !timedOut.isSet { throw failure }
             if timedOut.isSet {
                 while (try? await group.next()) != nil {}
                 return nil
             }
             group.cancelAll()
             return first
+        }
+    }
+
+    /// A kill RPC must survive cancellation and run only once, even when timeout and
+    /// shutdown meet. Every caller joins the same task before the probe can be deleted.
+    private final class Termination: Sendable {
+        private let pending = Mutex<Task<Void, Never>?>(nil)
+
+        func run(_ action: @escaping @Sendable () async -> Void) async {
+            let task = pending.withLock { pending in
+                if let pending { return pending }
+                let task = Task { await action() }
+                pending = task
+                return task
+            }
+            await task.value
         }
     }
 
