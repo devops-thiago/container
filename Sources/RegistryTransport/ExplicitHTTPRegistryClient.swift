@@ -229,6 +229,23 @@ public final class ExplicitHTTPRegistryClient: ContentClient, @unchecked Sendabl
         return Descriptor(mediaType: mediaType, digest: digest, size: size)
     }
 
+    /// Discover runnable platforms through the same bounded, origin-confined transport
+    /// used for an explicitly selected HTTP pull. No image layers are fetched.
+    public func platforms(name: String, tag: String) async throws -> [Platform] {
+        let root = try await resolve(name: name, tag: tag)
+        switch root.mediaType {
+        case MediaTypes.index, MediaTypes.dockerManifestList:
+            let index: Index = try await fetch(name: name, descriptor: root)
+            return index.runnablePlatforms
+        case MediaTypes.imageManifest, MediaTypes.dockerManifest:
+            let manifest: Manifest = try await fetch(name: name, descriptor: root)
+            let config: ContainerizationOCI.Image = try await fetch(name: name, descriptor: manifest.config)
+            return [Platform(arch: config.architecture, os: config.os, osFeatures: config.osFeatures, variant: config.variant)]
+        default:
+            throw ContainerizationError(.unsupported, message: "unsupported media type \(root.mediaType) for \(root.digest)")
+        }
+    }
+
     public func fetch<T: Codable>(name: String, descriptor: Descriptor) async throws -> T {
         let data = try await fetchData(name: name, descriptor: descriptor)
         return try JSONDecoder().decode(T.self, from: data)
