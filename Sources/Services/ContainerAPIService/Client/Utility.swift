@@ -113,7 +113,8 @@ public struct Utility {
         log: Logger
     ) async throws -> (ContainerConfiguration, Kernel, String?) {
         let scheme = try RequestScheme(registry.scheme)
-        let candidates = try await ClientImage.platforms(reference: image, scheme: scheme, containerSystemConfig: containerSystemConfig)
+        let (candidates, localImage) = try await imageCandidatesForCreate(
+            policy: imageFetch.pull, reference: image, scheme: scheme, config: containerSystemConfig)
         let platform = try management.platform.map(Parser.platform(from:))
 
         let requestedPlatform = try PlatformResolver.resolve(
@@ -131,13 +132,18 @@ public struct Utility {
         ])
         let taskManager = ProgressTaskCoordinator()
         let fetchTask = await taskManager.startTask()
-        let img = try await imageForCreate(
-            policy: imageFetch.pull,
-            request: ImageRequest(
-                reference: image, platform: requestedPlatform, scheme: scheme,
-                config: containerSystemConfig,
-                progress: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
-                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads))
+        let img: ClientImage
+        if let localImage {
+            img = localImage
+        } else {
+            img = try await imageForCreate(
+                policy: imageFetch.pull,
+                request: ImageRequest(
+                    reference: image, platform: requestedPlatform, scheme: scheme,
+                    config: containerSystemConfig,
+                    progress: ProgressTaskCoordinator.handler(for: fetchTask, from: progressUpdate),
+                    maxConcurrentDownloads: imageFetch.maxConcurrentDownloads))
+        }
 
         // Unpack a fetched image before use
         await progressUpdate([

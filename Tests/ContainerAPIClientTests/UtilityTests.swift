@@ -254,8 +254,13 @@ struct UtilityTests {
         var localError: ContainerizationError?
         var localConfig: ContainerSystemConfig?
         var progressCount = 0
+        var indexError: ContainerizationError?
+        var discoveryScheme: RequestScheme?
 
-        init(localError: ContainerizationError? = nil) { self.localError = localError }
+        init(localError: ContainerizationError? = nil, indexError: ContainerizationError? = nil) {
+            self.localError = localError
+            self.indexError = indexError
+        }
 
         nonisolated static func image(_ digest: String) -> ClientImage {
             ClientImage(
@@ -278,8 +283,23 @@ struct UtilityTests {
 
         func progress() { progressCount += 1 }
 
+        func platforms(_ reference: String, _ scheme: RequestScheme, _ config: ContainerSystemConfig) -> [Platform] {
+            calls.append("platforms:" + reference)
+            discoveryScheme = scheme
+            localConfig = config
+            return [.init(arch: "arm64", os: "linux")]
+        }
+
+        func localPlatforms(_ image: ClientImage) throws -> [Platform] {
+            calls.append("index:" + image.digest)
+            if let indexError { throw indexError }
+            return [.init(arch: "arm64", os: "linux"), .init(arch: "amd64", os: "linux")]
+        }
+
         nonisolated var client: Utility.ImageClient {
-            .init(pull: { await self.remote("pull", $0) }, fetch: { await self.remote("fetch", $0) }, get: { try await self.local($0, $1) })
+            .init(
+                pull: { await self.remote("pull", $0) }, fetch: { await self.remote("fetch", $0) }, get: { try await self.local($0, $1) },
+                platforms: { await self.platforms($0, $1, $2) }, localPlatforms: { try await self.localPlatforms($0) })
         }
     }
 
@@ -344,6 +364,73 @@ struct UtilityTests {
             #expect(error.message == "store unavailable")
         } catch { Issue.record("unexpected error: \(error)") }
         #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+    }
+
+    @Test("never resolves platforms from the local index and reuses that image")
+    func imagePullNeverLocalPlatforms() async throws {
+        let stub = ImageStub()
+        let config = ContainerSystemConfig()
+        let result = try await Utility.imageCandidatesForCreate(
+            policy: .never, reference: "localhost:5000/app:latest", scheme: .http, config: config, client: stub.client)
+        #expect(result.platforms == [.init(arch: "arm64", os: "linux"), .init(arch: "amd64", os: "linux")])
+        #expect(result.localImage?.digest == "sha256:cached")
+        #expect(await stub.calls == ["get:localhost:5000/app:latest", "index:sha256:cached"])
+        #expect(await stub.localConfig === config)
+    }
+
+    @Test("never refuses absent local images before remote platform discovery")
+    func imagePullNeverMissingBeforePlatforms() async {
+        let stub = ImageStub(localError: .init(.notFound, message: "local fixture absent"))
+        do {
+            _ = try await Utility.imageCandidatesForCreate(
+                policy: .never, reference: "localhost:5000/app:latest", scheme: .http, config: .init(), client: stub.client)
+            Issue.record("an absent image must fail before platform discovery")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.notFound))
+            #expect(error.message.contains("--pull never"))
+        } catch { Issue.record("unexpected error: \(error)") }
+        #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+    }
+
+    @Test("never does not repair a missing local index through the registry")
+    func imagePullNeverMissingLocalIndex() async {
+        let stub = ImageStub(indexError: .init(.notFound, message: "index fixture absent"))
+        do {
+            _ = try await Utility.imageCandidatesForCreate(
+                policy: .never, reference: "localhost:5000/app:latest", scheme: .http, config: .init(), client: stub.client)
+            Issue.record("an incomplete local image must fail without a registry request")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.notFound))
+            #expect(error.message.contains("--pull never"))
+        } catch { Issue.record("unexpected error: \(error)") }
+        #expect(await stub.calls == ["get:localhost:5000/app:latest", "index:sha256:cached"])
+    }
+
+    @Test("platform discovery preserves local storage errors under never")
+    func imagePullNeverPlatformStoreFailure() async {
+        let stub = ImageStub(localError: .init(.internalError, message: "store unavailable"))
+        do {
+            _ = try await Utility.imageCandidatesForCreate(
+                policy: .never, reference: "localhost:5000/app:latest", scheme: .http, config: .init(), client: stub.client)
+            Issue.record("storage failure must propagate")
+        } catch let error as ContainerizationError {
+            #expect(error.isCode(.internalError))
+            #expect(error.message == "store unavailable")
+        } catch { Issue.record("unexpected error: \(error)") }
+        #expect(await stub.calls == ["get:localhost:5000/app:latest"])
+    }
+
+    @Test("always and missing retain registry-aware platform discovery", arguments: [Flags.ImageFetch.PullPolicy.always, .missing])
+    func imagePullRemotePlatforms(policy: Flags.ImageFetch.PullPolicy) async throws {
+        let stub = ImageStub()
+        let config = ContainerSystemConfig()
+        let result = try await Utility.imageCandidatesForCreate(
+            policy: policy, reference: "localhost:5000/app:latest", scheme: .http, config: config, client: stub.client)
+        #expect(result.platforms == [.init(arch: "arm64", os: "linux")])
+        #expect(result.localImage == nil)
+        #expect(await stub.calls == ["platforms:localhost:5000/app:latest"])
+        #expect(await stub.discoveryScheme == .http)
+        #expect(await stub.localConfig === config)
     }
 
 }
