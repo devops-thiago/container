@@ -156,7 +156,18 @@ public actor ImagesService {
         )
 
         let platforms = try await self.withAuthentication(ref: reference, credential: nil) { auth in
-            try await self.imageStore.platforms(reference: reference, insecure: insecure, auth: auth)
+            if insecure, let auth {
+                if let image = try await self.imageStore.getOrNil(reference: reference) {
+                    return try await image.index().runnablePlatforms
+                }
+                let ref = try Reference.parse(reference)
+                guard let tag = ref.tag ?? ref.digest else {
+                    throw ContainerizationError(.invalidArgument, message: "invalid tag/digest for image reference \(reference)")
+                }
+                let client = try ExplicitHTTPRegistryClient(reference: reference, authentication: auth)
+                return try await client.platforms(name: ref.path, tag: tag)
+            }
+            return try await self.imageStore.platforms(reference: reference, insecure: insecure, auth: auth)
         }
         guard let platforms else {
             throw ContainerizationError(.internalError, message: "failed to read platforms of image \(reference)")
