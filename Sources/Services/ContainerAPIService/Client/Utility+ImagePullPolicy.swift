@@ -36,6 +36,12 @@ extension Utility {
         var pull: @Sendable (ImageRequest) async throws -> ClientImage
         var fetch: @Sendable (ImageRequest) async throws -> ClientImage
         var get: @Sendable (String, ContainerSystemConfig) async throws -> ClientImage
+        var platforms: @Sendable (String, RequestScheme, ContainerSystemConfig) async throws -> [Platform] = {
+            try await ClientImage.platforms(reference: $0, scheme: $1, containerSystemConfig: $2)
+        }
+        var localPlatforms: @Sendable (ClientImage) async throws -> [Platform] = {
+            try await $0.index().runnablePlatforms
+        }
 
         static let live = Self(
             pull: { request in
@@ -51,6 +57,25 @@ extension Utility {
                     maxConcurrentDownloads: request.maxConcurrentDownloads)
             },
             get: { try await ClientImage.get(reference: $0, containerSystemConfig: $1) })
+    }
+
+    static func imageCandidatesForCreate(
+        policy: Flags.ImageFetch.PullPolicy, reference: String, scheme: RequestScheme,
+        config: ContainerSystemConfig, client: ImageClient = .live
+    ) async throws -> (platforms: [Platform], localImage: ClientImage?) {
+        // Discovery can contact a registry, so never must apply before it, not only
+        // before fetching layers. Retain the local image to avoid a second lookup.
+        if policy == .never {
+            do {
+                let image = try await client.get(reference, config)
+                return (try await client.localPlatforms(image), image)
+            } catch let error as ContainerizationError where error.isCode(.notFound) {
+                throw ContainerizationError(
+                    .notFound,
+                    message: "image \(reference) is not available locally and --pull never forbids fetching it")
+            }
+        }
+        return (try await client.platforms(reference, scheme, config), nil)
     }
 
     static func imageForCreate(
