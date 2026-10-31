@@ -151,12 +151,17 @@ enum HealthProbe {
     /// do not pile up. Returns nil when the timeout came first, whatever the killed check
     /// then reports. Cancellation also kills and drains the check, then throws
     /// CancellationError. A timeout racing cancellation shares the same kill operation.
+    /// In-flight startup finishes before cancellation can kill the probe; interrupting
+    /// guest creation can leave a host handle with no guest record to delete. Startup
+    /// errors still propagate, and the timeout starts after setup, as before.
     static func wait<T: Sendable>(
         timeout: Duration,
         sleep: @escaping HealthMonitor.Sleep,
+        start: @escaping @Sendable () async throws -> Void = {},
         for wait: @escaping @Sendable () async throws -> T,
         onTimeout: @escaping @Sendable () async -> Void
     ) async throws -> T? {
+        try await Task { try await start() }.value
         let timedOut = TimeoutFlag()
         let termination = Termination()
         return try await withThrowingTaskGroup(of: T?.self) { group in

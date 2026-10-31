@@ -1328,10 +1328,10 @@ public actor RuntimeService {
         }
         let outcome: HealthMonitor.Outcome
         do {
-            try await process.start()
             let status = try await HealthProbe.wait(
                 timeout: timeout,
                 sleep: { try await Task.sleep(for: $0) },
+                start: { try await process.start() },
                 for: { try await process.wait() },
                 onTimeout: { try? await process.kill(.kill) })
             if let status {

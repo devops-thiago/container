@@ -236,6 +236,63 @@ struct HealthMonitorTests {
 }
 
 struct HealthProbeTests {
+    @Test func cancellationDuringStartFinishesSetupBeforeKillingTheProbe() async {
+        let starting = Gate()
+        let finishStart = Gate()
+        let killed = Gate()
+        let created = Mutex(false)
+        let reaped = Mutex(false)
+        let killCalls = Mutex(0)
+        let task = Task {
+            try await HealthProbe.wait(
+                timeout: .seconds(30),
+                sleep: { try await Task.sleep(for: $0) },
+                start: {
+                    await starting.open()
+                    await finishStart.wait()
+                    // A canceled create RPC can leave a host process handle without
+                    // its guest record. Cleanup would then fail with "does not exist".
+                    try Task.checkCancellation()
+                    created.withLock { $0 = true }
+                },
+                for: { () async -> Int32 in
+                    await killed.wait()
+                    reaped.withLock { $0 = true }
+                    return 137
+                },
+                onTimeout: {
+                    #expect(created.withLock { $0 }, "shutdown killed a probe before guest setup finished")
+                    #expect(!Task.isCancelled)
+                    killCalls.withLock { $0 += 1 }
+                    await killed.open()
+                })
+        }
+        await starting.wait()
+        task.cancel()
+        await finishStart.open()
+        let result = await task.result
+        #expect(created.withLock { $0 }, "shutdown canceled guest setup halfway through")
+        #expect(killCalls.withLock { $0 == 1 })
+        #expect(reaped.withLock { $0 })
+        if case .failure(let error) = result { #expect(error is CancellationError) } else { Issue.record("cancellation unexpectedly returned a health result") }
+    }
+
+    @Test func aStartupFailureIsPreservedWithoutWaitingOrKilling() async {
+        enum StartupFailure: Error { case failed }
+        do {
+            let _: Int32? = try await HealthProbe.wait(
+                timeout: .seconds(30),
+                sleep: { try await Task.sleep(for: $0) },
+                start: { throw StartupFailure.failed },
+                for: {
+                    Issue.record("a failed startup must not wait for a process")
+                    return 0
+                },
+                onTimeout: { Issue.record("a failed startup must not kill a process") })
+            Issue.record("the startup error was swallowed")
+        } catch { #expect(error is StartupFailure) }
+    }
+
     @Test func cancellationDuringTimeoutJoinsTheSameUncancelledKill() async {
         let killing = Gate()
         let finishKill = Gate()

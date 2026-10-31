@@ -21,6 +21,27 @@ import Testing
 /// Serial lifecycle tests that require non-warmup images or exclusive port binding.
 @Suite(.serialized)
 struct TestCLIRunLifecycleSerial {
+    /// A fast probe repeatedly crosses guest setup while removal begins. Waiting for
+    /// a running-probe marker would miss cancellation before its guest record exists.
+    @Test func testTeardownDuringHealthProbeStartup() async throws {
+        try await ContainerFixture.with { f in
+            let label = "io.siliconship.test.health-start=\(UUID().uuidString)"
+            for iteration in 0..<20 {
+                let name = "\(f.testID)-health-start-\(iteration)"
+                f.addCleanup { _ = try? f.run(["rm", "-f", "--require-label", label, name]).check() }
+                try f.run([
+                    "run", "-d", "--name", name, "--label", label, "--cpus", "1", "--memory", "512M",
+                    "--health-cmd", "true", "--health-interval", "1ms", "--health-timeout", "2s",
+                    "docker.io/library/alpine:3.22", "sleep", "300",
+                ]).check()
+                // Deliberately do not wait for a completed check before removing it.
+                try f.run(["rm", "-f", "--require-label", label, name]).check()
+                let remaining = try f.run(["ls", "-a", "-q"]).check()
+                #expect(!remaining.output.split(whereSeparator: \.isNewline).contains(Substring(name)))
+            }
+        }
+    }
+
     /// The marker proves the long probe has started before teardown. Stop must cancel
     /// and drain it, rather than wait for its minute-long timeout or race its deletion.
     @Test func testTeardownDuringActiveHealthProbe() async throws {
