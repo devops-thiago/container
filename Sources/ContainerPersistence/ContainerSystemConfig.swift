@@ -194,11 +194,11 @@ final public class ContainerDNSConfig: Codable, Sendable {
 }
 
 final public class VminitConfig: Codable, Sendable {
-    // Guest backport cd99535b (containerization 0.53.0): owned-file and checked-archive
+    // Guest backport 8069e05d (containerization 0.54.0): owned-file and checked-archive
     // copies. Pin the image by content so the host RPC contract cannot drift with a
     // mutable registry tag.
     public static let defaultImage =
-        "ghcr.io/devops-thiago/containerization/vminit@sha256:e16716fa750a1eff25079bdf8537a173bf915841ab123bf45fa3f62a74708e48"
+        "ghcr.io/devops-thiago/containerization/vminit@sha256:8a30a8862003aba95e4da67ebc1bf6c374b0f16b472ce06a630a96d266b9f5ce"
 
     public let image: String
 
