@@ -16,6 +16,7 @@
 
 import ContainerAPIClient
 import ContainerClusterServiceClient
+import ContainerPersistence
 import ContainerPlugin
 import ContainerResource
 import ContainerizationError
@@ -70,7 +71,50 @@ public struct ClusterHelper {
     public static let clusterContainerPort: UInt16 = 6443
 
     /// Host socket served by the cluster-hoststore plugin and relayed into each node.
-    public static let hostStoreSocketPath = ApplicationRoot.path.appending("cluster-hoststore.sock")
+    ///
+    /// It lives in the engine's run directory, beside docker.sock and buildkitd.sock. A socket
+    /// address holds 104 bytes with its terminator, and both the host store's bind and the
+    /// runtime helper's relay dial take the full path, so `<app root>/cluster-hoststore.sock`
+    /// in an app group container (over 130 bytes) could be neither served nor reached.
+    public static var hostStoreSocketPath: FilePath {
+        hostStoreSocketPath(engineAppRoot: ApplicationRoot.path)
+    }
+
+    /// ``hostStoreSocketPath`` for the engine whose app root is `engineAppRoot`.
+    public static func hostStoreSocketPath(engineAppRoot: FilePath) -> FilePath {
+        PathUtils.runDirectoryPath(engineAppRoot: engineAppRoot).appending(hostStoreSocketName)
+    }
+
+    public static let hostStoreSocketName = "hs.sock"
+
+    /// The longest socket path both the host store's bind and the node relay's dial accept:
+    /// `sun_path` is 104 bytes with its terminator.
+    public static let maxSocketPathBytes = 103
+
+    /// Whether `path` fits in a socket address.
+    public static func socketPathFits(_ path: String) -> Bool {
+        path.utf8.count <= maxSocketPathBytes
+    }
+
+    /// Refuses a host store socket a node could not be given: one too long for a socket
+    /// address, which is checked first so it is not reported as missing, or one not there.
+    static func checkHostStoreSocket(
+        _ path: String,
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) throws {
+        guard socketPathFits(path) else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message:
+                    "host store socket \(path) is \(path.utf8.count) bytes, too long for a socket address (at most \(maxSocketPathBytes))"
+            )
+        }
+        guard exists(path) else {
+            throw ContainerizationError(
+                .notFound, message: "host store socket \(path) not found; is the cluster-hoststore plugin installed and running?")
+        }
+    }
+
     /// Where the host store socket appears inside a node. Must match cluster-shim.
     static let nodeHostStoreSocketPath = "/opt/cluster-shim/hoststore.sock"
     /// Where the cluster-shim binary is installed inside a node.

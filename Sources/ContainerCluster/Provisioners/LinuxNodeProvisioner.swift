@@ -113,10 +113,7 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         if sharedImageStore {
             _ = try await ClusterHelper.clusterShimURL(log: log)
             let hostStoreSocket = ClusterHelper.hostStoreSocketPath.string
-            guard FileManager.default.fileExists(atPath: hostStoreSocket) else {
-                throw ContainerizationError(
-                    .notFound, message: "host store socket \(hostStoreSocket) not found; is the cluster-hoststore plugin installed and running?")
-            }
+            try ClusterHelper.checkHostStoreSocket(hostStoreSocket)
             volumes.append("\(hostStoreSocket):\(ClusterHelper.nodeHostStoreSocketPath)")
         }
         try await ClusterHelper.ensureImage(nodeImage: resolvedImage, log: log, containerSystemConfig: containerSystemConfig)

@@ -53,6 +53,23 @@ extension ClusterHostStore {
 
             let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
             let socketPath = ClusterHelper.hostStoreSocketPath.string
+            // Exits 0 when there is nothing to serve, which launchd does not retry; nonzero
+            // only for a failure a restart can fix.
+            do {
+                _ = try PathUtils.runDirectory()
+            } catch {
+                log.error("no run directory", metadata: ["error": "\(error)"])
+                ClusterHostStore.exit(withError: error)
+            }
+            guard ClusterHelper.socketPathFits(socketPath) else {
+                // Neither this bind nor the node relay's dial could take it, so stop for good.
+                log.error(
+                    "socket path is longer than a socket address holds",
+                    metadata: [
+                        "path": "\(socketPath)", "bytes": "\(socketPath.utf8.count)", "max": "\(ClusterHelper.maxSocketPathBytes)",
+                    ])
+                Foundation.exit(0)
+            }
             let server = HostStoreServer(containerSystemConfig: containerSystemConfig, log: log)
             log.info("serving host store", metadata: ["socket": "\(socketPath)"])
             // Stop with the app that owns the engine, as every other engine service does.
