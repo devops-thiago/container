@@ -37,7 +37,7 @@ public struct ClusterHelper {
 
     /// A container listing of every node of this plugin, under its current or its earlier name.
     public static var nodeListFilters: ContainerListFilters {
-        ContainerListFilters(labels: [ResourceLabelKeys.plugin: "^(\(pluginName)|\(ResourcePluginValues.legacyKubernetes))$"])
+        ContainerListFilters().withPlugins(ResourcePluginValues.kubernetesNames)
     }
 
     public static let defaultName: String = "cluster-dev"
@@ -312,82 +312,7 @@ public struct ClusterHelper {
     /// library's start, stop, delete and load-image act on the containers that exist,
     /// including those of clusters created before the cluster service kept records.
     static func buildClusterRows(from snapshots: [ContainerSnapshot]) -> [ClusterNodeResource] {
-        var controlPlanes: [ContainerSnapshot] = []
-        var workers: [ContainerSnapshot] = []
-        for snapshot in snapshots {
-            let roles = snapshot.configuration.labels[ResourceLabelKeys.role, default: ""]
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            if roles.contains(controlPlaneRoleName) {
-                controlPlanes.append(snapshot)
-            } else {
-                workers.append(snapshot)
-            }
-        }
-
-        let clusterNames = controlPlanes.map { controlPlane in
-            explicitClusterName(for: controlPlane) ?? controlPlane.configuration.id
-        }
-        var rows: [ClusterNodeResource] = []
-        var assignedWorkerIDs = Set<String>()
-
-        for cp in controlPlanes.sorted(by: { $0.configuration.id < $1.configuration.id }) {
-            let clusterName = explicitClusterName(for: cp) ?? cp.configuration.id
-            rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: cp))
-            let cpWorkers =
-                workers
-                .filter { worker in
-                    guard !assignedWorkerIDs.contains(worker.configuration.id) else { return false }
-                    if let explicit = explicitClusterName(for: worker) {
-                        return explicit == clusterName
-                    }
-                    // Compatibility for clusters created before the cluster label existed.
-                    // Longest-prefix ownership prevents `foo` from also claiming a worker
-                    // belonging to a nested cluster named `foo-worker-1`.
-                    return legacyClusterName(for: worker, candidates: clusterNames) == clusterName
-                }
-                .sorted { $0.configuration.id < $1.configuration.id }
-            for worker in cpWorkers {
-                rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: worker))
-                assignedWorkerIDs.insert(worker.configuration.id)
-            }
-        }
-
-        for worker
-            in workers
-            .filter({ !assignedWorkerIDs.contains($0.configuration.id) })
-            .sorted(by: { $0.configuration.id < $1.configuration.id })
-        {
-            let clusterName =
-                explicitClusterName(for: worker)
-                ?? legacyClusterName(for: worker, candidates: clusterNames)
-                ?? clusterNameDerivedFromWorkerID(worker.configuration.id)
-            rows.append(ClusterNodeResource(clusterName: clusterName, snapshot: worker))
-        }
-
-        return rows
-    }
-
-    private static func explicitClusterName(for snapshot: ContainerSnapshot) -> String? {
-        guard let value = snapshot.configuration.labels[ResourceLabelKeys.cluster], !value.isEmpty else {
-            return nil
-        }
-        return value
-    }
-
-    private static func legacyClusterName(
-        for worker: ContainerSnapshot,
-        candidates: [String]
-    ) -> String? {
-        candidates
-            .filter { worker.configuration.id.hasPrefix("\($0)-worker-") }
-            .max { lhs, rhs in
-                lhs.count == rhs.count ? lhs > rhs : lhs.count < rhs.count
-            }
-    }
-
-    private static func clusterNameDerivedFromWorkerID(_ id: String) -> String {
-        id.components(separatedBy: "-worker-").dropLast().joined(separator: "-worker-")
+        ClusterNodeGroups.members(of: snapshots).map { ClusterNodeResource(clusterName: $0.clusterName, snapshot: $0.snapshot) }
     }
 
     static func renderTable<T: ListDisplayable>(_ items: [T]) -> String {

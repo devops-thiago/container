@@ -224,6 +224,13 @@ public enum K8sClusters {
         // Record the cluster before provisioning, as `cluster create` does. Fails `.exists` for
         // a live duplicate and replaces a stale record.
         let records = ClusterClient()
+        // A cluster an earlier engine made under this name has nodes but no record. Looking
+        // it up has the service adopt it, so the create below refuses the name as it does any
+        // live cluster's, rather than recording this configuration for the existing nodes.
+        do {
+            _ = try await records.get(name: name)
+        } catch let error as ContainerizationError where error.code == .notFound {
+        }
         _ = try await records.create(configuration: configuration)
 
         let client = ContainerClient()

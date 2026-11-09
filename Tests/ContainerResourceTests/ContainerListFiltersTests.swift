@@ -53,6 +53,17 @@ struct ContainerListFiltersTests {
         #expect(filters.labels[ResourceLabelKeys.plugin] == #"^a\.b$"#)
     }
 
+    @Test func testWithPluginsMatchesEachNameExactly() throws {
+        let filters = ContainerListFilters(ids: ["a"]).withPlugins(ResourcePluginValues.kubernetesNames)
+        #expect(filters.ids == ["a"])
+        let regex = try Regex(try #require(filters.labels[ResourceLabelKeys.plugin]))
+        #expect("cluster".wholeMatch(of: regex) != nil)
+        #expect("k8s".wholeMatch(of: regex) != nil)
+        #expect("cluster2".firstMatch(of: regex) == nil)
+        #expect("machine".firstMatch(of: regex) == nil)
+        #expect(ContainerListFilters().withPlugins(["a.b"]).labels[ResourceLabelKeys.plugin] == #"^(?:a\.b)$"#)
+    }
+
     @Test func testWithPluginKeepsOtherFilters() {
         let filters = ContainerListFilters(ids: ["a"], status: .running).withPlugin(ResourcePluginValues.cluster)
         #expect(filters.ids == ["a"])

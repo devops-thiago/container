@@ -63,8 +63,7 @@ public struct ClusterList: AsyncParsableCommand {
     /// Builds one row per node. The cluster service does not report CPU and memory,
     /// so those columns come from the nodes' live containers.
     private func makeNodeRows(for clusters: [ClusterResource]) async throws -> [ClusterNodeRow] {
-        let filters = ContainerListFilters().withPlugin(ClusterHelper.pluginName)
-        let containers = try await ContainerClient().list(filters: filters)
+        let containers = try await ContainerClient().list(filters: ClusterHelper.nodeListFilters)
         return ClusterHelper.buildNodeRows(infos: clusters, snapshots: containers)
     }
 

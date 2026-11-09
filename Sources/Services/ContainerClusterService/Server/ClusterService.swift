@@ -29,6 +29,14 @@ public actor ClusterService {
     private let listContainers: ContainerLister
     private let log: Logger
 
+    /// Counts the deletions this service has handled; see `adoptRecordless`.
+    private var deletionCount: UInt64 = 0
+    /// The value of `deletionCount` at the latest deletion of each name made while an adoption,
+    /// which might have seen the name's nodes, was running.
+    private var deletions: [String: UInt64] = [:]
+    /// Adoptions in progress; `deletions` is emptied when none are.
+    private var adoptionsInFlight = 0
+
     /// - Parameter root: Directory holding one subdirectory per cluster. Created if missing.
     public init(root: FilePath, listContainers: @escaping ContainerLister, log: Logger) throws {
         try FileManager.default.createDirectory(atPath: root.string, withIntermediateDirectories: true)
@@ -68,10 +76,19 @@ public actor ClusterService {
     }
 
     public func get(name: String) async throws -> ClusterResource {
+        var adoptedFrom: [ContainerSnapshot]?
+        if try await store.retrieve(name) == nil {
+            adoptedFrom = try await adoptRecordless(names: [name])
+        }
         guard let configuration = try await store.retrieve(name) else {
             throw ContainerizationError(.notFound, message: "cluster \(name) not found")
         }
-        let snapshots = try await listContainers()
+        let snapshots: [ContainerSnapshot]
+        if let adoptedFrom {
+            snapshots = adoptedFrom
+        } else {
+            snapshots = try await listContainers()
+        }
         guard let cluster = Self.resources(configurations: [configuration], snapshots: snapshots).first else {
             throw ContainerizationError(.internalError, message: "failed to build cluster \(name)")
         }
@@ -79,15 +96,57 @@ public actor ClusterService {
     }
 
     public func list() async throws -> [ClusterResource] {
-        let configurations = try await store.list()
-        guard !configurations.isEmpty else { return [] }
-        return Self.resources(configurations: configurations, snapshots: try await listContainers())
+        let snapshots = try await adoptRecordless(names: nil)
+        return Self.resources(configurations: try await store.list(), snapshots: snapshots)
+    }
+
+    /// Records each cluster whose node containers exist but that has no record, as clusters
+    /// made by engines before 1.7.1 are, so that every path sees them. Restricted to `names`
+    /// when given. Returns the container snapshots it worked from.
+    ///
+    /// Idempotent: a cluster with a record is never adopted again. Safe against a concurrent
+    /// create, which records its cluster before making any node, so a cluster being created
+    /// is never record-less; and an adoption only ever creates a record, so one written while
+    /// the containers were being listed is kept. Safe against a concurrent delete, which
+    /// removes the nodes and then the record: a name deleted while the containers were being
+    /// listed is not adopted from nodes that listing may still have seen.
+    @discardableResult
+    private func adoptRecordless(names: Set<String>?) async throws -> [ContainerSnapshot] {
+        let deletionsBefore = deletionCount
+        adoptionsInFlight += 1
+        defer {
+            adoptionsInFlight -= 1
+            if adoptionsInFlight == 0 { deletions.removeAll() }
+        }
+        let snapshots = try await listContainers()
+        let recorded = Set(try await store.list().map(\.name))
+        let adoptable = RecordlessClusters.configurations(from: snapshots, recorded: recorded, log: log)
+            .filter { names?.contains($0.name) ?? true }
+        for configuration in adoptable {
+            if let deletedAt = deletions[configuration.name], deletedAt > deletionsBefore {
+                log.debug("not adopting a cluster deleted while its nodes were listed", metadata: ["name": "\(configuration.name)"])
+                continue
+            }
+            do {
+                try await store.create(configuration)
+                log.info(
+                    "adopted cluster without a record",
+                    metadata: ["name": "\(configuration.name)", "nodes": "\(configuration.nodes.count)"])
+            } catch let error as ContainerizationError where error.code == .exists {
+                // Recorded by a create since the store was read; that record stands.
+            }
+        }
+        return snapshots
     }
 
     public func delete(name: String) async throws {
         guard ClusterResource.nameValid(name) else {
             throw ContainerizationError(.invalidArgument, message: "invalid cluster name \(name)")
         }
+        // Noted even without a record: a record-less cluster's nodes are already gone when its
+        // delete reaches here, and an adoption that listed them before must not record it.
+        deletionCount += 1
+        if adoptionsInFlight > 0 { deletions[name] = deletionCount }
         guard try await store.retrieve(name) != nil else {
             throw ContainerizationError(.notFound, message: "cluster \(name) not found")
         }

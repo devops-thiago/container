@@ -78,6 +78,15 @@ extension ContainerListFilters {
         return filters
     }
 
+    /// Restricts results to containers owned by any of the named plugins.
+    /// Replaces any existing filter on the plugin label.
+    public func withPlugins(_ names: [String]) -> ContainerListFilters {
+        let alternatives = names.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|")
+        var filters = self
+        filters.labels[ResourceLabelKeys.plugin] = "^(?:\(alternatives))$"
+        return filters
+    }
+
     /// Excludes containers owned by any of the named plugins (see ``ResourcePluginValues``).
     /// An existing filter on the plugin label is kept: exclusions narrow a request.
     public func withoutPlugins(_ names: [String]) -> ContainerListFilters {

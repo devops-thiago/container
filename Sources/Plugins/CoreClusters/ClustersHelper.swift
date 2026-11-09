@@ -68,9 +68,11 @@ extension ClustersHelper {
                 log.info("configuring XPC server")
                 let clustersRoot = try PluginStateRoot(plugin: commandName).path.appending("clusters")
 
-                // Cluster nodes carry the plugin label the cluster CLI plugin (ClusterHelper.pluginName) stamps on them.
+                // Cluster nodes carry the plugin label the cluster CLI plugin (ClusterHelper.pluginName) stamps on
+                // them, or `k8s`, the name engines before 1.6.1 gave it. Both are listed so the service sees, and
+                // adopts, the nodes of clusters those engines made.
                 let listContainers: ClusterService.ContainerLister = {
-                    try await ContainerClient().list(filters: ContainerListFilters().withPlugin(ResourcePluginValues.cluster))
+                    try await ContainerClient().list(filters: ContainerListFilters().withPlugins(ResourcePluginValues.kubernetesNames))
                 }
                 let service = try ClusterService(root: clustersRoot, listContainers: listContainers, log: log)
                 let harness = ClusterServiceHarness(service: service, log: log)

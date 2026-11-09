@@ -134,6 +134,9 @@ public struct ResourcePluginValues {
     public static let legacyKubernetes = "k8s"
 
     /// Whether `plugin` marks a Kubernetes node, by its current or its earlier name.
+    /// Every plugin name a Kubernetes node may carry, current first.
+    public static let kubernetesNames = [kubernetes, legacyKubernetes]
+
     public static func isKubernetes(_ plugin: String?) -> Bool {
         plugin == kubernetes || plugin == legacyKubernetes
     }
