@@ -1,0 +1,106 @@
+name: SiliconShip cluster-shim
+
+# Builds cluster-shim as a static aarch64 Linux binary, as upstream's
+# buildClusterShim job in common.yml does, and publishes it as a release asset
+# the app pins by sha256. The release tag names the shim's source tree, so a
+# commit that leaves cluster-shim/ unchanged publishes nothing new.
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - "siliconship/**"
+    paths:
+      - "cluster-shim/**"
+      - ".github/workflows/siliconship-cluster-shim.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: siliconship-cluster-shim-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build cluster-shim
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    container: swift:6.3.0-noble
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies
+        run: apt-get update && apt-get install -y make
+
+      - name: Install Static Linux SDK
+        run: make -C cluster-shim linux-sdk
+
+      - name: Build cluster-shim (static musl, aarch64)
+        run: make -C cluster-shim build-native ARCH=aarch64
+
+      - name: Upload cluster-shim
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cluster-shim
+          path: cluster-shim/bin/cluster-shim
+          if-no-files-found: error
+
+  publish:
+    name: Publish cluster-shim release
+    needs: build
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Name the release after the shim's source tree
+        id: tree
+        run: |
+          tree="$(git rev-parse HEAD:cluster-shim)"
+          echo "tag=cluster-shim-${tree:0:12}" >> "$GITHUB_OUTPUT"
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Download cluster-shim
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cluster-shim
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tree.outputs.tag }}
+          TREE: ${{ steps.tree.outputs.tree }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."
+            exit 0
+          fi
+          cd dist
+          sha256sum cluster-shim > cluster-shim.sha256
+          sha="$(cut -d' ' -f1 cluster-shim.sha256)"
+          size="$(stat -c %s cluster-shim)"
+          cat > notes.md <<EOF
+          cluster-shim built from commit ${COMMIT} (cluster-shim tree ${TREE}) as a static aarch64 Linux binary.
+
+          sha256: \`${sha}\`
+          size: ${size} bytes
+
+          This is a build input for SiliconShip, not an engine release.
+          EOF
+          gh release create "$TAG" cluster-shim cluster-shim.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --prerelease \
+            --latest=false
