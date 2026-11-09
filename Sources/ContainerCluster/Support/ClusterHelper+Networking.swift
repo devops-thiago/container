@@ -83,4 +83,11 @@ extension ClusterHelper {
         guard let domain, !domain.isEmpty else { return nil }
         return "\(name).\(domain)"
     }
+
+    /// The cluster's DNS name under the running engine's configured domain, or nil when
+    /// there is none or the configuration cannot be read.
+    static func detectFQDN(name: String) async -> String? {
+        let domain = try? await ClientHealthCheck.loadContainerSystemConfig().dns.domain
+        return fqdn(for: name, domain: domain)
+    }
 }

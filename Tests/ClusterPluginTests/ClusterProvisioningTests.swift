@@ -36,35 +36,37 @@ private enum ProvisioningFailure: Error { case expected }
 
 private struct TestProvisioner: NodeProvisioner {
     let label: String
+    let name: String
     let roles: [String]
     let events: ProvisioningEvents
     let failAt: ProvisioningStep?
 
     init(
         _ label: String,
+        name: String,
         roles: [String],
         events: ProvisioningEvents,
         failAt: ProvisioningStep? = nil
     ) {
         self.label = label
+        self.name = name
         self.roles = roles
         self.events = events
         self.failAt = failAt
     }
 
-    func provision(name: String, log: Logger) async throws {
+    func provision(log: Logger) async throws {
         await events.append("\(label).provision:\(name)")
         if failAt == .provision { throw ProvisioningFailure.expected }
     }
 
-    func address(name: String, log: Logger) async throws -> String {
+    func address(log: Logger) async throws -> String {
         await events.append("\(label).address:\(name)")
         if failAt == .address { throw ProvisioningFailure.expected }
         return "10.0.0.2"
     }
 
     func join(
-        name: String,
         controlPlaneEndpoint: String,
         token: String,
         caCertHash: String,
@@ -75,17 +77,17 @@ private struct TestProvisioner: NodeProvisioner {
         if failAt == .join { throw ProvisioningFailure.expected }
     }
 
-    func waitForReady(name: String, log: Logger) async throws {
+    func waitForReady(log: Logger) async throws {
         await events.append("\(label).ready:\(name)")
         if failAt == .ready { throw ProvisioningFailure.expected }
     }
 
-    func waitForRegistered(name: String, log: Logger) async throws {
+    func waitForRegistered(log: Logger) async throws {
         await events.append("\(label).registered:\(name)")
         if failAt == .ready { throw ProvisioningFailure.expected }
     }
 
-    func teardown(name: String, log: Logger) async throws {
+    func teardown(log: Logger) async throws {
         await events.append("\(label).teardown:\(name)")
         if failAt == .teardown { throw ProvisioningFailure.expected }
     }
@@ -99,12 +101,12 @@ struct ClusterProvisioningTests {
     func workersJoinAndBecomeReady() async throws {
         let events = ProvisioningEvents()
         let controlPlane = TestProvisioner(
-            "cp", roles: [StandardRoles.controlPlane], events: events)
+            "cp", name: "dev", roles: [StandardRoles.controlPlane], events: events)
         let workers = [1, 2].map { index in
             K8sClusters.WorkerNode(
                 name: "dev-worker-\(index)",
                 provisioner: TestProvisioner(
-                    "w\(index)", roles: [StandardRoles.worker], events: events))
+                    "w\(index)", name: "dev-worker-\(index)", roles: [StandardRoles.worker], events: events))
         }
 
         try await K8sClusters.provisionCluster(
@@ -136,11 +138,11 @@ struct ClusterProvisioningTests {
     func workersWithoutCNIOnlyRegister() async throws {
         let events = ProvisioningEvents()
         let controlPlane = TestProvisioner(
-            "cp", roles: [StandardRoles.controlPlane], events: events)
+            "cp", name: "dev", roles: [StandardRoles.controlPlane], events: events)
         let workers = [
             K8sClusters.WorkerNode(
                 name: "dev-worker-1",
-                provisioner: TestProvisioner("w1", roles: [StandardRoles.worker], events: events))
+                provisioner: TestProvisioner("w1", name: "dev-worker-1", roles: [StandardRoles.worker], events: events))
         ]
 
         try await K8sClusters.provisionCluster(
@@ -161,16 +163,16 @@ struct ClusterProvisioningTests {
     func readinessFailureCleansUpAllAttemptedNodes() async {
         let events = ProvisioningEvents()
         let controlPlane = TestProvisioner(
-            "cp", roles: [StandardRoles.controlPlane], events: events)
+            "cp", name: "dev", roles: [StandardRoles.controlPlane], events: events)
         let workers = [
             K8sClusters.WorkerNode(
                 name: "dev-worker-1",
                 provisioner: TestProvisioner(
-                    "w1", roles: [StandardRoles.worker], events: events)),
+                    "w1", name: "dev-worker-1", roles: [StandardRoles.worker], events: events)),
             K8sClusters.WorkerNode(
                 name: "dev-worker-2",
                 provisioner: TestProvisioner(
-                    "w2", roles: [StandardRoles.worker], events: events, failAt: .ready)),
+                    "w2", name: "dev-worker-2", roles: [StandardRoles.worker], events: events, failAt: .ready)),
         ]
 
         await #expect(throws: ProvisioningFailure.self) {

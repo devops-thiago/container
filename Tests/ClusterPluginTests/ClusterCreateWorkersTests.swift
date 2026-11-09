@@ -42,7 +42,8 @@ struct ClusterCreateWorkersFlagTests {
     }
 
     @Test func totalAtLimitIsAccepted() throws {
-        _ = try ClusterCreate.parse(["--workers", "\(ClusterConfiguration.maxWorkers)"])
+        // SiliconShip caps a cluster at K8sClusters.maximumWorkers, below the record's limit.
+        _ = try ClusterCreate.parse(["--workers", "\(K8sClusters.maximumWorkers)"])
     }
 
     @Test func totalOverLimitIsRejected() {

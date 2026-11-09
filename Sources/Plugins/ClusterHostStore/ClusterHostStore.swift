@@ -55,6 +55,14 @@ extension ClusterHostStore {
             let socketPath = ClusterHelper.hostStoreSocketPath.string
             let server = HostStoreServer(containerSystemConfig: containerSystemConfig, log: log)
             log.info("serving host store", metadata: ["socket": "\(socketPath)"])
+            // Stop with the app that owns the engine, as every other engine service does.
+            let ownerWatchdog = OwnerWatchdog(log: log)
+            let ownerWatch = Task {
+                await ownerWatchdog.waitForOwnerLoss()
+                log.info("host store has no owning app; stopping")
+                Darwin.exit(0)
+            }
+            defer { ownerWatch.cancel() }
             do {
                 try await server.run(socketPath: socketPath)
             } catch {

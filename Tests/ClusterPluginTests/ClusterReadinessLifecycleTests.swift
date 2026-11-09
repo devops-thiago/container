@@ -127,15 +127,16 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
 
 private struct ReadinessNode: NodeProvisioner {
     let cluster: ReadinessCluster
+    let name: String
     let roles: [String]
-    func provision(name: String, log: Logger) async throws { try await cluster.provision(name, role: roles[0]) }
-    func address(name: String, log: Logger) async throws -> String { "10.0.0.2" }
-    func join(name: String, controlPlaneEndpoint: String, token: String, caCertHash: String, log: Logger) async throws {
+    func provision(log: Logger) async throws { try await cluster.provision(name, role: roles[0]) }
+    func address(log: Logger) async throws -> String { "10.0.0.2" }
+    func join(controlPlaneEndpoint: String, token: String, caCertHash: String, log: Logger) async throws {
         await cluster.register(name)
     }
-    func waitForReady(name: String, log: Logger) async throws { try await cluster.waitForReady(name: name) }
-    func waitForRegistered(name: String, log: Logger) async throws { try await cluster.waitForRegistered(name: "dev", nodes: [name]) }
-    func teardown(name: String, log: Logger) async throws { await cluster.teardown(name) }
+    func waitForReady(log: Logger) async throws { try await cluster.waitForReady(name: name) }
+    func waitForRegistered(log: Logger) async throws { try await cluster.waitForRegistered(name: "dev", nodes: [name]) }
+    func teardown(log: Logger) async throws { await cluster.teardown(name) }
 }
 
 struct ClusterReadinessLifecycleTests {
@@ -144,9 +145,9 @@ struct ClusterReadinessLifecycleTests {
     private func create(_ cluster: ReadinessCluster, cni: String? = "NONE", workers: Int = 2) async throws {
         let policy = ClusterReadinessPolicy.forCreation(cniManifestPath: cni)
         try await K8sClusters.provisionCluster(
-            name: "dev", controlPlane: ReadinessNode(cluster: cluster, roles: [StandardRoles.controlPlane]),
+            name: "dev", controlPlane: ReadinessNode(cluster: cluster, name: "dev", roles: [StandardRoles.controlPlane]),
             workers: (0..<workers).map {
-                .init(name: "dev-worker-\($0 + 1)", provisioner: ReadinessNode(cluster: cluster, roles: [StandardRoles.worker]))
+                .init(name: "dev-worker-\($0 + 1)", provisioner: ReadinessNode(cluster: cluster, name: "dev-worker-\($0 + 1)", roles: [StandardRoles.worker]))
             },
             initializeControlPlane: { _, _, _ in
                 await cluster.register("dev")

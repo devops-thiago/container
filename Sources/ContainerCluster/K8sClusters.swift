@@ -16,6 +16,7 @@
 
 import ArgumentParser
 import ContainerAPIClient
+import ContainerClusterServiceClient
 import ContainerPersistence
 import ContainerResource
 import ContainerizationError
@@ -96,10 +97,28 @@ public enum K8sClusters {
         public let kubeconfigWritten: Bool
     }
 
-    /// Create and start one control plane plus `workers` worker nodes.
+    /// The size of a group of identical worker nodes, as `cluster create --workers
+    /// count=<n>,cpus=<n>,memory=<size>` describes one. A size left out takes the single-node
+    /// default (1/4 of host CPUs and memory, minimum 2 CPUs and 2g).
+    public struct WorkerGroup: Sendable, Equatable {
+        public var count: Int
+        public var cpus: Int64?
+        public var memory: String?
+
+        public init(count: Int, cpus: Int64? = nil, memory: String? = nil) {
+            self.count = count
+            self.cpus = cpus
+            self.memory = memory
+        }
+    }
+
+    /// Create and start one control plane plus `workers` worker nodes and the worker groups
+    /// in `workerGroups`, and record the cluster with the cluster service.
     ///
     /// `workers` defaults to zero for source and CLI compatibility with the historical
-    /// single-node cluster. In that form the control plane remains schedulable.
+    /// single-node cluster. In that form the control plane remains schedulable. Workers
+    /// counted by `workers` take the control plane's `cpus` and `memory`; each group
+    /// sizes its own. Workers are numbered across both, `workers` first.
     @discardableResult
     public static func create(
         name: String = K8sClusters.defaultName,
@@ -108,8 +127,10 @@ public enum K8sClusters {
         cpus: Int64? = nil,
         memory: String? = nil,
         workers: Int = 0,
+        workerGroups: [WorkerGroup] = [],
         cniManifestPath: String? = nil,
         autoRemove: Bool = false,
+        sharedImageStore: Bool = false,
         registry: Flags.Registry = Flags.Registry(scheme: "https"),
         imageFetch: Flags.ImageFetch = Flags.ImageFetch(maxConcurrentDownloads: 3),
         log: Logger,
@@ -118,11 +139,7 @@ public enum K8sClusters {
         guard nameValid(name) else {
             throw ContainerizationError(.invalidArgument, message: "cluster name \(name) is not a valid container ID")
         }
-        guard (0...maximumWorkers).contains(workers) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "worker count must be between 0 and \(maximumWorkers)")
-        }
+        let workerSizes = try workerSizes(workers: workers, cpus: cpus, memory: memory, groups: workerGroups)
         // "NONE" installs no CNI: nodes stay NotReady until the caller installs one, so the
         // create waits for the API server and for workers to register, not for readiness.
         let readinessPolicy = ClusterReadinessPolicy.forCreation(cniManifestPath: cniManifestPath)
@@ -132,92 +149,130 @@ public enum K8sClusters {
                 throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
             }
         }
-        // Fail before provisioning any node VM.
-        _ = try ClusterHelper.kubernetesVersion(nodeImage: nodeImage)
 
-        let workerNames = workers == 0 ? [] : (1...workers).map { "\(name)-worker-\($0)" }
+        let workerNames = workerSizes.indices.map { ClusterHelper.workerName(cluster: name, index: $0 + 1) }
         guard workerNames.allSatisfy({ nameValid($0) }) else {
             throw ContainerizationError(
                 .invalidArgument,
                 message: "cluster name \(name) is too long to form worker container IDs")
         }
 
-        let containerSystemConfig: ContainerSystemConfig = try await ConfigurationLoader.load()
+        let containerSystemConfig: ContainerSystemConfig = try await ClientHealthCheck.loadContainerSystemConfig()
         let fqdn = ClusterHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
+        // Validates the node image's version and the node list; fails before any node VM.
+        let made = try ClusterConfiguration.make(
+            name: name,
+            nodeImage: nodeImage,
+            remove: autoRemove,
+            sharedImageStore: sharedImageStore,
+            workers: UInt(workerSizes.count),
+            cni: cniManifestPath,
+            fqdn: fqdn)
+        let configuration = try ClusterConfiguration(
+            name: made.name,
+            kubernetesVersion: made.kubernetesVersion,
+            cni: made.cni,
+            fqdn: made.fqdn,
+            remove: made.remove,
+            sharedImageStore: made.sharedImageStore,
+            nodes: made.nodes,
+            creationDate: made.creationDate,
+            labels: try ResourceLabels(labels))
+
         let controlPlane = try LinuxNodeProvisioner(
+            name: name,
             clusterName: name,
             labels: labels,
-            roles: [StandardRoles.controlPlane],
+            roles: workerSizes.isEmpty ? [StandardRoles.controlPlane, StandardRoles.worker] : [StandardRoles.controlPlane],
             nodeImage: nodeImage,
             cpus: cpus,
             memory: memory,
             registryScheme: registry.scheme,
             maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
             remove: autoRemove,
-            fqdn: fqdn,
             containerSystemConfig: containerSystemConfig,
+            fqdn: fqdn,
+            sharedImageStore: sharedImageStore,
             progressUpdate: progressUpdate)
-        let workerNodes = try workerNames.map { workerName in
+        let workerNodes = try zip(workerNames, workerSizes).map { workerName, size in
             WorkerNode(
                 name: workerName,
                 provisioner: try LinuxNodeProvisioner(
+                    name: workerName,
                     clusterName: name,
                     labels: labels,
                     roles: [StandardRoles.worker],
                     nodeImage: nodeImage,
-                    cpus: cpus,
-                    memory: memory,
+                    cpus: size.cpus,
+                    memory: size.memory,
                     registryScheme: registry.scheme,
                     maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
                     remove: autoRemove,
                     containerSystemConfig: containerSystemConfig,
+                    sharedImageStore: sharedImageStore,
                     progressUpdate: progressUpdate))
         }
+        let bootstrapper = ClusterBootstrapper(
+            name: name,
+            kubernetesVersion: configuration.kubernetesVersion,
+            cni: cniManifestPath,
+            fqdn: fqdn,
+            sharedImageStore: sharedImageStore,
+            controlPlane: controlPlane,
+            workers: workerNodes.map(\.provisioner))
+
+        // Record the cluster before provisioning, as `cluster create` does. Fails `.exists` for
+        // a live duplicate and replaces a stale record.
+        let records = ClusterClient()
+        _ = try await records.create(configuration: configuration)
 
         let client = ContainerClient()
-        try await provisionCluster(
-            name: name,
-            controlPlane: controlPlane,
-            workers: workerNodes,
-            initializeControlPlane: { controlPlaneName, vmIP, hasWorkers in
-                var sans = ["127.0.0.1"]
-                if let fqdn { sans.append(contentsOf: [vmIP, fqdn]) }
+        do {
+            try await provisionCluster(
+                name: name,
+                controlPlane: controlPlane,
+                workers: workerNodes,
+                initializeControlPlane: { controlPlaneName, vmIP, hasWorkers in
+                    var sans = ["127.0.0.1"]
+                    if let fqdn { sans.append(contentsOf: [vmIP, fqdn]) }
 
-                await progressUpdate([.setDescription("Running kubeadm init")])
-                try await ClusterHelper.prepareNode(
-                    nodeID: controlPlaneName, client: client, log: log)
-                try await ClusterHelper.bootstrapControlPlane(
-                    nodeID: controlPlaneName,
-                    nodeImage: nodeImage,
-                    apiServerSANs: sans,
-                    advertiseAddress: vmIP,
-                    schedulable: !hasWorkers,
-                    cniManifestPath: cniManifestPath,
-                    client: client,
-                    log: log)
+                    await progressUpdate([.setDescription("Running kubeadm init")])
+                    try await bootstrapper.bootstrapControlPlane(
+                        nodeID: controlPlaneName,
+                        apiServerSANs: sans,
+                        advertiseAddress: vmIP,
+                        schedulable: !hasWorkers,
+                        client: client,
+                        log: log)
 
-                guard hasWorkers else { return nil }
-                let join = try await ClusterHelper.createJoinToken(
-                    nodeID: controlPlaneName, client: client)
-                return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
-            },
-            readinessPolicy: readinessPolicy,
-            persistReadiness: { policy in
-                try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
-            },
-            finalizeCluster: {
-                if skipCNI {
-                    await progressUpdate([.setDescription("Waiting for API server")])
-                    try await ClusterHelper.waitForAPIServer(
-                        containerId: name, client: client, log: log)
-                } else {
-                    await progressUpdate([.setDescription("Waiting for cluster to be ready")])
-                    try await ClusterHelper.waitForReady(
-                        containerId: name, client: client, log: log)
-                }
-            },
-            log: log,
-            progressUpdate: progressUpdate)
+                    guard hasWorkers else { return nil }
+                    let join = try await bootstrapper.createJoinToken(
+                        nodeID: controlPlaneName, client: client)
+                    return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
+                },
+                readinessPolicy: readinessPolicy,
+                persistReadiness: { policy in
+                    try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
+                },
+                finalizeCluster: {
+                    if skipCNI {
+                        await progressUpdate([.setDescription("Waiting for API server")])
+                        try await ClusterHelper.waitForAPIServer(
+                            containerId: name, client: client, log: log)
+                    } else {
+                        await progressUpdate([.setDescription("Waiting for cluster to be ready")])
+                        try await ClusterHelper.waitForReady(
+                            containerId: name, client: client, log: log)
+                    }
+                },
+                log: log,
+                progressUpdate: progressUpdate)
+        } catch {
+            // `.exists` means a container with this name is already there; the record may
+            // belong to another live create.
+            if (error as? ContainerizationError)?.code != .exists { try? await records.delete(name: name) }
+            throw error
+        }
 
         await progressUpdate([.setDescription("Writing kubeconfig")])
         do {
@@ -234,6 +289,26 @@ public enum K8sClusters {
             return CreateResult(kubeconfigWritten: false)
         }
         return CreateResult(kubeconfigWritten: true)
+    }
+
+    /// The size of each worker a create makes, in order: `workers` sized like the control
+    /// plane, then each group's. Refuses a negative count and more than `maximumWorkers`.
+    static func workerSizes(
+        workers: Int, cpus: Int64?, memory: String?, groups: [WorkerGroup]
+    ) throws -> [(cpus: Int64?, memory: String?)] {
+        let counts = [workers] + groups.map(\.count)
+        guard counts.allSatisfy({ $0 >= 0 }),
+            counts.reduce(0, { $0 + $1 }) <= maximumWorkers
+        else {
+            throw ContainerizationError(
+                .invalidArgument,
+                message: "worker count must be between 0 and \(maximumWorkers)")
+        }
+        var sizes = Array(repeating: (cpus: cpus, memory: memory), count: workers)
+        for group in groups {
+            sizes += Array(repeating: (cpus: group.cpus, memory: group.memory), count: group.count)
+        }
+        return sizes
     }
 
     /// The cluster's kubeconfig as YAML, rewritten to reach the API server from this host —
@@ -313,6 +388,7 @@ public enum K8sClusters {
             expectedControlPlaneIncarnation: expectedControlPlaneIncarnation,
             requiredLabels: requiredLabels,
             containers: ContainerClient(),
+            records: ClusterClient(),
             log: log)
     }
 
@@ -329,12 +405,15 @@ public enum K8sClusters {
     ///
     /// Every node mutation carries both plugin ownership and the exact incarnation observed
     /// before any stop. Workers are removed before the control plane. A lookup/list failure
-    /// performs no mutation, and kubeconfig is kept until the whole guarded delete succeeds.
+    /// performs no mutation, and kubeconfig and the cluster's record are kept until the whole
+    /// guarded delete succeeds. `records` is nil where no cluster service is reachable, as in
+    /// the unit tests.
     static func delete(
         name: String,
         expectedControlPlaneIncarnation: String? = nil,
         requiredLabels: [String: String]? = nil,
         containers: any K8sClusterContainers,
+        records: (any K8sClusterRecords)? = nil,
         log: Logger
     ) async throws {
         let listed = try await containers.listNodes()
@@ -360,8 +439,12 @@ public enum K8sClusters {
                 if clusterNodes.isEmpty {
                     log.debug("cluster container not found, skipping delete", metadata: ["name": "\(name)"])
                     // With an ownership condition, no observed node means no proof that
-                    // this caller owns a same-name kubeconfig entry either.
-                    if requiredLabels == nil { try ClusterHelper.removeConfig(containerId: name, log: log) }
+                    // this caller owns a same-name kubeconfig entry or record either. Without
+                    // one, a record whose nodes are all gone (a `--rm` cluster) goes too.
+                    if requiredLabels == nil {
+                        try ClusterHelper.removeConfig(containerId: name, log: log)
+                        try await removeRecord(name: name, records: records)
+                    }
                     return
                 }
                 log.debug(
@@ -430,8 +513,27 @@ public enum K8sClusters {
         }
 
         try ClusterHelper.removeConfig(containerId: name, log: log)
+        try await removeRecord(name: name, records: records)
+    }
+
+    /// Remove the cluster service's record of `name`, if it has one. A cluster created
+    /// before the service kept records has none.
+    static func removeRecord(name: String, records: (any K8sClusterRecords)?) async throws {
+        guard let records else { return }
+        do {
+            try await records.delete(name: name)
+        } catch let error as ContainerizationError where error.code == .invalidArgument || error.code == .notFound {
+            // No record to remove: the name is not one the service can have recorded, or the cluster has none.
+        }
     }
 }
+
+/// What `K8sClusters.delete` needs from the cluster service.
+protocol K8sClusterRecords: Sendable {
+    func delete(name: String) async throws
+}
+
+extension ClusterClient: K8sClusterRecords {}
 
 /// What `K8sClusters.delete` needs from the engine, so a test can stand in for it.
 protocol K8sClusterContainers: Sendable {

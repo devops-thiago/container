@@ -229,8 +229,11 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
             try await ClusterHelper.waitForNodeBooted(containerId: name, client: client, log: log)
             try await prepareNode(nodeID: name, client: client, log: log)
         } catch {
-            try? await client.stop(id: name)
-            try? await client.delete(id: name)
+            // Only the container this attempt created: a same-name replacement is left alone.
+            let required = [ResourceLabelKeys.plugin: ClusterHelper.pluginName]
+            try? await client.stop(id: name, requiredLabels: required, expectedIncarnation: requestedIncarnation)
+            try? await client.delete(id: name, requiredLabels: required, expectedIncarnation: requestedIncarnation)
+            await incarnations.remove(name)
             throw error
         }
     }

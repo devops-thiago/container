@@ -80,12 +80,29 @@ extension ClustersHelper {
                 routes[ClusterServiceXPCRoute.clusterGet.rawValue] = XPCServer.route(harness.get)
                 routes[ClusterServiceXPCRoute.clusterList.rawValue] = XPCServer.route(harness.list)
                 routes[ClusterServiceXPCRoute.clusterDelete.rawValue] = XPCServer.route(harness.delete)
+                // `ClusterClient` dials this helper directly rather than going through the API
+                // server, so launchd demand-starts it for a `container cluster …` invocation
+                // with no app running. Gate every route and stop when there is no app, as the
+                // images helper does.
+                let ownerWatchdog = OwnerWatchdog(log: log)
+                for (name, handler) in routes {
+                    routes[name] = ownerWatchdog.wrap(handler)
+                }
 
                 let xpc = XPCServer(
                     identifier: serviceIdentifier,
                     routes: routes,
                     log: log
                 )
+
+                // Nothing to tear down: the records are written whole, one file per cluster.
+                let ownerWatch = Task {
+                    await ownerWatchdog.waitForOwnerLoss()
+                    log.info("clusters helper has no owning app; stopping")
+                    Darwin.exit(0)
+                }
+                defer { ownerWatch.cancel() }
+
                 log.info("starting XPC server")
                 try await xpc.listen()
             } catch {

@@ -545,6 +545,7 @@ let package = Package(
         .target(
             name: "ContainerClusterServiceClient",
             dependencies: [
+                "ContainerVersion",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
                 "ContainerResource",

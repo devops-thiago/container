@@ -28,7 +28,12 @@ public struct ClusterCreate: AsyncParsableCommand {
 
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create and start a local Kubernetes cluster and optional worker nodes"
+        abstract: "Create and start a local Kubernetes cluster and optional worker nodes",
+        discussion: """
+            --cpus and --memory size the control-plane node, or the single node if no workers are specified \
+            (default 1/4 of host CPUs and memory, minimum 2 CPUs and 2g). \
+            Size workers with --workers count=<n>,cpus=<n>,memory=<size>; a group's count defaults to 1, and cpus and memory left out default to the single-node sizes: 1/4 of host CPUs and memory (minimum 2 CPUs and 2g).
+            """
     )
 
     @Option(name: .customLong("label"), help: "Set a key=value label on each node")
@@ -55,18 +60,41 @@ public struct ClusterCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Optional path to a CNI manifest to apply, or \"NONE\" to skip installing a CNI.")
     var cni: String?
 
-    @Option(name: .long, help: "Number of worker nodes to create, 0...\(K8sClusters.maximumWorkers)")
-    var workers: Int = 0
+    @Option(
+        name: .long,
+        help: "Worker nodes to create: a number, or count=<n>,cpus=<n>,memory=<size> (repeat for groups of differently sized workers), 0...\(K8sClusters.maximumWorkers) in all",
+        transform: { try WorkerGroup(parsing: $0) })
+    var workers: [WorkerGroup] = []
+
+    @Flag(help: "Let nodes pull images from the local image store")
+    var sharedImageStore = false
 
     public func validate() throws {
-        guard (0...K8sClusters.maximumWorkers).contains(workers) else {
-            throw ValidationError("--workers must be between 0 and \(K8sClusters.maximumWorkers)")
+        // Fail before anything is created, the same as invalid --workers values do.
+        do {
+            if let cpus = resourceFlags.cpus { _ = try Parser.cpus(cpus) }
+            if let memory = resourceFlags.memory { _ = try Parser.memoryInBytes(memory) }
+        } catch {
+            throw ValidationError(wrapping: error)
+        }
+
+        var total: UInt = 0
+        let maximum = UInt(K8sClusters.maximumWorkers)
+        for group in workers {
+            // Compare against the remaining room so the running total can't overflow.
+            guard group.count <= maximum - total else {
+                throw ValidationError("--workers must be between 0 and \(K8sClusters.maximumWorkers)")
+            }
+            total += group.count
         }
     }
 
     public func run() async throws {
         LoggingSystem.bootstrap { _ in StderrLogHandler() }
         let log = Logger(label: ClusterHelper.pluginName)
+
+        // validate() has already bounded the total by K8sClusters.maximumWorkers.
+        let workerCount = workers.reduce(0) { $0 + Int($1.count) }
 
         let isTTY = isatty(FileHandle.standardError.fileDescriptor) == 1
         // TotalTasks include:
@@ -76,7 +104,7 @@ public struct ClusterCreate: AsyncParsableCommand {
             showTasks: true,
             showItems: true,
             ignoreSmallSize: true,
-            totalTasks: 4 + workers,
+            totalTasks: 4 + workerCount,
             clearOnFinish: isTTY,
             outputMode: isTTY ? .ansi : .plain
         )
@@ -91,9 +119,12 @@ public struct ClusterCreate: AsyncParsableCommand {
             nodeImage: nodeImage,
             cpus: resourceFlags.cpus,
             memory: resourceFlags.memory,
-            workers: workers,
+            workerGroups: workers.map {
+                K8sClusters.WorkerGroup(count: Int($0.count), cpus: $0.cpus, memory: $0.memory)
+            },
             cniManifestPath: cni,
             autoRemove: remove,
+            sharedImageStore: sharedImageStore,
             registry: registryFlags,
             imageFetch: imageFetchFlags,
             log: log,

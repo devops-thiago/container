@@ -58,9 +58,9 @@ extension K8sClusters {
             try Task.checkCancellation()
             attempted.append((name, controlPlane))
             await progressUpdate([.setDescription("Provisioning control plane")])
-            try await controlPlane.provision(name: name, log: log)
+            try await controlPlane.provision(log: log)
             try Task.checkCancellation()
-            let address = try await controlPlane.address(name: name, log: log)
+            let address = try await controlPlane.address(log: log)
             try Task.checkCancellation()
             let credentials = try await initializeControlPlane(name, address, !workers.isEmpty)
             try Task.checkCancellation()
@@ -80,11 +80,10 @@ extension K8sClusters {
                 await progressUpdate([
                     .setDescription("Provisioning worker \(index + 1) of \(workers.count)")
                 ])
-                try await worker.provisioner.provision(name: worker.name, log: log)
+                try await worker.provisioner.provision(log: log)
                 try Task.checkCancellation()
                 let credentials = credentials!
                 try await worker.provisioner.join(
-                    name: worker.name,
                     controlPlaneEndpoint: "\(address):\(ClusterHelper.clusterContainerPort)",
                     token: credentials.token,
                     caCertHash: credentials.caCertHash,
@@ -92,9 +91,9 @@ extension K8sClusters {
                 try Task.checkCancellation()
                 // Without a CNI a node never reports Ready; registering is all it can do.
                 if readinessPolicy == .ready {
-                    try await worker.provisioner.waitForReady(name: worker.name, log: log)
+                    try await worker.provisioner.waitForReady(log: log)
                 } else {
-                    try await worker.provisioner.waitForRegistered(name: worker.name, log: log)
+                    try await worker.provisioner.waitForRegistered(log: log)
                 }
             }
             try Task.checkCancellation()
@@ -104,7 +103,7 @@ extension K8sClusters {
             let original = error
             for node in attempted.reversed() {
                 do {
-                    try await node.provisioner.teardown(name: node.name, log: log)
+                    try await node.provisioner.teardown(log: log)
                 } catch {
                     log.warning(
                         "failed to tear down node after cluster create failure",

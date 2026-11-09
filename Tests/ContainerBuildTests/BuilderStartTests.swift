@@ -14,7 +14,6 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
-@testable import ContainerBuild
 import ContainerPersistence
 import ContainerResource
 import ContainerizationError
@@ -22,6 +21,8 @@ import ContainerizationOCI
 import Foundation
 import SystemPackage
 import Testing
+
+@testable import ContainerBuild
 
 struct BuilderStartTests {
     static let image = "example.com/builder:1"
@@ -147,9 +148,9 @@ struct BuilderStartTests {
         #expect(plain.requiresRecreate(Self.existing(matching: colourful)))
     }
 
-    @Test func dnsLeftUnsetMatchesABuilderWithoutDNS() throws {
+    @Test func dnsLeftUnsetMatchesABuilderWithEmptyDNS() throws {
         let spec = try Self.spec()
-        #expect(spec.requiresRecreate(Self.existing(matching: spec) { $0.dns = nil }) == false)
+        #expect(spec.requiresRecreate(Self.existing(matching: spec) { $0.dns = .init(nameservers: []) }) == false)
     }
 
     @Test func dnsTheStartNoLongerAsksForRecreates() throws {

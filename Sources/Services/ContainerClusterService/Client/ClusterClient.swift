@@ -16,13 +16,14 @@
 
 #if os(macOS)
 import ContainerResource
+import ContainerVersion
 import ContainerXPC
 import ContainerizationError
 import Foundation
 
 /// Client for the `container-core-clusters` XPC service.
 public struct ClusterClient: Sendable {
-    public static let serviceIdentifier = "com.apple.container.core.container-core-clusters"
+    public static let serviceIdentifier = ServiceIdentity.machPrefix + "core.container-core-clusters"
 
     private let xpcClient: XPCClient
 

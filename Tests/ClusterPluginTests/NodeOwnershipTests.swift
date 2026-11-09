@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerResource
 import Testing
 
@@ -24,8 +25,10 @@ struct NodeOwnershipTests {
     @Test("ownership metadata reaches control planes and workers without overriding reserved labels", arguments: [StandardRoles.controlPlane, StandardRoles.worker])
     func nodeCreationLabels(role: String) throws {
         let node = try LinuxNodeProvisioner(
+            name: "fixture",
             clusterName: "fixture", labels: ["owner": "this-run", ResourceLabelKeys.plugin: "wrong", ResourceLabelKeys.cluster: "wrong", ResourceLabelKeys.role: "wrong"],
-            roles: [role])
+            roles: [role],
+            containerSystemConfig: ContainerSystemConfig())
         let labels = Utility.parseKeyValuePairs(node.managementLabels)
         #expect(labels["owner"] == "this-run")
         #expect(labels[ResourceLabelKeys.plugin] == ClusterHelper.pluginName)
@@ -64,7 +67,7 @@ struct NodeOwnershipTests {
 
     @Test("--workers is bounded, and --cni NONE needs no manifest file")
     func createOptions() throws {
-        #expect(try ClusterCreate.parse(["--workers", "3"]).workers == 3)
+        #expect(try ClusterCreate.parse(["--workers", "3"]).workers == [try WorkerGroup(count: 3)])
         #expect(throws: (any Error).self) { try ClusterCreate.parse(["--workers", "\(K8sClusters.maximumWorkers + 1)"]) }
         #expect(try ClusterCreate.parse(["--cni", "NONE"]).cni == "NONE")
     }
