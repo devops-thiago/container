@@ -191,8 +191,8 @@ public struct Parser {
         resource = resource.clampedMemory()
 
         if let cpus {
-            resource.cpus = Int(cpus)
-            try resource.validateCPUs()
+            // As `container run` upstream: 1 up to the host's cores.
+            resource.cpus = try Parser.cpus(cpus)
         }
 
         if let memory {

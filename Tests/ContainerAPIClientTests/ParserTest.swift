@@ -1579,7 +1579,7 @@ struct ParserTest {
             _ = try Parser.resources(cpus: cpus, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
         }
         #expect(error?.code == .invalidArgument)
-        #expect(error?.message.contains("invalid CPU count") == true)
+        #expect(error?.message.contains("cpus must be between 1 and") == true)
     }
 
     @Test(arguments: [(100, ContainerConfiguration.Resources.maximumVirtualCPUs), (100_000_000_000_000, ContainerConfiguration.Resources.maximumVirtualCPUs), (-1, 0), (6, 6)])
@@ -1593,15 +1593,16 @@ struct ParserTest {
         }
     }
 
-    @Test func testResourcesKeepEveryCPUCountAVMCanHave() throws {
-        // More than the host has is the native CLI's to ask for: the VM gets the host's.
-        let maximum = ContainerConfiguration.Resources.maximumVirtualCPUs
-        for cpus in [Int64(0), 1, 4, Int64(ProcessInfo.processInfo.activeProcessorCount + 1), Int64(maximum)] {
+    @Test func testResourcesTakeOneToTheHostsCores() throws {
+        // As upstream's `container run`: a count this Mac cannot give is refused, not clamped.
+        let host = ContainerConfiguration.Resources.maximumCPUs
+        for cpus in [Int64(1), Int64(host)] {
             #expect(try Parser.resources(cpus: cpus, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g")).cpus == Int(cpus))
         }
-        // Negative control: one past the most a VM can have is refused.
-        #expect(throws: ContainerizationError.self) {
-            _ = try Parser.resources(cpus: Int64(maximum) + 1, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+        for cpus in [Int64(0), Int64(host) + 1] {
+            #expect(throws: ContainerizationError.self) {
+                _ = try Parser.resources(cpus: cpus, memory: nil, defaultCPUs: 4, defaultMemory: MemorySize("1g"))
+            }
         }
     }
 
