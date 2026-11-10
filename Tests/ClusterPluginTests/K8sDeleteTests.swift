@@ -247,6 +247,12 @@ private func withScratchKubeconfig(containing cluster: String?, _ body: (URL) as
     try await body(file)
 }
 
+/// The record the cluster service holds for a single-node cluster named `name`.
+private func record(_ name: String) throws -> ClusterConfiguration {
+    try ClusterConfiguration.make(
+        name: name, nodeImage: "docker.io/kindest/node:v1.35.5", remove: false, workers: 0, cni: nil, fqdn: nil)
+}
+
 private let log = Logger(label: "k8s-delete-tests")
 
 // MARK: - Tests
@@ -316,6 +322,80 @@ extension KubeconfigEnvTests {
                 #expect(engine.calls.isEmpty)
                 let yaml = try String(contentsOf: file, encoding: .utf8)
                 #expect(!yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("a record whose nodes are gone is removed")
+        func recordWithNoNodesIsRemoved() async throws {
+            let name = "cluster-recorded"
+            let engine = FakeContainers(
+                get: .failure(ContainerizationError(.notFound, message: "container with ID \(name) not found")),
+                current: nil)
+            let kept = try record("cluster-kept")
+            let records = FakeClusterRecords([try record(name), kept])
+            try await withScratchKubeconfig(containing: name) { file in
+                try await K8sClusters.delete(name: name, containers: engine, records: records, log: log)
+                #expect(engine.calls.isEmpty)
+                #expect(records.all == [kept])
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(!yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("a record under an ordinary container's name is removed and the container stays")
+        func recordUnderAnOrdinaryContainerIsRemoved() async throws {
+            let name = "web"
+            let ordinary = try snapshot(id: name, labels: ordinaryLabels)
+            // What `listNodes` returns: the plugin's nodes only, so not this container.
+            let engine = FakeContainers(get: .success(ordinary), current: ordinary, listed: [])
+            let kept = try record("cluster-kept")
+            let records = FakeClusterRecords([try record(name), kept])
+            try await withScratchKubeconfig(containing: name) { file in
+                try await K8sClusters.delete(name: name, containers: engine, records: records, log: log)
+                #expect(engine.calls.isEmpty, "the container is neither stopped nor deleted")
+                #expect(engine.current?.configuration.labels == ordinaryLabels)
+                #expect(records.all == [kept])
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(!yaml.contains("name: \(name)"))
+            }
+        }
+
+        @Test("an ordinary container with no record under its name is still refused")
+        func ordinaryContainerWithoutARecordIsRefused() async throws {
+            let name = "web"
+            let ordinary = try snapshot(id: name, labels: ordinaryLabels)
+            let engine = FakeContainers(get: .success(ordinary), current: ordinary, listed: [])
+            let kept = try record("cluster-kept")
+            let records = FakeClusterRecords([kept])
+            try await withScratchKubeconfig(containing: name) { file in
+                await #expect(throws: ContainerizationError.self) {
+                    try await K8sClusters.delete(name: name, containers: engine, records: records, log: log)
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.current != nil)
+                #expect(records.all == [kept])
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"), "a context that is not a recorded cluster's is kept")
+            }
+        }
+
+        @Test("an ownership-conditioned delete keeps a record under an ordinary container's name")
+        func ownedDeleteKeepsRecordUnderAnOrdinaryContainer() async throws {
+            let name = "web"
+            let ordinary = try snapshot(id: name, labels: ordinaryLabels)
+            let engine = FakeContainers(get: .success(ordinary), current: ordinary, listed: [])
+            let recorded = try record(name)
+            let records = FakeClusterRecords([recorded])
+            try await withScratchKubeconfig(containing: name) { file in
+                await #expect(throws: ContainerizationError.self) {
+                    try await K8sClusters.delete(
+                        name: name, requiredLabels: ["owner": "ours"], containers: engine, records: records, log: log)
+                }
+                #expect(engine.calls.isEmpty)
+                #expect(engine.current != nil)
+                #expect(records.all == [recorded])
+                let yaml = try String(contentsOf: file, encoding: .utf8)
+                #expect(yaml.contains("name: \(name)"))
             }
         }
 
