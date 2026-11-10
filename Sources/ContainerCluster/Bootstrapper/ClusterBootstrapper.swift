@@ -136,6 +136,11 @@ public struct ClusterBootstrapper: Sendable {
                 try await ClusterHelper.waitForReady(containerId: name, client: client, log: log)
             }
 
+            // Every node's bootstrap is now written; make it survive a crash of its VM.
+            for node in [provisioner] + startedWorkers {
+                try await node.persist(log: log)
+            }
+
             progress("Writing kubeconfig")
             let rawConfig = try await ClusterHelper.fetchConfig(containerId: name, client: client, log: log)
             let kubeConfig = try await ClusterHelper.transformConfig(rawConfig, containerId: name, fqdn: fqdn, client: client)

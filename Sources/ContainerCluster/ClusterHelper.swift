@@ -251,6 +251,8 @@ public struct ClusterHelper {
 
         # Record the current IP for the next boot, then hand off to the original command.
         [ -n "$CURRENT_IP" ] && echo "$CURRENT_IP" > "$IP_MARKER"
+        # Flush the marker and any reconciled files: a VM killed before writeback boots with them empty.
+        sync
         exec  "$@"
         """
     }

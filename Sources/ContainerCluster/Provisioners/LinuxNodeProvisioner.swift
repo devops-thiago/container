@@ -293,6 +293,18 @@ public struct LinuxNodeProvisioner: NodeProvisioner {
         }
     }
 
+    /// Run `sync` in the node. Its disk caches writes, and ext4 allocates a file's blocks
+    /// only when the page cache writes them back, so a VM killed within about thirty
+    /// seconds of kubeadm writing the kubelet's config boots with that file empty and the
+    /// kubelet never starts again.
+    public func persist(log: Logger) async throws {
+        let (code, output) = try await ClusterHelper.execCapture(
+            containerId: name, executable: "/bin/sync", arguments: [], client: ContainerClient())
+        guard code == 0 else {
+            throw ContainerizationError(.internalError, message: "sync failed on \(name): \(output)")
+        }
+    }
+
     /// Wait until the node is registered with the API server, without requiring it to be Ready.
     /// Used when no CNI is installed, since nodes stay NotReady without one.
     public func waitForRegistered(log: Logger) async throws {

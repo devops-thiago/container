@@ -71,7 +71,18 @@ public protocol NodeProvisioner: Sendable {
     /// Used instead of `waitForReady` when no CNI is installed.
     func waitForRegistered(log: Logger) async throws
 
+    /// Write the node's filesystem through to its disk. Called for every node once the
+    /// cluster is up: what kubeadm and the node's preparation wrote is otherwise only in
+    /// the guest's page cache for up to half a minute, and a VM that dies in that window
+    /// boots with those files empty.
+    func persist(log: Logger) async throws
+
     /// Remove the node. Must be safe to call for a cluster that was
     /// never provisioned, and must leave nodes this provisioner did not create alone.
     func teardown(log: Logger) async throws
+}
+
+extension NodeProvisioner {
+    /// Nothing to flush for a node that keeps no state of its own.
+    public func persist(log: Logger) async throws {}
 }

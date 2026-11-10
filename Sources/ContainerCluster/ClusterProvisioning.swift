@@ -98,6 +98,11 @@ extension K8sClusters {
             }
             try Task.checkCancellation()
             try await finalizeCluster()
+            // Every node's bootstrap is now written; make it survive a crash of its VM.
+            for node in attempted {
+                try Task.checkCancellation()
+                try await node.provisioner.persist(log: log)
+            }
             try Task.checkCancellation()
         } catch {
             let original = error

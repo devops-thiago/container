@@ -29,6 +29,7 @@ private enum ProvisioningStep: Sendable, Equatable {
     case address
     case join
     case ready
+    case persist
     case teardown
 }
 
@@ -87,6 +88,11 @@ private struct TestProvisioner: NodeProvisioner {
         if failAt == .ready { throw ProvisioningFailure.expected }
     }
 
+    func persist(log: Logger) async throws {
+        await events.append("\(label).persist:\(name)")
+        if failAt == .persist { throw ProvisioningFailure.expected }
+    }
+
     func teardown(log: Logger) async throws {
         await events.append("\(label).teardown:\(name)")
         if failAt == .teardown { throw ProvisioningFailure.expected }
@@ -118,6 +124,7 @@ struct ClusterProvisioningTests {
                 return .init(token: "token", caCertHash: "sha256:hash")
             },
             persistReadiness: { _ in },
+            finalizeCluster: { await events.append("finalize") },
             log: log)
 
         #expect(
@@ -131,6 +138,41 @@ struct ClusterProvisioningTests {
                 "w2.provision:dev-worker-2",
                 "w2.join:dev-worker-2:10.0.0.2:6443:token:sha256:hash",
                 "w2.ready:dev-worker-2",
+                "finalize",
+                "cp.persist:dev",
+                "w1.persist:dev-worker-1",
+                "w2.persist:dev-worker-2",
+            ])
+    }
+
+    @Test("a node whose state cannot be flushed fails the create and every node is torn down")
+    func persistFailureCleansUpAllNodes() async {
+        let events = ProvisioningEvents()
+        let controlPlane = TestProvisioner(
+            "cp", name: "dev", roles: [StandardRoles.controlPlane], events: events)
+        let workers = [
+            K8sClusters.WorkerNode(
+                name: "dev-worker-1",
+                provisioner: TestProvisioner(
+                    "w1", name: "dev-worker-1", roles: [StandardRoles.worker], events: events, failAt: .persist))
+        ]
+
+        await #expect(throws: ProvisioningFailure.self) {
+            try await K8sClusters.provisionCluster(
+                name: "dev",
+                controlPlane: controlPlane,
+                workers: workers,
+                initializeControlPlane: { _, _, _ in .init(token: "token", caCertHash: "sha256:hash") },
+                persistReadiness: { _ in },
+                log: log)
+        }
+
+        #expect(
+            await events.values.suffix(4) == [
+                "cp.persist:dev",
+                "w1.persist:dev-worker-1",
+                "w1.teardown:dev-worker-1",
+                "cp.teardown:dev",
             ])
     }
 
