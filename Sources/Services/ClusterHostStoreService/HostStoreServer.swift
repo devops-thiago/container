@@ -68,6 +68,10 @@ package struct HostStoreServer: Sendable {
                 }
             }
         }
+        // Nothing ends the stream of connections but a closed listening socket. Returning
+        // would exit 0, which launchd does not restart, and leave the socket file behind.
+        try Task.checkCancellation()
+        throw ContainerizationError(.internalError, message: "host store socket \(socketPath) stopped accepting connections")
     }
 
     /// Binds the socket with mode 0600. The umask is set while binding so the
@@ -263,11 +267,13 @@ final class CloseOnIdleHandler: ChannelInboundHandler, Sendable {
     }
 }
 
-/// Keeps a failed accept from ending the server. An error on the listening channel is about
-/// one connection that could not be taken: on macOS, setting up a socket whose client already
-/// hung up fails with `NIOFcntlFailedError`. Passed on, it ends the stream of connections
-/// and the host store exits, leaving every node's image lookups to fail until launchd brings
-/// it back. A probe that connects and closes at once was enough to cause it.
+/// Keeps a failed accept from ending the server. On macOS, setting up a socket whose client
+/// already hung up fails with `NIOFcntlFailedError`; NIO keeps listening after it, but the
+/// error still reaches the stream of connections, ends it, and the host store exits, leaving
+/// every node's image lookups to fail until launchd brings it back. A probe that connects and
+/// closes at once was enough to cause it. Every other error on the listening channel is one
+/// NIO closes the channel for, so it is passed on and the host store exits nonzero, to be
+/// restarted.
 final class AcceptErrorHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = NIOAny
 
@@ -278,6 +284,10 @@ final class AcceptErrorHandler: ChannelInboundHandler, Sendable {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        guard error is NIOFcntlFailedError else {
+            context.fireErrorCaught(error)
+            return
+        }
         log.warning("could not accept a connection", metadata: ["error": "\(error)"])
     }
 }
