@@ -339,9 +339,11 @@ let package = Package(
         .testTarget(
             name: "ClusterHostStoreTests",
             dependencies: [
+                .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "Containerization", package: "containerization"),
                 "ClusterHostStoreService",
+                "ContainerPersistence",
             ]
         ),
         .executableTarget(

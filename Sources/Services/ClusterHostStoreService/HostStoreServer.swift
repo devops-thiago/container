@@ -50,7 +50,7 @@ package struct HostStoreServer: Sendable {
     static let idleTimeout = TimeAmount.seconds(60)
 
     package func run(socketPath: String) async throws {
-        let server = try await Self.bind(socketPath: socketPath)
+        let server = try await Self.bind(socketPath: socketPath, log: log)
         let limit = ConnectionLimit(max: Self.maxConnections)
 
         try await withThrowingDiscardingTaskGroup { group in
@@ -72,10 +72,15 @@ package struct HostStoreServer: Sendable {
 
     /// Binds the socket with mode 0600. The umask is set while binding so the
     /// socket is never reachable with wider permissions.
-    private static func bind(socketPath: String) async throws -> NIOAsyncChannel<HTTPConnection, Never> {
+    private static func bind(socketPath: String, log: Logger) async throws -> NIOAsyncChannel<HTTPConnection, Never> {
         let previousUmask = umask(0o177)
         defer { umask(previousUmask) }
         let server = try await ServerBootstrap(group: NIOSingletons.posixEventLoopGroup)
+            .serverChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(AcceptErrorHandler(log: log))
+                }
+            }
             .bind(unixDomainSocketPath: socketPath, cleanupExistingSocketFile: true) { channel in
                 channel.eventLoop.makeCompletedFuture {
                     try channel.pipeline.syncOperations.addHandlers([
@@ -255,5 +260,24 @@ final class CloseOnIdleHandler: ChannelInboundHandler, Sendable {
             return
         }
         context.close(promise: nil)
+    }
+}
+
+/// Keeps a failed accept from ending the server. An error on the listening channel is about
+/// one connection that could not be taken: on macOS, setting up a socket whose client already
+/// hung up fails with `NIOFcntlFailedError`. Passed on, it ends the stream of connections
+/// and the host store exits, leaving every node's image lookups to fail until launchd brings
+/// it back. A probe that connects and closes at once was enough to cause it.
+final class AcceptErrorHandler: ChannelInboundHandler, Sendable {
+    typealias InboundIn = NIOAny
+
+    let log: Logger
+
+    init(log: Logger) {
+        self.log = log
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        log.warning("could not accept a connection", metadata: ["error": "\(error)"])
     }
 }
