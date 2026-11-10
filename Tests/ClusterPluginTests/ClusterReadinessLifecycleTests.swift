@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerResource
+import ContainerizationError
 import Foundation
 import Logging
 import Testing
@@ -29,6 +30,9 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
     private let legacy: Bool
     private var trusted = true
     private var healthyCNI = false
+    private var sharedStore = false
+    private var hostStore = ClusterHelper.HostStoreSocketProbe.listening
+    private(set) var hostStoreProbes = 0
     private var holdAuthorization = false
     private let authorizationHold = AsyncStream<Void>.makeStream()
     private let authorizationSeen = AsyncStream<Void>.makeStream()
@@ -37,6 +41,7 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
     private(set) var deletes = 0
     private(set) var policyReads = 0
     private(set) var readinessCalls = 0
+    private(set) var readinessNodes: [String] = []
     private(set) var registrationChecks: [[String]] = []
     private(set) var configurationsWritten = 0
 
@@ -66,6 +71,11 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
     func register(_ name: String) { registered.insert(name) }
     func forgetRegistration(_ name: String) { registered.remove(name) }
     func setCNI(_ healthy: Bool) { healthyCNI = healthy }
+    func shareImageStore(_ hostStore: ClusterHelper.HostStoreSocketProbe) {
+        sharedStore = true
+        self.hostStore = hostStore
+    }
+    func setHostStore(_ hostStore: ClusterHelper.HostStoreSocketProbe) { self.hostStore = hostStore }
     func requireAdoption() { trusted = false }
     func pauseAuthorization() { holdAuthorization = true }
     func removePolicy() throws { try FileManager.default.removeItem(at: record.file) }
@@ -87,6 +97,11 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
             _ = await iterator.next()
         }
     }
+    func hostStoreSocket(name: String) -> String? { sharedStore ? "/run/fixture/hs.sock" : nil }
+    func probeHostStore(_ path: String) -> ClusterHelper.HostStoreSocketProbe {
+        hostStoreProbes += 1
+        return hostStore
+    }
     func start(_ node: ContainerSnapshot) throws {
         guard snapshots[node.id] != nil else { throw Failure.missing }
         starts.append(node.id)
@@ -98,8 +113,9 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
         return try record.read(name: name)
     }
     func storePolicy(_ policy: ClusterReadinessPolicy, name: String) throws { try record.store(policy, name: name) }
-    func waitForReady(name: String) throws {
+    func waitForReady(name: String, nodes: [String]) throws {
         readinessCalls += 1
+        readinessNodes = nodes
         guard healthyCNI else { throw Failure.cniNotReady }
         guard Set(snapshots.keys).isSubset(of: registered) else { throw Failure.notRegistered }
     }
@@ -134,7 +150,7 @@ private struct ReadinessNode: NodeProvisioner {
     func join(controlPlaneEndpoint: String, token: String, caCertHash: String, log: Logger) async throws {
         await cluster.register(name)
     }
-    func waitForReady(log: Logger) async throws { try await cluster.waitForReady(name: name) }
+    func waitForReady(log: Logger) async throws { try await cluster.waitForReady(name: name, nodes: [name]) }
     func waitForRegistered(log: Logger) async throws { try await cluster.waitForRegistered(name: "dev", nodes: [name]) }
     func teardown(log: Logger) async throws { await cluster.teardown(name) }
 }
@@ -215,6 +231,74 @@ struct ClusterReadinessLifecycleTests {
         await cluster.setCNI(false)
         await #expect(throws: ReadinessCluster.Failure.cniNotReady) { try await start(cluster) }
         #expect(try await cluster.policy() == .ready)
+    }
+
+    @Test func readyStartWaitsOnEveryNodeItStarted() async throws {
+        let cluster = try ReadinessCluster()
+        await cluster.setCNI(true)
+        try await create(cluster, cni: nil)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        try await start(cluster)
+        #expect(await cluster.readinessNodes == ["dev", "dev-worker-1", "dev-worker-2"])
+        #expect(await cluster.hostStoreProbes == 0)
+    }
+
+    @Test(arguments: [ClusterHelper.HostStoreSocketProbe.refused, .absent])
+    func sharedStoreStartFailsBeforeBootingWhenNothingServesTheHostStore(found: ClusterHelper.HostStoreSocketProbe) async throws {
+        let cluster = try ReadinessCluster()
+        try await create(cluster)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        await cluster.shareImageStore(found)
+        // What a create of the same cluster reports.
+        var expected: ContainerizationError?
+        do {
+            try ClusterHelper.checkHostStoreSocket("/run/fixture/hs.sock") { _ in found }
+        } catch let error as ContainerizationError {
+            expected = error
+        }
+        do {
+            try await start(cluster)
+            Issue.record("a shared-store cluster started with no host store")
+        } catch let error as ContainerizationError {
+            #expect(error.code == (found == .refused ? .invalidState : .notFound))
+            #expect(error.message == expected?.message)
+            #expect(error.message.contains("host store socket /run/fixture/hs.sock"))
+        }
+        #expect(await cluster.hostStoreProbes == 1)
+        #expect(await cluster.starts.isEmpty)
+        #expect(await cluster.states().allSatisfy { $0 == .stopped })
+        #expect(await cluster.policyReads == 0)
+    }
+
+    @Test func sharedStoreStartProceedsWhenTheHostStoreAccepts() async throws {
+        let cluster = try ReadinessCluster()
+        try await create(cluster)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        await cluster.shareImageStore(.listening)
+        try await start(cluster)
+        #expect(await cluster.hostStoreProbes == 1)
+        #expect(await cluster.starts == ["dev", "dev-worker-1", "dev-worker-2"])
+        #expect(await cluster.states().allSatisfy { $0 == .running })
+    }
+
+    @Test func clusterWithoutTheSharedStoreNeverProbesTheHostStore() async throws {
+        let cluster = try ReadinessCluster()
+        try await create(cluster)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        await cluster.setHostStore(.refused)
+        try await start(cluster)
+        #expect(await cluster.hostStoreProbes == 0)
+        #expect(await cluster.starts == ["dev", "dev-worker-1", "dev-worker-2"])
+    }
+
+    @Test func sharedStoreCheckComesAfterTheAdoptionPreflight() async throws {
+        let cluster = try ReadinessCluster(legacy: true)
+        try await create(cluster)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        await cluster.requireAdoption()
+        await cluster.shareImageStore(.refused)
+        await #expect(throws: ReadinessCluster.Failure.ownership) { try await start(cluster) }
+        #expect(await cluster.hostStoreProbes == 0)
     }
 
     @Test func missingWorkerRegistrationStillFailsNoCNIStart() async throws {

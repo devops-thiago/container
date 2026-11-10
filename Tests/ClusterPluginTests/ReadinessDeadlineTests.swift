@@ -30,13 +30,21 @@ private final class ReadinessClock: Sendable {
 
 struct ReadinessDeadlineTests {
     private let log = Logger(label: "readiness-deadline-tests")
+    private static let ready = [ClusterHelper.NodeReadyReport(name: "fixture", ready: true, heartbeat: nil)]
 
     @Test("late replies cannot succeed or delay the named timeout", arguments: [false, true], [Int32(0), Int32(1)])
     func lateReply(pods: Bool, code: Int32) async {
         let clock = ReadinessClock()
         do {
-            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
-                if pods && arguments.contains("node") { return 0 }
+            try await ClusterHelper.waitForReady(
+                containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) },
+                nodes: { deadline in
+                    if pods { return Self.ready }
+                    #expect(deadline == clock.now().advanced(by: .seconds(300)))
+                    clock.advance(.seconds(301))
+                    return code == 0 ? Self.ready : [.init(name: "fixture", ready: false, heartbeat: nil)]
+                }
+            ) { _, deadline in
                 #expect(deadline == clock.now().advanced(by: .seconds(300)))
                 clock.advance(.seconds(301))
                 return code
@@ -44,7 +52,7 @@ struct ReadinessDeadlineTests {
             Issue.record("readiness accepted a reply outside its budget")
         } catch let error as ContainerizationError {
             #expect(error.code == .timeout)
-            #expect(error.description.contains(pods ? "CoreDNS" : "control-plane node"))
+            #expect(error.description.contains(pods ? "CoreDNS" : "did not all report Ready"))
             #expect(error.description.contains(pods ? "get pods -n kube-system" : "get nodes -o wide"))
         } catch { Issue.record("unexpected error: \(error)") }
     }
@@ -56,8 +64,9 @@ struct ReadinessDeadlineTests {
         var timing = ClusterHelper.ReadinessTiming()
         timing.retry = .seconds(120)
         do {
-            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
-                if arguments.contains("node") { return 0 }
+            try await ClusterHelper.waitForReady(
+                containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }, nodes: { _ in Self.ready }
+            ) { arguments, deadline in
                 if arguments.contains("restart") {
                     heals.withLock { $0 += 1 }
                     #expect(clock.now().duration(to: deadline) == .seconds(180))
@@ -82,8 +91,9 @@ struct ReadinessDeadlineTests {
         var timing = ClusterHelper.ReadinessTiming()
         timing.retry = .seconds(120)
         await #expect(throws: ContainerizationError.self) {
-            try await ClusterHelper.waitForReady(containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, _ in
-                if arguments.contains("node") { return 0 }
+            try await ClusterHelper.waitForReady(
+                containerId: "fixture", log: log, timing: timing, now: { clock.now() }, sleep: { clock.advance($0) }, nodes: { _ in Self.ready }
+            ) { arguments, _ in
                 if arguments.contains("restart") { heals.withLock { $0 += 1 } }
                 return 1
             }
@@ -96,7 +106,16 @@ struct ReadinessDeadlineTests {
     func success() async throws {
         let clock = ReadinessClock()
         let calls = Mutex(0)
-        try await ClusterHelper.waitForReady(containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) }) { arguments, deadline in
+        try await ClusterHelper.waitForReady(
+            containerId: "fixture", log: log, now: { clock.now() }, sleep: { clock.advance($0) },
+            nodes: { deadline in
+                #expect(deadline == clock.now().advanced(by: .seconds(300)))
+                calls.withLock { $0 += 1 }
+                clock.advance(.seconds(1))
+                return Self.ready
+            }
+        ) { arguments, deadline in
+            #expect(arguments.contains("deployment/coredns"))
             #expect(!arguments.contains("restart"))
             #expect(deadline == clock.now().advanced(by: .seconds(300)))
             calls.withLock { $0 += 1 }

@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerAPIClient
+import ContainerClusterServiceClient
 import ContainerResource
 import ContainerizationError
 import Foundation
@@ -24,11 +25,15 @@ protocol ClusterStartupOperations: Sendable {
     func controlPlane(name: String) async throws -> ContainerSnapshot
     func nodes() async throws -> [ContainerSnapshot]
     func authorize(_ nodes: [ContainerSnapshot], name: String, adoptLegacy: Bool) async throws
+    /// The host store socket the cluster's nodes relay to, or nil when its record does not
+    /// have the shared image store.
+    func hostStoreSocket(name: String) async throws -> String?
+    func probeHostStore(_ path: String) async -> ClusterHelper.HostStoreSocketProbe
     func start(_ node: ContainerSnapshot) async throws
     func pinKubeconfig(name: String) async throws
     func storedPolicy(name: String) async throws -> ClusterReadinessPolicy?
     func storePolicy(_ policy: ClusterReadinessPolicy, name: String) async throws
-    func waitForReady(name: String) async throws
+    func waitForReady(name: String, nodes: [String]) async throws
     func waitForRegistered(name: String, nodes: [String]) async throws
     func writeKubeconfig(name: String) async throws
 }
@@ -50,6 +55,14 @@ extension K8sClusters {
         // guest metadata. Choosing a readiness policy is not permission to adopt nodes.
         try await operations.authorize([controlPlane] + workers, name: name, adoptLegacy: adoptLegacy)
         try Task.checkCancellation()
+        // The nodes keep the relay to the host store socket they were made with. Booting
+        // them with nothing serving it gives a cluster that reports Ready and then fails
+        // every image lookup, which is what a create refuses.
+        if let socket = try await operations.hostStoreSocket(name: name) {
+            let found = await operations.probeHostStore(socket)
+            try ClusterHelper.checkHostStoreSocket(socket) { _ in found }
+        }
+        try Task.checkCancellation()
         try await operations.start(controlPlane)
         try Task.checkCancellation()
         try await operations.pinKubeconfig(name: name)
@@ -68,7 +81,7 @@ extension K8sClusters {
         }
         try Task.checkCancellation()
         switch policy {
-        case .ready: try await operations.waitForReady(name: name)
+        case .ready: try await operations.waitForReady(name: name, nodes: [controlPlane.id] + workers.map(\.id))
         case .registered:
             try await operations.waitForRegistered(name: name, nodes: [controlPlane.id] + workers.map(\.id))
         }
@@ -95,6 +108,20 @@ struct LiveClusterStartup: ClusterStartupOperations {
             adoptionCommand: "container cluster start --name \(name) --adopt-legacy")
     }
 
+    /// A cluster with no record is one an earlier engine made, which had no shared store.
+    func hostStoreSocket(name: String) async throws -> String? {
+        do {
+            guard try await ClusterClient().get(name: name).configuration.sharedImageStore else { return nil }
+        } catch let error as ContainerizationError where error.code == .notFound {
+            return nil
+        }
+        return ClusterHelper.hostStoreSocketPath.string
+    }
+
+    func probeHostStore(_ path: String) async -> ClusterHelper.HostStoreSocketProbe {
+        ClusterHelper.probeHostStoreSocket(path)
+    }
+
     func start(_ node: ContainerSnapshot) async throws {
         guard ClusterHelper.ownsNode(node.configuration.labels) else {
             throw ContainerizationError(.invalidArgument, message: "\(node.id) is not a cluster node")
@@ -117,8 +144,8 @@ struct LiveClusterStartup: ClusterStartupOperations {
     func storePolicy(_ policy: ClusterReadinessPolicy, name: String) async throws {
         try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
     }
-    func waitForReady(name: String) async throws {
-        try await ClusterHelper.waitForReady(containerId: name, client: client, log: log)
+    func waitForReady(name: String, nodes: [String]) async throws {
+        try await ClusterHelper.waitForReady(containerId: name, client: client, log: log, restarted: nodes)
     }
     func waitForRegistered(name: String, nodes: [String]) async throws {
         try await ClusterHelper.waitForAPIServer(containerId: name, client: client, log: log)
