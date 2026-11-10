@@ -27,6 +27,7 @@ import NIOPosix
 import Synchronization
 
 typealias HTTPConnection = NIOAsyncChannel<HTTPServerRequestPart, HTTPServerResponsePart>
+typealias HTTPListener = NIOAsyncChannel<HTTPConnection, Never>
 typealias HTTPWriter = NIOAsyncChannelOutboundWriter<HTTPServerResponsePart>
 
 /// Serves host blobs and image descriptors to cluster nodes over HTTP on a Unix socket.
@@ -50,11 +51,17 @@ package struct HostStoreServer: Sendable {
     static let idleTimeout = TimeAmount.seconds(60)
 
     package func run(socketPath: String) async throws {
-        let server = try await Self.bind(socketPath: socketPath, log: log)
+        let listener = try await Self.bind(socketPath: socketPath, log: log)
+        try await accept(from: listener, socketPath: socketPath)
+    }
+
+    /// Serves the connections `listener` accepts. Never returns: it throws once the
+    /// listening socket is closed.
+    func accept(from listener: HTTPListener, socketPath: String) async throws {
         let limit = ConnectionLimit(max: Self.maxConnections)
 
         try await withThrowingDiscardingTaskGroup { group in
-            try await server.executeThenClose { connections in
+            try await listener.executeThenClose { connections in
                 for try await connection in connections {
                     guard limit.acquire() else {
                         log.warning("too many connections, closing", metadata: ["max": "\(Self.maxConnections)"])
@@ -76,13 +83,13 @@ package struct HostStoreServer: Sendable {
 
     /// Binds the socket with mode 0600. The umask is set while binding so the
     /// socket is never reachable with wider permissions.
-    private static func bind(socketPath: String, log: Logger) async throws -> NIOAsyncChannel<HTTPConnection, Never> {
+    static func bind(socketPath: String, log: Logger) async throws -> HTTPListener {
         let previousUmask = umask(0o177)
         defer { umask(previousUmask) }
         let server = try await ServerBootstrap(group: NIOSingletons.posixEventLoopGroup)
             .serverChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.addHandler(AcceptErrorHandler(log: log))
+                    try channel.pipeline.syncOperations.addHandlers(AcceptErrorHandler.handlers(log: log))
                 }
             }
             .bind(unixDomainSocketPath: socketPath, cleanupExistingSocketFile: true) { channel in
@@ -267,15 +274,21 @@ final class CloseOnIdleHandler: ChannelInboundHandler, Sendable {
     }
 }
 
-/// Keeps a failed accept from ending the server. On macOS, setting up a socket whose client
-/// already hung up fails with `NIOFcntlFailedError`; NIO keeps listening after it, but the
-/// error still reaches the stream of connections, ends it, and the host store exits, leaving
-/// every node's image lookups to fail until launchd brings it back. A probe that connects and
-/// closes at once was enough to cause it. Every other error on the listening channel is one
-/// NIO closes the channel for, so it is passed on and the host store exits nonzero, to be
-/// restarted.
+/// Keeps a failed accept from ending the server. NIO keeps listening after some of them, but
+/// an error that reaches the stream of connections ends it, and the host store exits, leaving
+/// every node's image lookups to fail until launchd brings it back. Those are logged and go
+/// no further. On macOS, setting up a socket whose client already hung up fails with
+/// `NIOFcntlFailedError`: a probe that connects and closes at once was enough to cause it.
+/// The others are the accept errnos in `transientErrnos`. Any other error on the listening
+/// channel is one NIO closes the channel for, so it is passed on: whether it ends the stream
+/// of connections or the closed channel does, the host store exits nonzero, to be restarted.
 final class AcceptErrorHandler: ChannelInboundHandler, Sendable {
     typealias InboundIn = NIOAny
+
+    /// The errnos of a failed accept that NIO keeps the listening socket open after. This
+    /// is the list in `ServerSocketChannel.shouldCloseOnReadError`, and has to follow it:
+    /// swallowing an error NIO closes the channel for would hide why the listener went away.
+    static let transientErrnos: Set<CInt> = [ECONNABORTED, EMFILE, ENFILE, ENOBUFS, ENOMEM]
 
     let log: Logger
 
@@ -283,8 +296,30 @@ final class AcceptErrorHandler: ChannelInboundHandler, Sendable {
         self.log = log
     }
 
+    /// The handlers for the listening channel, in order. A failed accept leaves the
+    /// connection that caused it in the backlog, so accepting again at once fails the same
+    /// way: `AcceptBackoffHandler` has to see the error before it is swallowed, to hold the
+    /// next accept back.
+    static func handlers(log: Logger) -> [any ChannelHandler] {
+        [
+            AcceptBackoffHandler(shouldForwardIOErrorCaught: true),
+            AcceptErrorHandler(log: log),
+        ]
+    }
+
+    /// Whether NIO goes on accepting connections after `error`.
+    static func keepsListening(after error: any Error) -> Bool {
+        if error is NIOFcntlFailedError {
+            return true
+        }
+        guard let error = error as? IOError else {
+            return false
+        }
+        return transientErrnos.contains(error.errnoCode)
+    }
+
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
-        guard error is NIOFcntlFailedError else {
+        guard Self.keepsListening(after: error) else {
             context.fireErrorCaught(error)
             return
         }
