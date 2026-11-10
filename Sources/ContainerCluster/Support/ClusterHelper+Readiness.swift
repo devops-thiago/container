@@ -99,7 +99,7 @@ extension ClusterHelper {
         }
     }
 
-    /// How long a start waits for the control-plane node to report Ready, and then for
+    /// How long a start waits for every node to report Ready, and then for
     /// CoreDNS to be Available, before it fails naming the step. Wall-clock, not probe
     /// counts: a probe is an exec into the node and takes several seconds of its own, so
     /// counting probes (180 and 300 of them, once) bounded nothing anyone could plan on —
@@ -153,28 +153,44 @@ extension ClusterHelper {
         var retry: Duration = .seconds(2)
     }
 
-    static func waitForReady(containerId: String, client: ContainerClient, log: Logger) async throws {
+    /// `restarted` names the nodes a start brought back. Their Ready conditions outlive a
+    /// stop, so each has to report again after its boot; a create leaves it empty.
+    static func waitForReady(containerId: String, client: ContainerClient, log: Logger, restarted: [String] = []) async throws {
         try await waitForAPIServer(containerId: containerId, client: client, log: log)
-        try await waitForReady(containerId: containerId, log: log) { arguments, deadline in
+        // Read once every node is up: one that was already running keeps the boot it has.
+        var started: [StartedNode] = []
+        for node in restarted {
+            try Task.checkCancellation()
+            started.append(.init(name: node, bootedAt: try await nodeBootTime(containerId: node, client: client)))
+        }
+        try await waitForReady(
+            containerId: containerId, log: log, started: started,
+            nodes: { deadline in try await nodeReadyReports(containerId: containerId, client: client, deadline: deadline) }
+        ) { arguments, deadline in
             try await runProbe(client: client, containerId: containerId, arguments: arguments, deadline: deadline)
         }
     }
 
     /// The injectable clock/probe keeps deadline and heal ordering deterministic in tests.
+    /// `nodes` returns what the API server holds for every node, or nil when it gave no answer.
     static func waitForReady(
-        containerId: String, log: Logger, timing: ReadinessTiming = .init(),
+        containerId: String, log: Logger, started: [StartedNode] = [], timing: ReadinessTiming = .init(),
         now: @Sendable () -> ContinuousClock.Instant = { .now },
         sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        nodes: @Sendable (ContinuousClock.Instant) async throws -> [NodeReadyReport]?,
         probe: @Sendable ([String], ContinuousClock.Instant) async throws -> Int32
     ) async throws {
+        // Until the API server answers, all that is known is which nodes were started.
+        var waitingOn = started.map(\.name)
         func checkDeadline(_ deadline: ContinuousClock.Instant, budget: Duration, pods: Bool) throws {
             try Task.checkCancellation()
             guard now() < deadline else {
-                let step = pods ? "the node is Ready but CoreDNS did not become Available" : "the control-plane node did not report Ready"
+                let step = pods ? "the node is Ready but CoreDNS did not become Available" : "the nodes did not all report Ready"
+                let unready = pods || waitingOn.isEmpty ? "" : " (\(waitingOn.joined(separator: ", ")))"
                 let inspect = pods ? "get pods -n kube-system" : "get nodes -o wide"
                 throw ContainerizationError(
                     .timeout,
-                    message: "cluster \(containerId): \(step) within \(Self.describe(budget)); "
+                    message: "cluster \(containerId): \(step) within \(Self.describe(budget))\(unready); "
                         + "inspect with 'container exec \(containerId) kubectl \(inspect)'")
             }
         }
@@ -184,16 +200,21 @@ extension ClusterHelper {
             let start = now()
             let deadline = start.advanced(by: budget)
             var restartedCoreDNS = false
-            log.info("Waiting for readiness", metadata: ["step": "\(pods ? "CoreDNS" : "control-plane node")", "budget": "\(budget)"])
+            log.info("Waiting for readiness", metadata: ["step": "\(pods ? "CoreDNS" : "nodes")", "budget": "\(budget)"])
             while true {
                 try checkDeadline(deadline, budget: budget, pods: pods)
-                let arguments =
-                    pods
-                    ? ["wait", "--for=condition=Available", "deployment/coredns", "-n", "kube-system", "--timeout=2s"]
-                    : ["wait", "--for=condition=Ready", "node", "--all", "--timeout=2s"]
                 let code: Int32
                 do {
-                    code = try await probe(arguments, deadline)
+                    if pods {
+                        code = try await probe(
+                            ["wait", "--for=condition=Available", "deployment/coredns", "-n", "kube-system", "--timeout=2s"], deadline)
+                    } else if let reports = try await nodes(deadline) {
+                        waitingOn = unreadyNodes(reports: reports, started: started)
+                        // No nodes at all is not a cluster that is Ready.
+                        code = waitingOn.isEmpty && !reports.isEmpty ? 0 : 1
+                    } else {
+                        code = 1
+                    }
                 } catch {
                     try checkDeadline(deadline, budget: budget, pods: pods)
                     throw ContainerizationError(
