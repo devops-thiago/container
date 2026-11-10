@@ -2,8 +2,10 @@ name: SiliconShip cluster-shim
 
 # Builds cluster-shim as a static aarch64 Linux binary, as upstream's
 # buildClusterShim job in common.yml does, and publishes it as a release asset
-# the app pins by sha256. The release tag names the shim's source tree, so a
-# commit that leaves cluster-shim/ unchanged publishes nothing new.
+# the app pins by sha256. The release tag names the shim's source tree and this
+# workflow, which pins the toolchain image by digest: a commit that changes
+# neither publishes nothing new, and one that changes the toolchain publishes
+# its build under a new tag.
 
 permissions:
   contents: read
@@ -26,7 +28,8 @@ jobs:
     name: Build cluster-shim
     timeout-minutes: 30
     runs-on: ubuntu-24.04
-    container: swift:6.3.0-noble
+    # swift:6.3.0-noble
+    container: swift@sha256:9949aac363e63fe96c44d08e3d00878fecbad7f50cb5450067c702012d6990e4
     permissions:
       contents: read
     steps:
@@ -60,12 +63,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Name the release after the shim's source tree
+      - name: Name the release after the shim's source tree and this workflow
         id: tree
         run: |
           tree="$(git rev-parse HEAD:cluster-shim)"
-          echo "tag=cluster-shim-${tree:0:12}" >> "$GITHUB_OUTPUT"
+          workflow="$(git rev-parse HEAD:.github/workflows/siliconship-cluster-shim.yml)"
+          echo "tag=cluster-shim-${tree:0:12}-${workflow:0:8}" >> "$GITHUB_OUTPUT"
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          echo "workflow=$workflow" >> "$GITHUB_OUTPUT"
 
       - name: Download cluster-shim
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -78,6 +83,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tree.outputs.tag }}
           TREE: ${{ steps.tree.outputs.tree }}
+          WORKFLOW: ${{ steps.tree.outputs.workflow }}
           COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -90,7 +96,7 @@ jobs:
           sha="$(cut -d' ' -f1 cluster-shim.sha256)"
           size="$(stat -c %s cluster-shim)"
           cat > notes.md <<EOF
-          cluster-shim built from commit ${COMMIT} (cluster-shim tree ${TREE}) as a static aarch64 Linux binary.
+          cluster-shim built from commit ${COMMIT} (cluster-shim tree ${TREE}, workflow ${WORKFLOW}) as a static aarch64 Linux binary.
 
           sha256: \`${sha}\`
           size: ${size} bytes
