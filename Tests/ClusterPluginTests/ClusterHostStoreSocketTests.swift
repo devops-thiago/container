@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 import ContainerPersistence
+import Foundation
 import ContainerPlugin
 import ContainerizationError
 import SystemPackage
@@ -58,7 +59,7 @@ struct ClusterHostStoreSocketTests {
         do {
             try ClusterHelper.checkHostStoreSocket(Self.tooLong) { _ in
                 looked = true
-                return true
+                return .listening
             }
             Issue.record("a \(Self.tooLong.utf8.count)-byte path was accepted")
         } catch {
@@ -75,16 +76,54 @@ struct ClusterHostStoreSocketTests {
     @Test func missingSocketIsReportedNotFound() {
         let path = Self.groupContainer + "/run/hs.sock"
         #expect(throws: ContainerizationError.self) {
-            try ClusterHelper.checkHostStoreSocket(path) { _ in false }
+            try ClusterHelper.checkHostStoreSocket(path) { _ in .absent }
         }
         do {
-            try ClusterHelper.checkHostStoreSocket(path) { _ in false }
+            try ClusterHelper.checkHostStoreSocket(path) { _ in .absent }
         } catch {
             #expect("\(error)".contains("not found"))
         }
     }
 
-    @Test func presentSocketThatFitsIsAccepted() throws {
-        try ClusterHelper.checkHostStoreSocket(Self.groupContainer + "/run/hs.sock") { _ in true }
+    @Test func listeningSocketThatFitsIsAccepted() throws {
+        try ClusterHelper.checkHostStoreSocket(Self.groupContainer + "/run/hs.sock") { _ in .listening }
+    }
+
+    @Test func socketNothingServesIsRefused() {
+        do {
+            try ClusterHelper.checkHostStoreSocket(Self.groupContainer + "/run/hs.sock") { _ in .refused }
+            Issue.record("a socket nothing serves was accepted")
+        } catch {
+            #expect("\(error)".contains("nothing is serving"))
+        }
+    }
+
+    @Test func socketThatCannotBeProbedIsNotRefused() throws {
+        try ClusterHelper.checkHostStoreSocket(Self.groupContainer + "/run/hs.sock") { _ in .unknown(errno: EPERM) }
+    }
+
+    @Test func probeTellsListeningFromLeftBehindFromAbsent() throws {
+        let directory = "/tmp/hs-probe-\(getpid())-\(UInt32.random(in: 0...UInt32.max))"
+        try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let path = directory + "/hs.sock"
+        #expect(ClusterHelper.probeHostStoreSocket(path) == .absent)
+
+        let server = socket(AF_UNIX, SOCK_STREAM, 0)
+        #expect(server >= 0)
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(path.utf8)) }
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        #expect(bound == 0)
+        #expect(listen(server, 1) == 0)
+        #expect(ClusterHelper.probeHostStoreSocket(path) == .listening)
+
+        // The server exits and its socket file stays: what an exited cluster-hoststore leaves.
+        close(server)
+        #expect(FileManager.default.fileExists(atPath: path))
+        #expect(ClusterHelper.probeHostStoreSocket(path) == .refused)
     }
 }

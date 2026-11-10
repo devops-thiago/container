@@ -96,11 +96,27 @@ public struct ClusterHelper {
         path.utf8.count <= maxSocketPathBytes
     }
 
+    /// What a connect to the host store socket found.
+    enum HostStoreSocketProbe: Equatable, Sendable {
+        /// Something accepted the connection.
+        case listening
+        /// No file at the path.
+        case absent
+        /// The file is there and nothing accepts on it: the socket a host store that has
+        /// since exited left behind.
+        case refused
+        /// Connecting failed some other way, such as a sandbox denying it. Not proof the
+        /// host store is down, so it is not refused for it.
+        case unknown(errno: Int32)
+    }
+
     /// Refuses a host store socket a node could not be given: one too long for a socket
-    /// address, which is checked first so it is not reported as missing, or one not there.
+    /// address, which is checked first so it is not reported as missing, one not there, or
+    /// one nothing answers on. The last is what a cluster-hoststore that exited leaves:
+    /// a node made with it boots, reports Ready, and then fails every image lookup.
     static func checkHostStoreSocket(
         _ path: String,
-        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        probe: (String) -> HostStoreSocketProbe = probeHostStoreSocket
     ) throws {
         guard socketPathFits(path) else {
             throw ContainerizationError(
@@ -109,9 +125,42 @@ public struct ClusterHelper {
                     "host store socket \(path) is \(path.utf8.count) bytes, too long for a socket address (at most \(maxSocketPathBytes))"
             )
         }
-        guard exists(path) else {
+        switch probe(path) {
+        case .listening, .unknown:
+            return
+        case .absent:
             throw ContainerizationError(
                 .notFound, message: "host store socket \(path) not found; is the cluster-hoststore plugin installed and running?")
+        case .refused:
+            throw ContainerizationError(
+                .invalidState,
+                message: "nothing is serving the host store socket \(path); is the cluster-hoststore plugin running?")
+        }
+    }
+
+    /// Connects to `path` as a node's relay would, and closes the connection at once.
+    static func probeHostStoreSocket(_ path: String) -> HostStoreSocketProbe {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return .unknown(errno: errno) }
+        defer { close(fd) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return .unknown(errno: ENAMETOOLONG) }
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            buffer.copyBytes(from: bytes)
+        }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return .listening }
+        switch errno {
+        case ENOENT: return .absent
+        case ECONNREFUSED: return .refused
+        case let other: return .unknown(errno: other)
         }
     }
 
