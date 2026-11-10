@@ -221,20 +221,8 @@ public enum K8sClusters {
             controlPlane: controlPlane,
             workers: workerNodes.map(\.provisioner))
 
-        // Record the cluster before provisioning, as `cluster create` does. Fails `.exists` for
-        // a live duplicate and replaces a stale record.
-        let records = ClusterClient()
-        // A cluster an earlier engine made under this name has nodes but no record. Looking
-        // it up has the service adopt it, so the create below refuses the name as it does any
-        // live cluster's, rather than recording this configuration for the existing nodes.
-        do {
-            _ = try await records.get(name: name)
-        } catch let error as ContainerizationError where error.code == .notFound {
-        }
-        _ = try await records.create(configuration: configuration)
-
         let client = ContainerClient()
-        do {
+        try await recordAndProvision(configuration: configuration, containers: client, records: ClusterClient()) {
             try await provisionCluster(
                 name: name,
                 controlPlane: controlPlane,
@@ -274,11 +262,6 @@ public enum K8sClusters {
                 },
                 log: log,
                 progressUpdate: progressUpdate)
-        } catch {
-            // `.exists` means a container with this name is already there; the record may
-            // belong to another live create.
-            if (error as? ContainerizationError)?.code != .exists { try? await records.delete(name: name) }
-            throw error
         }
 
         await progressUpdate([.setDescription("Writing kubeconfig")])
@@ -296,6 +279,76 @@ public enum K8sClusters {
             return CreateResult(kubeconfigWritten: false)
         }
         return CreateResult(kubeconfigWritten: true)
+    }
+
+    /// Record the cluster, then provision it, with the engine and the cluster service injectable.
+    ///
+    /// The record is written before any node exists, as `cluster create` does; the service
+    /// fails `.exists` for a live duplicate and replaces a stale record. A node name held by a
+    /// container that is not this cluster's is refused before that, so the failed create
+    /// leaves no record. Nothing here removes a record after `.exists`: two creates of one
+    /// name can each have written it before either made a node, so neither can tell from the
+    /// record whose cluster it now describes.
+    static func recordAndProvision(
+        configuration: ClusterConfiguration,
+        containers: any K8sClusterContainers,
+        records: any K8sClusterRecords,
+        provision: () async throws -> Void
+    ) async throws {
+        let name = configuration.name
+        try await refuseTakenNodeNames(configuration: configuration, containers: containers)
+        // A cluster an earlier engine made under this name has nodes but no record. Looking
+        // it up has the service adopt it, so the create below refuses the name as it does any
+        // live cluster's, rather than recording this configuration for the existing nodes.
+        do {
+            _ = try await records.get(name: name)
+        } catch let error as ContainerizationError where error.code == .notFound {
+        }
+        _ = try await records.create(configuration: configuration)
+
+        do {
+            try await provision()
+        } catch {
+            // `.exists` means a container took a node's name after the check above; the record
+            // may belong to another live create. `delete` removes it if no cluster is left.
+            if (error as? ContainerizationError)?.code != .exists { try? await records.delete(name: name) }
+            throw error
+        }
+    }
+
+    /// Throws `.exists` if a container that is not a node of this cluster holds one of its
+    /// node names: an ordinary container, or a node of another cluster. A node of this cluster
+    /// is left for the cluster service to refuse, which knows a live cluster from a stale record.
+    static func refuseTakenNodeNames(
+        configuration: ClusterConfiguration, containers: any K8sClusterContainers
+    ) async throws {
+        let name = configuration.name
+        let owners = Dictionary(
+            ClusterHelper.buildClusterRows(from: try await containers.listNodes()).map { ($0.snapshot.id, $0.clusterName) },
+            uniquingKeysWith: { first, _ in first })
+        for node in configuration.nodes.map(\.name) {
+            if let owner = owners[node] {
+                guard owner == name else {
+                    throw ContainerizationError(
+                        .exists,
+                        message: "cannot create cluster \(name): \(node) is a node of cluster \(owner)")
+                }
+                continue
+            }
+            let holder: ContainerSnapshot
+            do {
+                holder = try await containers.get(id: node)
+            } catch let error as ContainerizationError where error.code == .notFound {
+                continue
+            }
+            // A create of this cluster that made the node since the listing is not a collision.
+            let labels = holder.configuration.labels
+            guard ClusterHelper.ownsNode(labels), labels[ResourceLabelKeys.cluster] == name else {
+                throw ContainerizationError(
+                    .exists,
+                    message: "cannot create cluster \(name): a container named \(node) already exists and is not one of its nodes")
+            }
+        }
     }
 
     /// The size of each worker a create makes, in order: `workers` sized like the control
@@ -415,6 +468,9 @@ public enum K8sClusters {
     /// performs no mutation, and kubeconfig and the cluster's record are kept until the whole
     /// guarded delete succeeds. `records` is nil where no cluster service is reachable, as in
     /// the unit tests.
+    ///
+    /// A record whose nodes are all gone is removed on its own, even where an ordinary
+    /// container has since taken the cluster's name; that container is never touched.
     static func delete(
         name: String,
         expectedControlPlaneIncarnation: String? = nil,
@@ -461,6 +517,18 @@ public enum K8sClusters {
         }
         if let controlPlane {
             guard ClusterHelper.ownsNode(controlPlane.configuration.labels) else {
+                // An ordinary container holds the name. A record under it is of a cluster with
+                // no node left, such as one whose create failed on this container; that goes,
+                // with its kubeconfig context, and the container stays. An ownership condition
+                // has no node to prove itself on, so it removes nothing.
+                if clusterNodes.isEmpty, requiredLabels == nil, expectedControlPlaneIncarnation == nil,
+                    try await hasRecord(name: name, records: records)
+                {
+                    log.debug("removing the record of a cluster with no nodes", metadata: ["name": "\(name)"])
+                    try ClusterHelper.removeConfig(containerId: name, log: log)
+                    try await removeRecord(name: name, records: records)
+                    return
+                }
                 throw ContainerizationError(.invalidArgument, message: "\(name) is not a cluster")
             }
             if let expectedControlPlaneIncarnation,
@@ -523,6 +591,17 @@ public enum K8sClusters {
         try await removeRecord(name: name, records: records)
     }
 
+    /// Whether the cluster service has a record of `name`.
+    static func hasRecord(name: String, records: (any K8sClusterRecords)?) async throws -> Bool {
+        guard let records else { return false }
+        do {
+            _ = try await records.get(name: name)
+            return true
+        } catch let error as ContainerizationError where error.code == .invalidArgument || error.code == .notFound {
+            return false
+        }
+    }
+
     /// Remove the cluster service's record of `name`, if it has one. A cluster created
     /// before the service kept records has none.
     static func removeRecord(name: String, records: (any K8sClusterRecords)?) async throws {
@@ -535,14 +614,19 @@ public enum K8sClusters {
     }
 }
 
-/// What `K8sClusters.delete` needs from the cluster service.
+/// What `K8sClusters.create` and `delete` need from the cluster service, so a test can stand
+/// in for it.
 protocol K8sClusterRecords: Sendable {
+    @discardableResult
+    func create(configuration: ClusterConfiguration) async throws -> ClusterResource
+    func get(name: String) async throws -> ClusterResource
     func delete(name: String) async throws
 }
 
 extension ClusterClient: K8sClusterRecords {}
 
-/// What `K8sClusters.delete` needs from the engine, so a test can stand in for it.
+/// What `K8sClusters.create`, `stop` and `delete` need from the engine, so a test can stand in
+/// for it.
 protocol K8sClusterContainers: Sendable {
     func get(id: String) async throws -> ContainerSnapshot
     func listNodes() async throws -> [ContainerSnapshot]
