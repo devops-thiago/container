@@ -139,146 +139,150 @@ public enum K8sClusters {
         guard nameValid(name) else {
             throw ContainerizationError(.invalidArgument, message: "cluster name \(name) is not a valid container ID")
         }
-        let workerSizes = try workerSizes(workers: workers, cpus: cpus, memory: memory, groups: workerGroups)
-        // "NONE" installs no CNI: nodes stay NotReady until the caller installs one, so the
-        // create waits for the API server and for workers to register, not for readiness.
-        let readinessPolicy = ClusterReadinessPolicy.forCreation(cniManifestPath: cniManifestPath)
-        let skipCNI = readinessPolicy == .registered
-        if let cniManifestPath, !skipCNI {
-            guard FileManager.default.fileExists(atPath: cniManifestPath) else {
-                throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
+        // Held to the end, kubeconfig included: a delete let in once the nodes were up would
+        // remove the context this create is about to write.
+        return try await exclusively(name: name) { () async throws -> CreateResult in
+            let workerSizes = try workerSizes(workers: workers, cpus: cpus, memory: memory, groups: workerGroups)
+            // "NONE" installs no CNI: nodes stay NotReady until the caller installs one, so the
+            // create waits for the API server and for workers to register, not for readiness.
+            let readinessPolicy = ClusterReadinessPolicy.forCreation(cniManifestPath: cniManifestPath)
+            let skipCNI = readinessPolicy == .registered
+            if let cniManifestPath, !skipCNI {
+                guard FileManager.default.fileExists(atPath: cniManifestPath) else {
+                    throw ContainerizationError(.invalidArgument, message: "CNI manifest not found at \(cniManifestPath)")
+                }
             }
-        }
 
-        let workerNames = workerSizes.indices.map { ClusterHelper.workerName(cluster: name, index: $0 + 1) }
-        guard workerNames.allSatisfy({ nameValid($0) }) else {
-            throw ContainerizationError(
-                .invalidArgument,
-                message: "cluster name \(name) is too long to form worker container IDs")
-        }
+            let workerNames = workerSizes.indices.map { ClusterHelper.workerName(cluster: name, index: $0 + 1) }
+            guard workerNames.allSatisfy({ nameValid($0) }) else {
+                throw ContainerizationError(
+                    .invalidArgument,
+                    message: "cluster name \(name) is too long to form worker container IDs")
+            }
 
-        let containerSystemConfig: ContainerSystemConfig = try await ClientHealthCheck.loadContainerSystemConfig()
-        let fqdn = ClusterHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
-        // Validates the node image's version and the node list; fails before any node VM.
-        let made = try ClusterConfiguration.make(
-            name: name,
-            nodeImage: nodeImage,
-            remove: autoRemove,
-            sharedImageStore: sharedImageStore,
-            workers: UInt(workerSizes.count),
-            cni: cniManifestPath,
-            fqdn: fqdn)
-        let configuration = try ClusterConfiguration(
-            name: made.name,
-            kubernetesVersion: made.kubernetesVersion,
-            cni: made.cni,
-            fqdn: made.fqdn,
-            remove: made.remove,
-            sharedImageStore: made.sharedImageStore,
-            nodes: made.nodes,
-            creationDate: made.creationDate,
-            labels: try ResourceLabels(labels))
-
-        let controlPlane = try LinuxNodeProvisioner(
-            name: name,
-            clusterName: name,
-            labels: labels,
-            roles: workerSizes.isEmpty ? [StandardRoles.controlPlane, StandardRoles.worker] : [StandardRoles.controlPlane],
-            nodeImage: nodeImage,
-            cpus: cpus,
-            memory: memory,
-            registryScheme: registry.scheme,
-            maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
-            remove: autoRemove,
-            containerSystemConfig: containerSystemConfig,
-            fqdn: fqdn,
-            sharedImageStore: sharedImageStore,
-            progressUpdate: progressUpdate)
-        let workerNodes = try zip(workerNames, workerSizes).map { workerName, size in
-            WorkerNode(
-                name: workerName,
-                provisioner: try LinuxNodeProvisioner(
-                    name: workerName,
-                    clusterName: name,
-                    labels: labels,
-                    roles: [StandardRoles.worker],
-                    nodeImage: nodeImage,
-                    cpus: size.cpus,
-                    memory: size.memory,
-                    registryScheme: registry.scheme,
-                    maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
-                    remove: autoRemove,
-                    containerSystemConfig: containerSystemConfig,
-                    sharedImageStore: sharedImageStore,
-                    progressUpdate: progressUpdate))
-        }
-        let bootstrapper = ClusterBootstrapper(
-            name: name,
-            kubernetesVersion: configuration.kubernetesVersion,
-            cni: cniManifestPath,
-            fqdn: fqdn,
-            sharedImageStore: sharedImageStore,
-            controlPlane: controlPlane,
-            workers: workerNodes.map(\.provisioner))
-
-        let client = ContainerClient()
-        try await recordAndProvision(configuration: configuration, containers: client, records: ClusterClient()) {
-            try await provisionCluster(
+            let containerSystemConfig: ContainerSystemConfig = try await ClientHealthCheck.loadContainerSystemConfig()
+            let fqdn = ClusterHelper.fqdn(for: name, domain: containerSystemConfig.dns.domain)
+            // Validates the node image's version and the node list; fails before any node VM.
+            let made = try ClusterConfiguration.make(
                 name: name,
-                controlPlane: controlPlane,
-                workers: workerNodes,
-                initializeControlPlane: { controlPlaneName, vmIP, hasWorkers in
-                    var sans = ["127.0.0.1"]
-                    if let fqdn { sans.append(contentsOf: [vmIP, fqdn]) }
+                nodeImage: nodeImage,
+                remove: autoRemove,
+                sharedImageStore: sharedImageStore,
+                workers: UInt(workerSizes.count),
+                cni: cniManifestPath,
+                fqdn: fqdn)
+            let configuration = try ClusterConfiguration(
+                name: made.name,
+                kubernetesVersion: made.kubernetesVersion,
+                cni: made.cni,
+                fqdn: made.fqdn,
+                remove: made.remove,
+                sharedImageStore: made.sharedImageStore,
+                nodes: made.nodes,
+                creationDate: made.creationDate,
+                labels: try ResourceLabels(labels))
 
-                    await progressUpdate([.setDescription("Running kubeadm init")])
-                    try await bootstrapper.bootstrapControlPlane(
-                        nodeID: controlPlaneName,
-                        apiServerSANs: sans,
-                        advertiseAddress: vmIP,
-                        schedulable: !hasWorkers,
-                        client: client,
-                        log: log)
-
-                    guard hasWorkers else { return nil }
-                    let join = try await bootstrapper.createJoinToken(
-                        nodeID: controlPlaneName, client: client)
-                    return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
-                },
-                readinessPolicy: readinessPolicy,
-                persistReadiness: { policy in
-                    try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
-                },
-                finalizeCluster: {
-                    if skipCNI {
-                        await progressUpdate([.setDescription("Waiting for API server")])
-                        try await ClusterHelper.waitForAPIServer(
-                            containerId: name, client: client, log: log)
-                    } else {
-                        await progressUpdate([.setDescription("Waiting for cluster to be ready")])
-                        try await ClusterHelper.waitForReady(
-                            containerId: name, client: client, log: log)
-                    }
-                },
-                log: log,
+            let controlPlane = try LinuxNodeProvisioner(
+                name: name,
+                clusterName: name,
+                labels: labels,
+                roles: workerSizes.isEmpty ? [StandardRoles.controlPlane, StandardRoles.worker] : [StandardRoles.controlPlane],
+                nodeImage: nodeImage,
+                cpus: cpus,
+                memory: memory,
+                registryScheme: registry.scheme,
+                maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
+                remove: autoRemove,
+                containerSystemConfig: containerSystemConfig,
+                fqdn: fqdn,
+                sharedImageStore: sharedImageStore,
                 progressUpdate: progressUpdate)
-        }
+            let workerNodes = try zip(workerNames, workerSizes).map { workerName, size in
+                WorkerNode(
+                    name: workerName,
+                    provisioner: try LinuxNodeProvisioner(
+                        name: workerName,
+                        clusterName: name,
+                        labels: labels,
+                        roles: [StandardRoles.worker],
+                        nodeImage: nodeImage,
+                        cpus: size.cpus,
+                        memory: size.memory,
+                        registryScheme: registry.scheme,
+                        maxConcurrentDownloads: imageFetch.maxConcurrentDownloads,
+                        remove: autoRemove,
+                        containerSystemConfig: containerSystemConfig,
+                        sharedImageStore: sharedImageStore,
+                        progressUpdate: progressUpdate))
+            }
+            let bootstrapper = ClusterBootstrapper(
+                name: name,
+                kubernetesVersion: configuration.kubernetesVersion,
+                cni: cniManifestPath,
+                fqdn: fqdn,
+                sharedImageStore: sharedImageStore,
+                controlPlane: controlPlane,
+                workers: workerNodes.map(\.provisioner))
 
-        await progressUpdate([.setDescription("Writing kubeconfig")])
-        do {
-            let rawConfig = try await ClusterHelper.fetchConfig(
-                containerId: name, client: client, log: log)
-            let kubeConfig = try await ClusterHelper.transformConfig(
-                rawConfig, containerId: name, fqdn: fqdn, client: client)
-            try ClusterHelper.mergeConfig(
-                kubeConfig, containerId: name, setCurrentContext: true, log: log)
-        } catch {
-            // Not fatal: the cluster is up, and only the kubeconfig is missing. Reported
-            // rather than thrown so the caller keeps the cluster and can say how to recover.
-            log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
-            return CreateResult(kubeconfigWritten: false)
+            let client = ContainerClient()
+            try await recordAndProvision(configuration: configuration, containers: client, records: ClusterClient()) {
+                try await provisionCluster(
+                    name: name,
+                    controlPlane: controlPlane,
+                    workers: workerNodes,
+                    initializeControlPlane: { controlPlaneName, vmIP, hasWorkers in
+                        var sans = ["127.0.0.1"]
+                        if let fqdn { sans.append(contentsOf: [vmIP, fqdn]) }
+
+                        await progressUpdate([.setDescription("Running kubeadm init")])
+                        try await bootstrapper.bootstrapControlPlane(
+                            nodeID: controlPlaneName,
+                            apiServerSANs: sans,
+                            advertiseAddress: vmIP,
+                            schedulable: !hasWorkers,
+                            client: client,
+                            log: log)
+
+                        guard hasWorkers else { return nil }
+                        let join = try await bootstrapper.createJoinToken(
+                            nodeID: controlPlaneName, client: client)
+                        return JoinCredentials(token: join.token, caCertHash: join.caCertHash)
+                    },
+                    readinessPolicy: readinessPolicy,
+                    persistReadiness: { policy in
+                        try await ClusterHelper.writeReadinessPolicy(policy, name: name, client: client)
+                    },
+                    finalizeCluster: {
+                        if skipCNI {
+                            await progressUpdate([.setDescription("Waiting for API server")])
+                            try await ClusterHelper.waitForAPIServer(
+                                containerId: name, client: client, log: log)
+                        } else {
+                            await progressUpdate([.setDescription("Waiting for cluster to be ready")])
+                            try await ClusterHelper.waitForReady(
+                                containerId: name, client: client, log: log)
+                        }
+                    },
+                    log: log,
+                    progressUpdate: progressUpdate)
+            }
+
+            await progressUpdate([.setDescription("Writing kubeconfig")])
+            do {
+                let rawConfig = try await ClusterHelper.fetchConfig(
+                    containerId: name, client: client, log: log)
+                let kubeConfig = try await ClusterHelper.transformConfig(
+                    rawConfig, containerId: name, fqdn: fqdn, client: client)
+                try ClusterHelper.mergeConfig(
+                    kubeConfig, containerId: name, setCurrentContext: true, log: log)
+            } catch {
+                // Not fatal: the cluster is up, and only the kubeconfig is missing. Reported
+                // rather than thrown so the caller keeps the cluster and can say how to recover.
+                log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
+                return CreateResult(kubeconfigWritten: false)
+            }
+            return CreateResult(kubeconfigWritten: true)
         }
-        return CreateResult(kubeconfigWritten: true)
     }
 
     /// Record the cluster, then provision it, with the engine and the cluster service injectable.
@@ -443,13 +447,17 @@ public enum K8sClusters {
         requiredLabels: [String: String]? = nil,
         log: Logger
     ) async throws {
-        try await delete(
-            name: name,
-            expectedControlPlaneIncarnation: expectedControlPlaneIncarnation,
-            requiredLabels: requiredLabels,
-            containers: ContainerClient(),
-            records: ClusterClient(),
-            log: log)
+        // From the node listing to the record's removal: a create of this name in between
+        // would add nodes this delete never listed, under a record it then removes.
+        try await exclusively(name: name) {
+            try await delete(
+                name: name,
+                expectedControlPlaneIncarnation: expectedControlPlaneIncarnation,
+                requiredLabels: requiredLabels,
+                containers: ContainerClient(),
+                records: ClusterClient(),
+                log: log)
+        }
     }
 
     /// The labels a container must carry to be treated as a cluster node here.
