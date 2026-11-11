@@ -100,41 +100,10 @@ public actor NetworksService {
     /// APIServer.Start once the listener is up.
     public func startPersistedNetworks() async {
         let configurations = (try? await store.list()) ?? []
-        for configuration in configurations {
-            var effectiveConfiguration = configuration
-
-            // If there's a default network in the store, always update it with the
-            // computed default network configuration from the apiserver to ensure we
-            // have the correct default values configured.
-            if effectiveConfiguration.id == NetworkClient.defaultNetworkName {
-                effectiveConfiguration = defaultNetworkConfiguration
-                try? await store.update(effectiveConfiguration)
-            }
-
-            // Start up the network.
-            // This call will normally take ~20-100ms to complete after service
-            // registration, but on a fresh system (e.g. CI runner), it may take
-            // 5 seconds or considerably more from the registration of this first
-            // network service to its execution.
-            do {
-                try await registerService(configuration: effectiveConfiguration)
-                let client = try Self.getClient(configuration: effectiveConfiguration)
-                let networkStatus = try await client.status()
-                serviceStates[effectiveConfiguration.id] = NetworkEntry(
-                    configuration: effectiveConfiguration,
-                    status: networkStatus,
-                    client: client
-                )
-                log.info("started network", metadata: ["id": "\(effectiveConfiguration.id)"])
-            } catch {
-                log.error(
-                    "failed to start network",
-                    metadata: [
-                        "id": "\(effectiveConfiguration.id)",
-                        "error": "\(error)",
-                    ])
-            }
-        }
+        await Self.restore(
+            configurations, under: stateLock,
+            isRunning: { await self.isRunning($0.id) },
+            start: { await self.startPersisted($0) })
 
         guard serviceStates[defaultNetworkConfiguration.id] == nil else { return }
         do {
@@ -142,6 +111,68 @@ public actor NetworksService {
             _ = try await create(configuration: defaultNetworkConfiguration)
         } catch {
             log.error("failed to create default network: \(error)")
+        }
+    }
+
+    /// Start each saved network that is not running yet, one at a time under `lock`.
+    ///
+    /// The listener is up while this runs, so a network can be created through it
+    /// meanwhile, and one created then is in the store by the time its turn here comes.
+    /// Registering it again would replace the helper its containers are starting on.
+    /// `create` and `delete` change what is running under the same lock, so the check
+    /// and the start here are one step to them.
+    static func restore<Saved: Sendable>(
+        _ saved: [Saved],
+        under lock: AsyncLock,
+        isRunning: @Sendable @escaping (Saved) async -> Bool,
+        start: @Sendable @escaping (Saved) async -> Void
+    ) async {
+        for network in saved {
+            await lock.withLock { _ in
+                guard !(await isRunning(network)) else { return }
+                await start(network)
+            }
+        }
+    }
+
+    private func isRunning(_ id: String) -> Bool {
+        serviceStates[id] != nil
+    }
+
+    /// Start one network from the store. The caller holds `stateLock`.
+    private func startPersisted(_ configuration: NetworkConfiguration) async {
+        var effectiveConfiguration = configuration
+
+        // If there's a default network in the store, always update it with the
+        // computed default network configuration from the apiserver to ensure we
+        // have the correct default values configured.
+        if effectiveConfiguration.id == NetworkClient.defaultNetworkName {
+            effectiveConfiguration = defaultNetworkConfiguration
+            try? await store.update(effectiveConfiguration)
+        }
+
+        // Start up the network.
+        // This call will normally take ~20-100ms to complete after service
+        // registration, but on a fresh system (e.g. CI runner), it may take
+        // 5 seconds or considerably more from the registration of this first
+        // network service to its execution.
+        do {
+            try await registerService(configuration: effectiveConfiguration)
+            let client = try Self.getClient(configuration: effectiveConfiguration)
+            let networkStatus = try await client.status()
+            serviceStates[effectiveConfiguration.id] = NetworkEntry(
+                configuration: effectiveConfiguration,
+                status: networkStatus,
+                client: client
+            )
+            log.info("started network", metadata: ["id": "\(effectiveConfiguration.id)"])
+        } catch {
+            log.error(
+                "failed to start network",
+                metadata: [
+                    "id": "\(effectiveConfiguration.id)",
+                    "error": "\(error)",
+                ])
         }
     }
 
