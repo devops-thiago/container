@@ -99,10 +99,11 @@ public actor NetworksService {
     /// the apiserver's XPC listener is accepting connections. Called from
     /// APIServer.Start once the listener is up.
     public func startPersistedNetworks() async {
-        let configurations = (try? await store.list()) ?? []
+        let saved = ((try? await store.list()) ?? []).map(\.id)
         await Self.restore(
-            configurations, under: stateLock,
-            isRunning: { await self.isRunning($0.id) },
+            saved, under: stateLock,
+            saved: { try? await self.store.retrieve($0) },
+            isRunning: { await self.isRunning($0) },
             start: { await self.startPersisted($0) })
 
         guard serviceStates[defaultNetworkConfiguration.id] == nil else { return }
@@ -116,20 +117,23 @@ public actor NetworksService {
 
     /// Start each saved network that is not running yet, one at a time under `lock`.
     ///
-    /// The listener is up while this runs, so a network can be created through it
-    /// meanwhile, and one created then is in the store by the time its turn here comes.
-    /// Registering it again would replace the helper its containers are starting on.
-    /// `create` and `delete` change what is running under the same lock, so the check
-    /// and the start here are one step to them.
-    static func restore<Saved: Sendable>(
-        _ saved: [Saved],
+    /// The listener is up while this runs, so a network can be created or deleted through
+    /// it meanwhile. One created then is in the store and running by the time its turn here
+    /// comes, and registering it again would replace the helper its containers are starting
+    /// on. One deleted then is out of the store, and starting it from the listing would
+    /// bring it back. So the listing only names the networks: at each one's turn, under the
+    /// lock `create` and `delete` change the store and the running set under, the network
+    /// is read from the store again, and what is started is what the store holds then.
+    static func restore<ID: Sendable, Saved: Sendable>(
+        _ ids: [ID],
         under lock: AsyncLock,
-        isRunning: @Sendable @escaping (Saved) async -> Bool,
+        saved: @Sendable @escaping (ID) async -> Saved?,
+        isRunning: @Sendable @escaping (ID) async -> Bool,
         start: @Sendable @escaping (Saved) async -> Void
     ) async {
-        for network in saved {
+        for id in ids {
             await lock.withLock { _ in
-                guard !(await isRunning(network)) else { return }
+                guard !(await isRunning(id)), let network = await saved(id) else { return }
                 await start(network)
             }
         }
