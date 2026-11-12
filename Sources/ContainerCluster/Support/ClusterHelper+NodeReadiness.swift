@@ -113,7 +113,7 @@ extension ClusterHelper {
     }
 
     /// Runs a command in a node and returns what it wrote to stdout. The deadline bounds
-    /// the command, and its output is read off the cooperative pool.
+    /// the command and the reading of its output, and a command that outlives it is killed.
     private static func capture(
         containerId: String, executable: String, arguments: [String], environment: [String],
         client: ContainerClient, deadline: ContinuousClock.Instant
@@ -121,7 +121,6 @@ extension ClusterHelper {
         let pipe = Pipe()
         let devNull = FileHandle(forWritingAtPath: "/dev/null")
         defer { try? devNull?.close() }
-        let reader = pipe.fileHandleForReading
         let process: any ClientProcess
         do {
             process = try await client.createProcess(
@@ -132,21 +131,20 @@ extension ClusterHelper {
             try await process.start()
         } catch {
             try? pipe.fileHandleForWriting.close()
-            try? reader.close()
+            try? pipe.fileHandleForReading.close()
             throw error
         }
         try? pipe.fileHandleForWriting.close()
-        // The read ends when the command does. One that outlives the deadline keeps its
-        // reader, and the wait below is what reports it.
-        let output = Task.detached {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Data, Never>) in
-                DispatchQueue.global().async {
-                    continuation.resume(returning: reader.readDataToEndOfFile())
-                    try? reader.close()
-                }
-            }
+        // The drain reads its own descriptor, so the pipe's handle can go now.
+        let descriptor = dup(pipe.fileHandleForReading.fileDescriptor)
+        try? pipe.fileHandleForReading.close()
+        guard descriptor >= 0 else {
+            Task.detached { try? await process.kill(SIGKILL) }
+            throw ContainerizationError(.internalError, message: "failed to read the output of a command in node \(containerId)")
         }
-        let code = try await process.wait()
-        return (code, String(decoding: await output.value, as: UTF8.self))
+        return try await collect(
+            from: PipeDrain(owning: descriptor), deadline: deadline,
+            wait: { try await process.wait() },
+            kill: { try? await process.kill(SIGKILL) })
     }
 }
