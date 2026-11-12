@@ -99,8 +99,12 @@ struct PathUtilsTests {
         #expect(try !Self.isExcludedFromBackup(snapshots))
     }
 
+    /// Read from the file, not from what a URL remembers: resource values are cached, and a
+    /// value set through one URL can be answered from the cache of another for the same path.
     private static func isExcludedFromBackup(_ url: URL) throws -> Bool {
-        let values = try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        var fresh = URL(fileURLWithPath: url.path, isDirectory: true)
+        fresh.removeAllCachedResourceValues()
+        let values = try fresh.resourceValues(forKeys: [.isExcludedFromBackupKey])
         return values.isExcludedFromBackup == true
     }
 }
