@@ -70,6 +70,19 @@ extension ClusterHostStore {
                     ])
                 Foundation.exit(0)
             }
+            // Held from here until the process ends: it is how the app tells a store that is
+            // busy from one that is gone. Another store still holding it is on its way out,
+            // or is the one serving; either way this one does not take the socket from it.
+            let lockPath = HostStoreLiveness.lockPath(socketPath: socketPath)
+            do {
+                guard try HostStoreLiveness.hold(lockPath: lockPath) != nil else {
+                    log.error("another host store holds the lock", metadata: ["lock": "\(lockPath)"])
+                    Foundation.exit(1)
+                }
+            } catch {
+                // Serving without the lock is what every store before this one did.
+                log.error("failed to take the host store lock", metadata: ["lock": "\(lockPath)", "error": "\(error)"])
+            }
             let server = HostStoreServer(containerSystemConfig: containerSystemConfig, log: log)
             log.info("serving host store", metadata: ["socket": "\(socketPath)"])
             // Stop with the app that owns the engine, as every other engine service does.
