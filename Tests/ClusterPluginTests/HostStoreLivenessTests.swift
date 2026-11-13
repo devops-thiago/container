@@ -21,6 +21,7 @@ import Testing
 
 /// Two opens of one file in one process hold separate `flock`s, so a test can be the store
 /// and the one asking about it.
+@Suite(.processExclusive)
 struct HostStoreLivenessTests {
     private func lockPath() throws -> (directory: URL, path: String) {
         let directory = FileManager.default.temporaryDirectory.appending(path: "hs-liveness-\(UUID().uuidString)")

@@ -155,6 +155,7 @@ private struct ReadinessNode: NodeProvisioner {
     func teardown(log: Logger) async throws { await cluster.teardown(name) }
 }
 
+@Suite(.processExclusive)
 struct ClusterReadinessLifecycleTests {
     private let log = Logger(label: "cluster-readiness-tests")
 
