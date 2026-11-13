@@ -150,6 +150,38 @@ struct ProcessDeadlineTests {
             stdio: [], deadline: ContinuousClock.now.advanced(by: .seconds(3)))
     }
 
+    @Test("a cleanup kill names the process, and a kill that is never answered is given up on")
+    func nonreplyingKill() async throws {
+        let seen = Mutex<[String]>([])
+        let listener = xpc_connection_create(nil, nil)
+        let server = XPCServer(
+            connection: listener,
+            routes: [
+                XPCRoute.containerKill.rawValue: XPCServer.route { request in
+                    let target = [XPCKeys.id, .processIdentifier, .signal].map { request.string(key: $0.rawValue) ?? "" }
+                    seen.withLock { $0.append(target.joined(separator: " ")) }
+                    try await Task.sleep(for: .seconds(5))
+                    return request.reply()
+                },
+                "fixture-ready": XPCServer.route { $0.reply() },
+            ], log: Logger(label: "process-kill-test"))
+        let listening = Task { try await server.listen() }
+        let transport = XPCClient(endpoint: xpc_endpoint_create(listener), label: "process-kill-test")
+        defer {
+            transport.close()
+            xpc_connection_cancel(listener)
+            listening.cancel()
+        }
+        try await transport.send(XPCMessage(route: "fixture-ready"), responseTimeout: .seconds(10))
+        let client = ContainerClient(xpcClient: transport)
+        let sent = ContinuousClock.now
+        await #expect(throws: (any Error).self) {
+            try await client.killProcess(containerId: "node", processId: "probe", signal: SIGKILL, responseTimeout: .milliseconds(300))
+        }
+        #expect(sent.duration(to: .now) < .seconds(3), "must not wait for the five-second stalled reply")
+        #expect(seen.withLock { $0 } == ["node probe KILL"])
+    }
+
     @Test("on-time create/start/wait still succeeds")
     func successfulReply() async throws {
         let (_, seen, error) = try await pipeline(stall: nil)

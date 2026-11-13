@@ -414,6 +414,18 @@ public struct ContainerClient: Sendable {
         }
     }
 
+    /// Send a signal to a process of a container by its identifiers, and give up on the
+    /// reply after `responseTimeout`.
+    ///
+    /// For cleaning up after a process whose create or start did not answer: there is no
+    /// process object then, and a cleanup must not wait on a service that does not reply.
+    /// A SIGKILL is answered once the process has exited.
+    public func killProcess(containerId: String, processId: String, signal: Int32, responseTimeout: Duration) async throws {
+        try await xpcClient.send(
+            ClientProcessImpl.killRequest(containerId: containerId, processId: processId, signal: signal),
+            responseTimeout: responseTimeout)
+    }
+
     /// Get the log file handles for a container.
     public func logs(id: String) async throws -> [FileHandle] {
         do {
