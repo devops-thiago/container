@@ -118,20 +118,51 @@ extension ClusterHelper {
         containerId: String, executable: String, arguments: [String], environment: [String],
         client: ContainerClient, deadline: ContinuousClock.Instant
     ) async throws -> (code: Int32, output: String) {
-        let pipe = Pipe()
+        // Named here, so the command can be killed whether or not its create or start answers.
+        let processId = UUID().uuidString.lowercased()
         let devNull = FileHandle(forWritingAtPath: "/dev/null")
         defer { try? devNull?.close() }
-        let process: any ClientProcess
+        return try await capture(
+            deadline: deadline,
+            launch: { stdout in
+                let process = try await client.createProcess(
+                    containerId: containerId, processId: processId,
+                    configuration: ProcessConfiguration(
+                        executable: executable, arguments: arguments, environment: environment, terminal: false),
+                    stdio: [nil, stdout, devNull], deadline: deadline)
+                try await process.start()
+                return { try await process.wait() }
+            },
+            kill: {
+                try await client.killProcess(
+                    containerId: containerId, processId: processId, signal: SIGKILL, responseTimeout: cleanupReplyTimeout)
+            })
+    }
+
+    /// How long one kill sent in cleanup waits for its reply.
+    static let cleanupReplyTimeout: Duration = .seconds(10)
+
+    /// Runs what `launch` starts with its stdout on a pipe, and returns its exit code and
+    /// output. `launch` returns how to wait for the command.
+    ///
+    /// A launch that fails may have started the command all the same: the request can reach
+    /// the node and only its reply be late or given up on. So a failed launch is cleaned up
+    /// as a command that outlived its deadline is, with `kill`, which is not waited for.
+    static func capture(
+        deadline: ContinuousClock.Instant,
+        launch: (FileHandle) async throws -> @Sendable () async throws -> Int32,
+        kill: @Sendable @escaping () async throws -> Void,
+        cleanupPause: Duration = .seconds(1)
+    ) async throws -> (code: Int32, output: String) {
+        let cleanup: @Sendable () async -> Void = { await killUntilSent(kill, pause: cleanupPause) }
+        let pipe = Pipe()
+        let wait: @Sendable () async throws -> Int32
         do {
-            process = try await client.createProcess(
-                containerId: containerId, processId: UUID().uuidString.lowercased(),
-                configuration: ProcessConfiguration(
-                    executable: executable, arguments: arguments, environment: environment, terminal: false),
-                stdio: [nil, pipe.fileHandleForWriting, devNull], deadline: deadline)
-            try await process.start()
+            wait = try await launch(pipe.fileHandleForWriting)
         } catch {
             try? pipe.fileHandleForWriting.close()
             try? pipe.fileHandleForReading.close()
+            Task.detached { await cleanup() }
             throw error
         }
         try? pipe.fileHandleForWriting.close()
@@ -139,12 +170,26 @@ extension ClusterHelper {
         let descriptor = dup(pipe.fileHandleForReading.fileDescriptor)
         try? pipe.fileHandleForReading.close()
         guard descriptor >= 0 else {
-            Task.detached { try? await process.kill(SIGKILL) }
-            throw ContainerizationError(.internalError, message: "failed to read the output of a command in node \(containerId)")
+            Task.detached { await cleanup() }
+            throw ContainerizationError(.internalError, message: "failed to read the output of a command in a node")
         }
-        return try await collect(
-            from: PipeDrain(owning: descriptor), deadline: deadline,
-            wait: { try await process.wait() },
-            kill: { try? await process.kill(SIGKILL) })
+        return try await collect(from: PipeDrain(owning: descriptor), deadline: deadline, wait: wait, kill: cleanup)
+    }
+
+    /// Sends `kill` until one is accepted, three times at most.
+    ///
+    /// A start whose reply was given up on can still take effect a moment later, and a kill
+    /// that arrives before it is refused, as is one for a command that was never created.
+    /// The tries are few and paused, so a command that does not exist costs little.
+    static func killUntilSent(_ kill: @Sendable () async throws -> Void, pause: Duration, attempts: Int = 3) async {
+        for attempt in 1...attempts {
+            do {
+                try await kill()
+                return
+            } catch {
+                guard attempt < attempts else { return }
+                try? await Task.sleep(for: pause)
+            }
+        }
     }
 }
