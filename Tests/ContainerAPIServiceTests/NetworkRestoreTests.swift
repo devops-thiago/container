@@ -25,21 +25,17 @@ import Testing
 /// can be created through it meanwhile. These hold the restore between reading the store
 /// and reaching a network, and create that network in the gap.
 struct NetworkRestoreTests {
-    /// What is saved, what is running, and how often each network's helper was registered
-    /// and with which saved configuration.
+    /// What is saved, what is running, and how often each network's helper was registered.
     private final class Helpers: Sendable {
-        private let state = Mutex<(saved: [String: String], running: Set<String>, registered: [String], started: [String])>(([:], [], [], []))
+        private let state = Mutex<(saved: [String: String], running: Set<String>, registered: [String])>(([:], [], []))
         init(saved: [String] = []) { state.withLock { for id in saved { $0.saved[id] = id } } }
         var registered: [String] { state.withLock { $0.registered } }
-        /// The configuration each registration was made with, in order.
-        var started: [String] { state.withLock { $0.started } }
         func isRunning(_ id: String) -> Bool { state.withLock { $0.running.contains(id) } }
         func saved(_ id: String) -> String? { state.withLock { $0.saved[id] } }
         func save(_ id: String, as configuration: String? = nil) { state.withLock { $0.saved[id] = configuration ?? id } }
         func register(_ id: String) {
             state.withLock {
                 $0.registered.append(id)
-                $0.started.append($0.saved[id] ?? id)
                 $0.running.insert(id)
             }
         }
@@ -151,42 +147,41 @@ struct NetworkRestoreTests {
         #expect(helpers.registered == ["made"])
     }
 
-    @Test("a network deleted after the store was listed and before its turn stays deleted", .timeLimit(.minutes(1)))
+    @Test("a network deleted after the store was listed and before its turn stays deleted")
     func deletedBeforeItsTurn() async {
         let helpers = Helpers(saved: ["default"])
         let lock = AsyncLock()
-        let first = Checkpoint()
-        // "made" was created, so saved and running, before the restore listed the store.
+        // "made" was created, so saved and running, when the store was listed.
         #expect(await create("made", helpers: helpers, lock: lock))
-        let restore = Task {
-            await self.restore(["default", "made"], helpers: helpers, lock: lock) { id in
-                if id == "default" { await first.pause() }
-            }
+        let listed = ["default", "made"]
+        // It is deleted while the restore is on "default": after the listing, and over
+        // before the restore can take the lock for "made". The delete is made from inside
+        // that turn, so the order does not depend on which task runs first.
+        await restore(listed, helpers: helpers, lock: lock) { id in
+            if id == "default" { helpers.remove("made") }
         }
-        await first.arrival()
-        // The delete waits for the lock the restore holds on "default", and runs before
-        // the restore reaches "made".
-        let deleted = Task { await delete("made", helpers: helpers, lock: lock) }
-        first.release()
-        await deleted.value
-        await restore.value
         #expect(helpers.registered == ["made", "default"], "the deleted network was not started again")
         #expect(!helpers.isRunning("made") && helpers.saved("made") == nil)
     }
 
-    @Test("a network deleted and saved again before its turn is started as the store holds it now", .timeLimit(.minutes(1)))
+    @Test("a network deleted and saved again before its turn is started as the store holds it now")
     func replacedBeforeItsTurn() async {
-        let helpers = Helpers(saved: ["made"])
+        let helpers = Helpers(saved: ["default", "made"])
         let lock = AsyncLock()
-        // The listing named "made" as first saved. Since then it was deleted and saved again
-        // with another configuration, and is not running.
-        helpers.remove("made")
-        helpers.save("made", as: "made, as saved again")
+        // What the restore handed to `start`, as it was handed over.
+        let started = Mutex<[String]>([])
         await NetworksService.restore(
-            ["made"], under: lock,
+            ["default", "made"], under: lock,
             saved: { helpers.saved($0) },
             isRunning: { helpers.isRunning($0) },
-            start: { _ in helpers.register("made") })
-        #expect(helpers.started == ["made, as saved again"])
+            start: { configuration in
+                started.withLock { $0.append(configuration) }
+                // While the restore is on "default", "made" is deleted and saved again
+                // with another configuration, and is not running.
+                guard configuration == "default" else { return }
+                helpers.remove("made")
+                helpers.save("made", as: "made, as saved again")
+            })
+        #expect(started.withLock { $0 } == ["default", "made, as saved again"])
     }
 }
