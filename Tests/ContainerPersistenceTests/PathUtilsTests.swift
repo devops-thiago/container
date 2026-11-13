@@ -75,32 +75,36 @@ struct PathUtilsTests {
         #expect(path == FilePath("/usr/local"))
     }
 
-    @Test func testNewDirectoryIsExcludedAndExistingChoiceIsKept() throws {
+    /// The directory that stands for a person's choice to back it up is one that was never
+    /// excluded. Excluding it and clearing that again would not do: macOS writes an exclusion
+    /// set through a URL a second time, some while after the call returned, and that write
+    /// undoes a clear made in between.
+    @Test func testNewDirectoryIsExcludedAndExistingOneIsLeftAsItIs() throws {
         let parent = FileManager.default.temporaryDirectory
             .appendingPathComponent("container-backup-exclusion-\(UUID().uuidString)", isDirectory: true)
         let snapshots = parent.appendingPathComponent("snapshots", isDirectory: true)
-        let volumes = parent.appendingPathComponent("volumes", isDirectory: true)
+        let included = parent.appendingPathComponent("included", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: parent) }
 
         try PathUtils.createDirectoryExcludingFromBackup(snapshots)
-        try FileManager.default.createDirectory(at: volumes, withIntermediateDirectories: true)
         FileManager.default.createFile(
             atPath: snapshots.appendingPathComponent("snapshot").path,
             contents: Data("sparse".utf8)
         )
         #expect(try Self.isExcludedFromBackup(snapshots))
-        #expect(try !Self.isExcludedFromBackup(volumes))
 
-        var included = URLResourceValues()
-        included.isExcludedFromBackup = false
-        var mutableSnapshots = snapshots
-        try mutableSnapshots.setResourceValues(included)
+        try FileManager.default.createDirectory(at: included, withIntermediateDirectories: true)
+        try PathUtils.createDirectoryExcludingFromBackup(included)
+        #expect(try !Self.isExcludedFromBackup(included))
+
+        // A later start finds both there, and changes neither.
         try PathUtils.createDirectoryExcludingFromBackup(snapshots)
-        #expect(try !Self.isExcludedFromBackup(snapshots))
+        try PathUtils.createDirectoryExcludingFromBackup(included)
+        #expect(try Self.isExcludedFromBackup(snapshots))
+        #expect(try !Self.isExcludedFromBackup(included))
     }
 
-    /// Read from the file, not from what a URL remembers: resource values are cached, and a
-    /// value set through one URL can be answered from the cache of another for the same path.
+    /// Read through a URL of its own, with nothing cached.
     private static func isExcludedFromBackup(_ url: URL) throws -> Bool {
         var fresh = URL(fileURLWithPath: url.path, isDirectory: true)
         fresh.removeAllCachedResourceValues()
