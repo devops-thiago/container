@@ -176,7 +176,7 @@ private func code(_ operation: () async throws -> Void) async -> Containerizatio
 }
 
 /// One create or delete of a cluster name at a time, in this process and across processes.
-@Suite("Cluster operation lock")
+@Suite("Cluster operation lock", .processExclusive)
 struct ClusterOperationLockTests {
     private let log = Logger(label: "ClusterOperationLockTests")
 
@@ -190,7 +190,16 @@ struct ClusterOperationLockTests {
         }
     }
 
+    /// A delete drops the cluster's entries from the kubeconfig `KUBECONFIG` names, or from
+    /// the default one, which is the kubeconfig of whoever runs the tests. So the delete runs
+    /// with `KUBECONFIG` on a file of the test's own, which does not exist: nothing is edited.
     private func delete(_ name: String, engine: Engine, records: Records, locks: LockDirectory) async throws {
+        let key = "KUBECONFIG"
+        let original = Darwin.getenv(key).map { String(cString: $0) }
+        setenv(key, locks.path.appending("kubeconfig").string, 1)
+        defer {
+            if let original { setenv(key, original, 1) } else { unsetenv(key) }
+        }
         try await K8sClusters.exclusively(name: name, locks: locks.path) {
             try await K8sClusters.delete(name: name, containers: engine, records: records, log: log)
         }

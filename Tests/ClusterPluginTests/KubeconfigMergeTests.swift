@@ -416,7 +416,7 @@ struct MergeConfigTests {
 // Both suites mutate the KUBECONFIG environment variable; wrap them in a
 // common .serialized parent so they cannot race against each other.
 
-@Suite("ClusterHelper env-dependent", .serialized)
+@Suite("ClusterHelper env-dependent", .serialized, .processExclusive)
 struct KubeconfigEnvTests {
 
     // MARK: - resolveKubeconfigMergePath

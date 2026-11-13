@@ -64,6 +64,7 @@ final class ReadinessFileFixture {
     }
 }
 
+@Suite(.processExclusive)
 struct ReadinessRecordTests {
     @Test func missingRecordDoesNotClaimNoCNI() throws {
         let f = try ReadinessFileFixture()
