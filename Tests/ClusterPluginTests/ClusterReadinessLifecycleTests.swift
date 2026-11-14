@@ -44,6 +44,8 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
     private(set) var readinessNodes: [String] = []
     private(set) var registrationChecks: [[String]] = []
     private(set) var configurationsWritten = 0
+    /// What a start did after its nodes were up, in order.
+    private(set) var afterNodes: [String] = []
 
     init(legacy: Bool = false) throws {
         self.legacy = legacy
@@ -108,22 +110,28 @@ private actor ReadinessCluster: ClusterStartupOperations, K8sClusterContainers {
         snapshots[node.id]?.status = .running
     }
     func pinKubeconfig(name: String) {}
+    func followControlPlane(name: String, workers: [String]) { afterNodes.append("follow \(name) \(workers.joined(separator: ","))") }
     func storedPolicy(name: String) throws -> ClusterReadinessPolicy? {
         policyReads += 1
         return try record.read(name: name)
     }
     func storePolicy(_ policy: ClusterReadinessPolicy, name: String) throws { try record.store(policy, name: name) }
     func waitForReady(name: String, nodes: [String]) throws {
+        afterNodes.append("wait")
         readinessCalls += 1
         readinessNodes = nodes
         guard healthyCNI else { throw Failure.cniNotReady }
         guard Set(snapshots.keys).isSubset(of: registered) else { throw Failure.notRegistered }
     }
     func waitForRegistered(name: String, nodes: [String]) throws {
+        afterNodes.append("wait")
         registrationChecks.append(nodes)
         guard Set(nodes).isSubset(of: registered) else { throw Failure.notRegistered }
     }
-    func writeKubeconfig(name: String) { configurationsWritten += 1 }
+    func writeKubeconfig(name: String) {
+        afterNodes.append("kubeconfig")
+        configurationsWritten += 1
+    }
     func stop(id: String, requiredLabels: [String: String], expectedIncarnation: String) throws {
         let node = try get(id: id)
         guard node.incarnation == expectedIncarnation,
@@ -191,6 +199,29 @@ struct ClusterReadinessLifecycleTests {
         #expect(await cluster.states().count == 3)
         #expect(await cluster.states().allSatisfy { $0 == .running })
         #expect(await cluster.deletes == 0)
+    }
+
+    /// A control plane that came back with another address is followed, and the host's
+    /// kubeconfig written, before the wait: a worker left on the old address never reports
+    /// Ready, and a start that fails its wait must still leave a kubeconfig to look with.
+    @Test func startFollowsTheControlPlaneAndWritesKubeconfigBeforeWaiting() async throws {
+        let cluster = try ReadinessCluster()
+        try await create(cluster)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        let before = await cluster.afterNodes.count
+        try await start(cluster)
+        #expect(Array(await cluster.afterNodes.dropFirst(before)) == ["follow dev dev-worker-1,dev-worker-2", "kubeconfig", "wait"])
+    }
+
+    @Test func startThatFailsItsWaitStillWroteKubeconfig() async throws {
+        let cluster = try ReadinessCluster()
+        await cluster.setCNI(true)
+        try await create(cluster, cni: nil)
+        await cluster.setCNI(false)
+        try await K8sClusters.stop(name: "dev", containers: cluster, log: log)
+        let before = await cluster.configurationsWritten
+        await #expect(throws: ReadinessCluster.Failure.cniNotReady) { try await start(cluster) }
+        #expect(await cluster.configurationsWritten == before + 1)
     }
 
     @Test func ordinaryBrokenCNIIsNotTreatedAsIntentionalNoCNI() async throws {
