@@ -31,6 +31,9 @@ protocol ClusterStartupOperations: Sendable {
     func probeHostStore(_ path: String) async -> ClusterHelper.HostStoreSocketProbe
     func start(_ node: ContainerSnapshot) async throws
     func pinKubeconfig(name: String) async throws
+    /// Point what names the control plane's address, in it and in `workers`, at the address
+    /// it has now.
+    func followControlPlane(name: String, workers: [String]) async throws
     func storedPolicy(name: String) async throws -> ClusterReadinessPolicy?
     func storePolicy(_ policy: ClusterReadinessPolicy, name: String) async throws
     func waitForReady(name: String, nodes: [String]) async throws
@@ -80,16 +83,26 @@ extension K8sClusters {
             try await operations.start(worker)
         }
         try Task.checkCancellation()
+        // Before the wait: a worker left on the control plane's previous address never
+        // reports Ready, and the wait would run its whole budget to say so.
+        try await operations.followControlPlane(name: name, workers: workers.map(\.id))
+        try Task.checkCancellation()
+        // Before the wait as well, so a start that then fails its readiness still leaves
+        // the host a kubeconfig for the cluster as it is now, to look into it with.
+        await writeKubeconfig(name: name, operations: operations, log: log)
+        try Task.checkCancellation()
         switch policy {
         case .ready: try await operations.waitForReady(name: name, nodes: [controlPlane.id] + workers.map(\.id))
         case .registered:
             try await operations.waitForRegistered(name: name, nodes: [controlPlane.id] + workers.map(\.id))
         }
         try Task.checkCancellation()
+    }
+
+    private static func writeKubeconfig(name: String, operations: any ClusterStartupOperations, log: Logger) async {
         do {
             try await operations.writeKubeconfig(name: name)
         } catch {
-            if Task.isCancelled { throw CancellationError() }
             log.warning("failed to write kubeconfig", metadata: ["name": "\(name)", "error": "\(error)"])
         }
     }
@@ -137,6 +150,9 @@ struct LiveClusterStartup: ClusterStartupOperations {
 
     func pinKubeconfig(name: String) async throws {
         try await ClusterHelper.pinAdminKubeconfigsToLoopback(nodeID: name, client: client)
+    }
+    func followControlPlane(name: String, workers: [String]) async throws {
+        try await ClusterHelper.followControlPlane(name: name, workers: workers, client: client, log: log)
     }
     func storedPolicy(name: String) async throws -> ClusterReadinessPolicy? {
         try await ClusterHelper.readReadinessPolicy(name: name, client: client)

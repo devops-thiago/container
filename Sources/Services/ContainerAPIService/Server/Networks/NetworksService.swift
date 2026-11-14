@@ -99,7 +99,12 @@ public actor NetworksService {
     /// the apiserver's XPC listener is accepting connections. Called from
     /// APIServer.Start once the listener is up.
     public func startPersistedNetworks() async {
-        let saved = ((try? await store.list()) ?? []).map(\.id)
+        // In an order that lets every network have the subnet it had: see `AssignedSubnet`.
+        let saved = AssignedSubnet.restoreOrder(
+            ((try? await store.list()) ?? []).map {
+                AssignedSubnet.Saved(id: $0.id, creationDate: $0.creationDate, hasSubnet: $0.ipv4Subnet != nil || recordedSubnet(of: $0.id) != nil)
+            },
+            builtin: defaultNetworkConfiguration.id)
         await Self.restore(
             saved, under: stateLock,
             saved: { try? await self.store.retrieve($0) },
@@ -161,14 +166,13 @@ public actor NetworksService {
         // 5 seconds or considerably more from the registration of this first
         // network service to its execution.
         do {
-            try await registerService(configuration: effectiveConfiguration)
-            let client = try Self.getClient(configuration: effectiveConfiguration)
-            let networkStatus = try await client.status()
+            let (client, networkStatus) = try await startService(configuration: effectiveConfiguration)
             serviceStates[effectiveConfiguration.id] = NetworkEntry(
                 configuration: effectiveConfiguration,
                 status: networkStatus,
                 client: client
             )
+            recordSubnet(networkStatus.ipv4Subnet, of: effectiveConfiguration.id)
             log.info("started network", metadata: ["id": "\(effectiveConfiguration.id)"])
         } catch {
             log.error(
@@ -278,12 +282,8 @@ public actor NetworksService {
                 throw ContainerizationError(.exists, message: "network \(configuration.id) already exists")
             }
 
-            // Create and start the network.
-            try await self.registerService(configuration: configuration)
-            let client = try Self.getClient(configuration: configuration)
-
-            // Ensure the network is running
-            let networkStatus = try await client.status()
+            // Create and start the network, and ensure it is running.
+            let (client, networkStatus) = try await self.startService(configuration: configuration)
 
             let finalConfiguration = try NetworkConfiguration(
                 name: configuration.name,
@@ -307,6 +307,7 @@ public actor NetworksService {
                 } catch {
                     try await self.store.update(finalConfiguration)
                 }
+                await self.recordSubnet(networkStatus.ipv4Subnet, of: finalConfiguration.id)
                 return NetworkResource(configuration: finalConfiguration, status: networkStatus)
             } catch {
                 await self.removeServiceState(key: finalConfiguration.id)
@@ -492,7 +493,53 @@ public actor NetworksService {
         NetworkClient(id: configuration.id, plugin: configuration.plugin)
     }
 
-    private func registerService(configuration: NetworkConfiguration) async throws {
+    /// The subnet recorded for a network at an earlier start, if any.
+    private nonisolated func recordedSubnet(of id: String) -> CIDRv4? {
+        (try? store.entityPath(id)).flatMap { AssignedSubnet.read(in: $0) }
+    }
+
+    /// Keep the subnet a network was given, to ask for it again at the next start. Failing
+    /// to costs only that: the network runs, and may get another subnet next time.
+    private func recordSubnet(_ subnet: CIDRv4, of id: String) {
+        do {
+            try AssignedSubnet.write(subnet, in: try store.entityPath(id))
+        } catch {
+            log.warning("failed to record the network's subnet", metadata: ["id": "\(id)", "error": "\(error)"])
+        }
+    }
+
+    /// Register a network's helper and wait for it to be running. The caller holds `stateLock`.
+    ///
+    /// A network the user gave no subnet asks for the one it had before, as long as no
+    /// running network holds it. If the helper does not come up on that subnet, it is
+    /// started again with none, as it was before subnets were recorded: a network that
+    /// moved is better than one that is missing.
+    private func startService(
+        configuration: NetworkConfiguration
+    ) async throws -> (client: ContainerNetworkClient.NetworkClient, status: NetworkStatus) {
+        let recorded =
+            configuration.ipv4Subnet == nil
+            ? AssignedSubnet.toAskFor(
+                recorded: recordedSubnet(of: configuration.id), running: serviceStates.values.map(\.status.ipv4Subnet))
+            : nil
+        if let recorded {
+            do {
+                try await registerService(configuration: configuration, recorded: recorded)
+                let client = try Self.getClient(configuration: configuration)
+                return (client, try await client.status())
+            } catch {
+                log.warning(
+                    "network did not start on the subnet it had; letting it take another",
+                    metadata: ["id": "\(configuration.id)", "subnet": "\(recorded)", "error": "\(error)"])
+                try? await deregisterService(configuration: configuration)
+            }
+        }
+        try await registerService(configuration: configuration)
+        let client = try Self.getClient(configuration: configuration)
+        return (client, try await client.status())
+    }
+
+    private func registerService(configuration: NetworkConfiguration, recorded: CIDRv4? = nil) async throws {
         guard configuration.mode == .nat || configuration.mode == .hostOnly else {
             throw ContainerizationError(.invalidArgument, message: "unsupported network mode \(configuration.mode.rawValue)")
         }
@@ -536,6 +583,8 @@ public actor NetworksService {
             }
 
             args += ["--subnet", ipv4Subnet.description]
+        } else if let recorded {
+            args += ["--subnet", recorded.description]
         }
 
         if let ipv6Subnet = configuration.ipv6Subnet {
