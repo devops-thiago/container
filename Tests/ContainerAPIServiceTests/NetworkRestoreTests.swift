@@ -122,6 +122,35 @@ struct NetworkRestoreTests {
         #expect(helpers.registered.filter { $0 == "default" }.count == 1)
     }
 
+    /// What `NetworksService.create` does since it runs the restore itself before making
+    /// its network: the listener answers before the engine's own restore has started.
+    private func createAfterRestoring(_ id: String, saved: [String], helpers: Helpers, lock: AsyncLock, beforeStart: @Sendable @escaping (String) async -> Void = { _ in }) async
+        -> Bool
+    {
+        await restore(saved, helpers: helpers, lock: lock, beforeStart: beforeStart)
+        return await create(id, helpers: helpers, lock: lock)
+    }
+
+    @Test("a network created before the engine's restore has started is made after every saved network, each started once")
+    func createBeforeRestoreStarts() async {
+        let saved = ["default", "kept"]
+        let helpers = Helpers(saved: saved)
+        let lock = AsyncLock()
+        let first = Checkpoint()
+        // The create arrives first: its own pass is on "default" when the engine's begins.
+        let created = Task {
+            await self.createAfterRestoring("new", saved: saved, helpers: helpers, lock: lock) { id in
+                if id == "default" { await first.pause() }
+            }
+        }
+        await first.arrival()
+        let engine = Task { await self.restore(saved, helpers: helpers, lock: lock) }
+        first.release()
+        #expect(await created.value)
+        await engine.value
+        #expect(helpers.registered == ["default", "kept", "new"])
+    }
+
     @Test("a network running before its turn in the restore is left alone")
     func runningNetworkIsSkipped() async {
         let helpers = Helpers(saved: ["default"])

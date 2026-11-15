@@ -41,6 +41,7 @@ public actor NetworksService {
     private let log: Logger
     private let debugHelpers: Bool
     private let defaultNetworkConfiguration: NetworkConfiguration
+    private var savedNetworksRestored = false
 
     private let store: FilesystemEntityStore<NetworkConfiguration>
     private let networkPlugins: [Plugin]
@@ -99,6 +100,28 @@ public actor NetworksService {
     /// the apiserver's XPC listener is accepting connections. Called from
     /// APIServer.Start once the listener is up.
     public func startPersistedNetworks() async {
+        await restoreSavedNetworks()
+
+        guard serviceStates[defaultNetworkConfiguration.id] == nil else { return }
+        do {
+            log.info("creating default network")
+            _ = try await create(configuration: defaultNetworkConfiguration)
+        } catch {
+            log.error("failed to create default network: \(error)")
+        }
+    }
+
+    /// Start the saved networks, unless a pass over them has already finished.
+    ///
+    /// The engine does this once its listener is up, and `create` does it before it makes a
+    /// network, because the listener is up before the engine's pass has started. A network
+    /// made in that gap was handed the first free subnet, the one a saved network had and
+    /// was about to ask for again, and the saved network moved to another. Two passes at
+    /// once are safe: each goes through the networks in the same order and starts one only
+    /// under `stateLock` and only if it is not running, so each network is started once, in
+    /// order, and a pass returns only when every network before its end has had its turn.
+    private func restoreSavedNetworks() async {
+        guard !savedNetworksRestored else { return }
         // In an order that lets every network have the subnet it had: see `AssignedSubnet`.
         let saved = AssignedSubnet.restoreOrder(
             ((try? await store.list()) ?? []).map {
@@ -110,14 +133,7 @@ public actor NetworksService {
             saved: { try? await self.store.retrieve($0) },
             isRunning: { await self.isRunning($0) },
             start: { await self.startPersisted($0) })
-
-        guard serviceStates[defaultNetworkConfiguration.id] == nil else { return }
-        do {
-            log.info("creating default network")
-            _ = try await create(configuration: defaultNetworkConfiguration)
-        } catch {
-            log.error("failed to create default network: \(error)")
-        }
+        savedNetworksRestored = true
     }
 
     /// Start each saved network that is not running yet, one at a time under `lock`.
@@ -275,6 +291,9 @@ public actor NetworksService {
 
         busyNetworks.insert(configuration.id)
         defer { busyNetworks.remove(configuration.id) }
+
+        // Every saved network gets its subnet back before a new one is handed one.
+        await restoreSavedNetworks()
 
         // Ensure the network doesn't already exist.
         return try await self.stateLock.withLock { _ in
