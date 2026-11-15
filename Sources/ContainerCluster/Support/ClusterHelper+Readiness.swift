@@ -174,7 +174,8 @@ extension ClusterHelper {
         }
         try await waitForReady(
             containerId: containerId, log: log, started: started,
-            nodes: { deadline in try await nodeReadyReports(containerId: containerId, client: client, deadline: deadline) }
+            nodes: { deadline in try await nodeReadyReports(containerId: containerId, client: client, deadline: deadline) },
+            dnsPods: { deadline in try await dnsPodReports(containerId: containerId, client: client, deadline: deadline) }
         ) { arguments, deadline in
             try await runProbe(client: client, containerId: containerId, arguments: arguments, deadline: deadline)
         }
@@ -182,11 +183,14 @@ extension ClusterHelper {
 
     /// The injectable clock/probe keeps deadline and heal ordering deterministic in tests.
     /// `nodes` returns what the API server holds for every node, or nil when it gave no answer.
+    /// `dnsPods` does the same for the CoreDNS pods; it is asked only when nodes were started,
+    /// since a create has no earlier state to mistake for this one.
     static func waitForReady(
         containerId: String, log: Logger, started: [StartedNode] = [], timing: ReadinessTiming = .init(),
         now: @Sendable () -> ContinuousClock.Instant = { .now },
         sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         nodes: @Sendable (ContinuousClock.Instant) async throws -> [NodeReadyReport]?,
+        dnsPods: (@Sendable (ContinuousClock.Instant) async throws -> [DNSPodReport]?)? = nil,
         probe: @Sendable ([String], ContinuousClock.Instant) async throws -> Int32
     ) async throws {
         // Until the API server answers, all that is known is which nodes were started.
@@ -215,8 +219,16 @@ extension ClusterHelper {
                 let code: Int32
                 do {
                     if pods {
-                        code = try await probe(
+                        let available = try await probe(
                             ["wait", "--for=condition=Available", "deployment/coredns", "-n", "kube-system", "--timeout=2s"], deadline)
+                        if available == 0, !started.isEmpty, let dnsPods {
+                            // Available can be what the API server kept from before the stop.
+                            try checkDeadline(deadline, budget: budget, pods: true)
+                            let serving = try await dnsPods(deadline).map { dnsServing(reports: $0, started: started) } ?? false
+                            code = serving ? 0 : 1
+                        } else {
+                            code = available
+                        }
                     } else if let reports = try await nodes(deadline) {
                         waitingOn = unreadyNodes(reports: reports, started: started)
                         // No nodes at all is not a cluster that is Ready.
