@@ -112,11 +112,12 @@ extension ClusterHelper {
         return booted
     }
 
-    /// Runs a command in a node and returns what it wrote to stdout. The deadline bounds
-    /// the command and the reading of its output, and a command that outlives it is killed.
-    private static func capture(
+    /// Runs a command in a node and returns what it wrote to stdout, and to stderr as well
+    /// with `mergingStderr`. The deadline bounds the command and the reading of its output,
+    /// and a command that outlives it is killed. A cancellation ends it at once.
+    static func capture(
         containerId: String, executable: String, arguments: [String], environment: [String],
-        client: ContainerClient, deadline: ContinuousClock.Instant
+        client: ContainerClient, deadline: ContinuousClock.Instant, mergingStderr: Bool = false
     ) async throws -> (code: Int32, output: String) {
         // Named here, so the command can be killed whether or not its create or start answers.
         let processId = UUID().uuidString.lowercased()
@@ -129,7 +130,7 @@ extension ClusterHelper {
                     containerId: containerId, processId: processId,
                     configuration: ProcessConfiguration(
                         executable: executable, arguments: arguments, environment: environment, terminal: false),
-                    stdio: [nil, stdout, devNull], deadline: deadline)
+                    stdio: [nil, stdout, mergingStderr ? stdout : devNull], deadline: deadline)
                 try await process.start()
                 return { try await process.wait() }
             },

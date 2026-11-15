@@ -56,7 +56,8 @@ extension ClusterHelper {
             do {
                 code = try await execCapture(
                     containerId: containerId, executable: "/bin/sh",
-                    arguments: ["-c", "test -S /run/containerd/containerd.sock"], client: client
+                    arguments: ["-c", "test -S /run/containerd/containerd.sock"], client: client,
+                    deadline: .now.advanced(by: .seconds(30))
                 ).code
             } catch let error where attempt < timeout && Self.isContainerNotRunning(error) {
                 code = -1
@@ -74,27 +75,33 @@ extension ClusterHelper {
     }
 
     /// Wait until the API server is serving. This is the one readiness signal
-    /// that does not depend on a CNI being installed.
-    static func waitForAPIServer(containerId: String, client: ContainerClient, log: Logger) async throws {
+    /// that does not depend on a CNI being installed. Given a deadline, each probe is
+    /// bounded by it and the wait ends there; without one it is two minutes of probes.
+    static func waitForAPIServer(
+        containerId: String, client: ContainerClient, log: Logger, deadline: ContinuousClock.Instant? = nil
+    ) async throws {
         let timeout = 60
         log.info("Waiting for API server to become available")
+        func unavailable(_ within: String) -> ContainerizationError {
+            log.info("check control-plane logs with 'container logs \(containerId)'")
+            return ContainerizationError(.timeout, message: "cluster \(containerId) API server did not become available within \(within)")
+        }
         for attempt in 1...timeout {
+            try Task.checkCancellation()
+            if let deadline, ContinuousClock.now >= deadline { throw unavailable("its start budget") }
             let code: Int32
             do {
                 code = try await runProbe(
                     client: client, containerId: containerId,
-                    arguments: ["get", "--raw", "/readyz", "--request-timeout=2s"])
+                    arguments: ["get", "--raw", "/readyz", "--request-timeout=2s"], deadline: deadline)
             } catch {
+                try Task.checkCancellation()
+                if let deadline, ContinuousClock.now >= deadline { throw unavailable("its start budget") }
                 throw ContainerizationError(
                     .internalError, message: "cluster \(containerId) stopped unexpectedly during startup: \(error)")
             }
             if code == 0 { return }
-            if attempt == timeout {
-                log.info("check control-plane logs with 'container logs \(containerId)'")
-                throw ContainerizationError(
-                    .timeout,
-                    message: "cluster \(containerId) API server did not become available within \(timeout * 2)s")
-            }
+            if attempt == timeout { throw unavailable("\(timeout * 2)s") }
             try await Task.sleep(for: .seconds(2))
         }
     }
@@ -105,6 +112,8 @@ extension ClusterHelper {
     /// counting probes (180 and 300 of them, once) bounded nothing anyone could plan on —
     /// a cluster whose CoreDNS never came back after a node restart kept a start busy for
     /// three quarters of an hour.
+    /// How long a start waits for the API server to answer before the node step begins.
+    static let apiServerBudget: Duration = .seconds(150)
     static let nodeReadyBudget: Duration = .seconds(300)
     static let podReadyBudget: Duration = .seconds(300)
     /// After this long without CoreDNS, its deployment is restarted once. Observed after a
@@ -156,7 +165,7 @@ extension ClusterHelper {
     /// `restarted` names the nodes a start brought back. Their Ready conditions outlive a
     /// stop, so each has to report again after its boot; a create leaves it empty.
     static func waitForReady(containerId: String, client: ContainerClient, log: Logger, restarted: [String] = []) async throws {
-        try await waitForAPIServer(containerId: containerId, client: client, log: log)
+        try await waitForAPIServer(containerId: containerId, client: client, log: log, deadline: .now.advanced(by: apiServerBudget))
         // Read once every node is up: one that was already running keeps the boot it has.
         var started: [StartedNode] = []
         for node in restarted {

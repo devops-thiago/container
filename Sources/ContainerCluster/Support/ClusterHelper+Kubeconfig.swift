@@ -42,7 +42,7 @@ extension ClusterHelper {
 
         let (exitCode, yaml) = try await execCapture(
             containerId: containerId, executable: "/bin/cat",
-            arguments: [kubeconfigPath], client: client)
+            arguments: [kubeconfigPath], client: client, deadline: .now.advanced(by: .seconds(60)))
         guard exitCode == 0 else {
             throw ContainerizationError(.internalError, message: "failed to read kubeconfig from \(containerId): exit \(exitCode)")
         }
@@ -218,7 +218,7 @@ extension ClusterHelper {
                 "-c",
                 "sed -i -E 's|server: https://[0-9.]+:6443|server: https://127.0.0.1:6443|' /etc/kubernetes/admin.conf /etc/kubernetes/super-admin.conf",
             ],
-            client: client)
+            client: client, deadline: .now.advanced(by: .seconds(60)))
         guard r.code == 0 else {
             throw ContainerizationError(.internalError, message: "pinning admin kubeconfigs failed on \(nodeID): \(r.output)")
         }

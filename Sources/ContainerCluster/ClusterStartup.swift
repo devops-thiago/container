@@ -164,7 +164,8 @@ struct LiveClusterStartup: ClusterStartupOperations {
         try await ClusterHelper.waitForReady(containerId: name, client: client, log: log, restarted: nodes)
     }
     func waitForRegistered(name: String, nodes: [String]) async throws {
-        try await ClusterHelper.waitForAPIServer(containerId: name, client: client, log: log)
+        try await ClusterHelper.waitForAPIServer(
+            containerId: name, client: client, log: log, deadline: .now.advanced(by: ClusterHelper.apiServerBudget))
         try await ClusterHelper.waitForRegisteredNodes(containerId: name, nodes: nodes, log: log) { arguments, deadline in
             try await ClusterHelper.runProbe(client: client, containerId: name, arguments: arguments, deadline: deadline)
         }
