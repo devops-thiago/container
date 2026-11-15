@@ -181,11 +181,14 @@ extension ClusterHelper {
         return try await capture(
             deadline: deadline,
             launch: { stdout in
+                // Stderr gets a descriptor of its own on the same pipe.
+                let merged = mergingStderr ? FileHandle(fileDescriptor: dup(stdout.fileDescriptor), closeOnDealloc: true) : nil
+                defer { try? merged?.close() }
                 let process = try await client.createProcess(
                     containerId: containerId, processId: processId,
                     configuration: ProcessConfiguration(
                         executable: executable, arguments: arguments, environment: environment, terminal: false),
-                    stdio: [nil, stdout, mergingStderr ? stdout : devNull], deadline: deadline)
+                    stdio: [nil, stdout, merged ?? devNull], deadline: deadline)
                 try await process.start()
                 return { try await process.wait() }
             },

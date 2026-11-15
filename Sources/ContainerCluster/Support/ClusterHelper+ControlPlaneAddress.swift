@@ -49,6 +49,7 @@ extension ClusterHelper {
         address: String, kubeletConfiguration: String = "/etc/kubernetes/kubelet.conf", restartOwed: String = kubeletRestartOwed
     ) -> String {
         """
+        exec 2>&1
         f='\(kubeletConfiguration)'
         owed='\(restartOwed)'
         want='\(serverLine(address: address))'
@@ -79,6 +80,7 @@ extension ClusterHelper {
     /// one that cannot be read fails the script, with what kubectl said.
     static func controlPlaneEndpointScript(address: String, restartOwed: String = kubeProxyRestartOwed) -> String {
         """
+        exec 2>&1
         want='\(serverLine(address: address))'
         owed='\(restartOwed)'
         k() { kubectl --kubeconfig /etc/kubernetes/admin.conf "$@"; }
