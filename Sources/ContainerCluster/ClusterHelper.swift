@@ -315,23 +315,20 @@ public struct ClusterHelper {
         return f
     }
 
-    // Shared exec helper used by bootstrap, readiness, and kubeconfig extensions.
+    /// How long a command in a node may take when its caller names no deadline. The steps
+    /// of a create are the long ones, kubeadm's among them; none comes near this.
+    static let commandBudget: Duration = .seconds(1800)
+
+    /// Runs a command in a node and returns its exit code with what it wrote to stdout and
+    /// stderr. Bounded by `deadline`, or by `commandBudget` from now, and ended at once by
+    /// a cancellation: nothing here sits in a read that only the command can end.
     public static func execCapture(
         containerId: String, executable: String, arguments: [String],
-        client: ContainerClient
+        client: ContainerClient, deadline: ContinuousClock.Instant? = nil
     ) async throws -> (code: Int32, output: String) {
-        let pipe = Pipe()
-        let config = ProcessConfiguration(
-            executable: executable, arguments: arguments, environment: [], terminal: false)
-        let proc = try await client.createProcess(
-            containerId: containerId, processId: UUID().uuidString.lowercased(),
-            configuration: config, stdio: [nil, pipe.fileHandleForWriting, pipe.fileHandleForWriting])
-        try await proc.start()
-        pipe.fileHandleForWriting.closeFile()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        try? pipe.fileHandleForReading.close()
-        let code = try await proc.wait()
-        return (code, String(data: data, encoding: .utf8) ?? "")
+        try await capture(
+            containerId: containerId, executable: executable, arguments: arguments, environment: [],
+            client: client, deadline: deadline ?? .now.advanced(by: commandBudget), mergingStderr: true)
     }
 
     // MARK: - Node enumeration

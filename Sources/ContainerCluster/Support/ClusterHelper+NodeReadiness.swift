@@ -112,11 +112,67 @@ extension ClusterHelper {
         return booted
     }
 
-    /// Runs a command in a node and returns what it wrote to stdout. The deadline bounds
-    /// the command and the reading of its output, and a command that outlives it is killed.
-    private static func capture(
+    // MARK: - CoreDNS readiness
+
+    /// What the API server holds for one CoreDNS pod's Ready condition.
+    struct DNSPodReport: Equatable, Sendable {
+        let name: String
+        /// The node the pod runs on, whose kubelet writes the condition.
+        let node: String
+        let ready: Bool
+        /// When the condition last changed, by that node's clock.
+        let readySince: Date?
+    }
+
+    /// Whether CoreDNS serves in a cluster whose `started` nodes were just brought back.
+    ///
+    /// The Deployment's Available condition outlives a stop as a node's Ready condition
+    /// does: measured after a node restart, it read True from before the stop for 25
+    /// seconds while no pod was Ready. A pod on a started node counts only once its Ready
+    /// condition has changed since that node booted, both by the node's own clock. A pod on
+    /// a node that was not restarted needs only be Ready.
+    static func dnsServing(reports: [DNSPodReport], started: [StartedNode]) -> Bool {
+        reports.contains { pod in
+            guard pod.ready else { return false }
+            guard let node = started.first(where: { $0.name == pod.node }) else { return true }
+            return pod.readySince.map { $0 >= node.bootedAt } ?? false
+        }
+    }
+
+    /// One line per CoreDNS pod: its name, its node, then the Ready condition's status and
+    /// when it last changed.
+    static let dnsPodTemplate =
+        #"{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}"#
+        + #"{.status.conditions[?(@.type=="Ready")].lastTransitionTime}{"\n"}{end}"#
+
+    static func parseDNSPodReports(_ output: String) -> [DNSPodReport] {
+        output.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count > 1, !fields[0].isEmpty else { return nil }
+            let since = fields.count > 3 ? try? Date(fields[3], strategy: .iso8601) : nil
+            return DNSPodReport(name: fields[0], node: fields[1], ready: fields.count > 2 && fields[2] == "True", readySince: since)
+        }
+    }
+
+    /// Every CoreDNS pod's Ready condition, or nil when kubectl got no answer.
+    static func dnsPodReports(
+        containerId: String, client: ContainerClient, deadline: ContinuousClock.Instant
+    ) async throws -> [DNSPodReport]? {
+        let result = try await capture(
+            containerId: containerId, executable: kubectlPath,
+            arguments: [
+                "get", "pods", "-n", "kube-system", "-l", "k8s-app=kube-dns", "--request-timeout=2s", "-o", "jsonpath=\(dnsPodTemplate)",
+            ],
+            environment: [kubeconfigEnv], client: client, deadline: deadline)
+        return result.code == 0 ? parseDNSPodReports(result.output) : nil
+    }
+
+    /// Runs a command in a node and returns what it wrote to stdout, and to stderr as well
+    /// with `mergingStderr`. The deadline bounds the command and the reading of its output,
+    /// and a command that outlives it is killed. A cancellation ends it at once.
+    static func capture(
         containerId: String, executable: String, arguments: [String], environment: [String],
-        client: ContainerClient, deadline: ContinuousClock.Instant
+        client: ContainerClient, deadline: ContinuousClock.Instant, mergingStderr: Bool = false
     ) async throws -> (code: Int32, output: String) {
         // Named here, so the command can be killed whether or not its create or start answers.
         let processId = UUID().uuidString.lowercased()
@@ -125,11 +181,14 @@ extension ClusterHelper {
         return try await capture(
             deadline: deadline,
             launch: { stdout in
+                // Stderr gets a descriptor of its own on the same pipe.
+                let merged = mergingStderr ? FileHandle(fileDescriptor: dup(stdout.fileDescriptor), closeOnDealloc: true) : nil
+                defer { try? merged?.close() }
                 let process = try await client.createProcess(
                     containerId: containerId, processId: processId,
                     configuration: ProcessConfiguration(
                         executable: executable, arguments: arguments, environment: environment, terminal: false),
-                    stdio: [nil, stdout, devNull], deadline: deadline)
+                    stdio: [nil, stdout, merged ?? devNull], deadline: deadline)
                 try await process.start()
                 return { try await process.wait() }
             },

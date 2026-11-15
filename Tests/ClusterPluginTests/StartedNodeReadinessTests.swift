@@ -210,4 +210,95 @@ struct StartedNodeReadinessTests {
         #expect(ClusterHelper.parseBootTime("0\n") == nil)
         #expect(ClusterHelper.parseBootTime("btime 12\n") == nil)
     }
+
+    // MARK: - CoreDNS
+
+    private typealias Pod = ClusterHelper.DNSPodReport
+    private static let ready: [ClusterHelper.NodeReadyReport] = started.map { .init(name: $0.name, ready: true, heartbeat: afterBoot) }
+
+    private func waitForDNS(_ fixture: Fixture, pods: @escaping @Sendable (Int) -> [ClusterHelper.DNSPodReport]?) async throws {
+        try await ClusterHelper.waitForReady(
+            containerId: "dev", log: log, started: Self.started, now: { fixture.now() }, sleep: { fixture.advance($0) },
+            nodes: { _ in Self.ready },
+            dnsPods: { _ in
+                pods(
+                    fixture.listings.withLock { count in
+                        count += 1
+                        return count
+                    })
+            }
+        ) { arguments, _ in
+            // The Deployment says Available throughout, as it does from before the stop.
+            if arguments.contains("wait") { fixture.podProbes.withLock { $0 += 1 } }
+            return 0
+        }
+    }
+
+    /// #781: the Deployment is Available from before the stop and no pod has been Ready
+    /// since the boot. The start must not succeed on that.
+    @Test func availableFromBeforeTheStopWithNoPodReadySinceNeverSucceeds() async {
+        let fixture = Fixture()
+        let message = await timeout {
+            try await waitForDNS(fixture) { _ in
+                [
+                    Pod(name: "coredns-a", node: "dev", ready: true, readySince: Self.beforeStop),
+                    Pod(name: "coredns-b", node: "dev", ready: false, readySince: Self.afterBoot),
+                ]
+            }
+        }
+        #expect(message.contains("CoreDNS did not become Available"))
+        #expect(fixture.podProbes.withLock { $0 } > 1)
+    }
+
+    @Test func podReadySinceItsNodeBootedSucceeds() async throws {
+        let fixture = Fixture()
+        try await waitForDNS(fixture) { listing in
+            // Not Ready on the first two looks, as measured for half a minute after a boot.
+            [Pod(name: "coredns-a", node: "dev-worker-1", ready: listing > 2, readySince: listing > 2 ? Self.afterBoot : Self.beforeStop)]
+        }
+        #expect(fixture.listings.withLock { $0 } == 3)
+    }
+
+    /// A pod that became Ready in the second its node booted is from this boot.
+    @Test func podReadyInTheSecondOfTheBootCounts() async throws {
+        let fixture = Fixture()
+        try await waitForDNS(fixture) { _ in [Pod(name: "coredns-a", node: "dev", ready: true, readySince: Self.boot)] }
+    }
+
+    @Test func noAnswerAboutThePodsIsNotReadiness() async {
+        let fixture = Fixture()
+        _ = await timeout { try await waitForDNS(fixture) { _ in nil } }
+    }
+
+    /// A create starts nothing back up, so there is no earlier state and the pods are not asked.
+    @Test func createDoesNotAskForThePods() async throws {
+        let fixture = Fixture()
+        try await ClusterHelper.waitForReady(
+            containerId: "dev", log: log, now: { fixture.now() }, sleep: { fixture.advance($0) },
+            nodes: { _ in Self.ready },
+            dnsPods: { _ in
+                Issue.record("the pods were asked for on a create")
+                return nil
+            }
+        ) { _, _ in 0 }
+    }
+
+    @Test func dnsServingJudgesEachPodAgainstItsOwnNode() {
+        let started = [ClusterHelper.StartedNode(name: "dev", bootedAt: Self.boot)]
+        #expect(!ClusterHelper.dnsServing(reports: [], started: started))
+        #expect(!ClusterHelper.dnsServing(reports: [Pod(name: "a", node: "dev", ready: true, readySince: nil)], started: started))
+        #expect(!ClusterHelper.dnsServing(reports: [Pod(name: "a", node: "dev", ready: true, readySince: Self.beforeStop)], started: started))
+        // A node that was not restarted keeps the pod it had.
+        #expect(ClusterHelper.dnsServing(reports: [Pod(name: "a", node: "other", ready: true, readySince: Self.beforeStop)], started: started))
+        #expect(!ClusterHelper.dnsServing(reports: [Pod(name: "a", node: "other", ready: false, readySince: Self.afterBoot)], started: started))
+    }
+
+    @Test func dnsPodReportsAreReadFromKubectl() {
+        let output = "coredns-7d764666f9-7bpnv\taudit781\tTrue\t2026-11-15T14:45:34Z\ncoredns-7d764666f9-hrpvz\taudit781\tFalse\t2026-11-15T14:44:59Z\npending\t\t\t\n"
+        let reports = ClusterHelper.parseDNSPodReports(output)
+        #expect(reports.map(\.name) == ["coredns-7d764666f9-7bpnv", "coredns-7d764666f9-hrpvz", "pending"])
+        #expect(reports.map(\.ready) == [true, false, false])
+        #expect(reports[0].readySince == (try? Date("2026-11-15T14:45:34Z", strategy: .iso8601)))
+        #expect(reports[2].node.isEmpty && reports[2].readySince == nil)
+    }
 }
