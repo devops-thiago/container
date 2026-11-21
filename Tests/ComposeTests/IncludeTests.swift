@@ -192,6 +192,12 @@ struct IncludeTests {
 
         let overridden = try project.load(files: ["compose.yaml", "over.yaml"])
         #expect(try service("db", in: overridden).image == "four", "a second -f merges over what the first one includes")
+
+        // A file is merged with what it includes before it merges over the files before it.
+        try project.write("services:\n  db: {image: first}\n", to: "first.yaml")
+        try project.write("include: [y/inc.yaml]\nservices:\n  app: {image: alpine}\n", to: "second.yaml")
+        #expect(try service("db", in: project.load(files: ["first.yaml", "second.yaml"])).image == "three")
+        #expect(try service("db", in: project.load(files: ["second.yaml", "first.yaml"])).image == "first")
     }
 
     @Test
@@ -243,6 +249,30 @@ struct IncludeTests {
                 "remote.yaml:1:11: include: oci://docker.io/acme/stack:1: a compose file fetched from a registry or a repository cannot be included"
             ])
         #expect(failure("cycle.yaml") == ["cycle2.yaml:1:11: include: the files include each other: cycle.yaml includes cycle2.yaml includes cycle.yaml"])
+    }
+
+    @Test
+    func aLinkToAFileBeingReadIsACycleAndAFileThatMayNotBeLookedAtIsNotAbsent() throws {
+        let project = try TemporaryProject(
+            [
+                "compose.yaml": "include: [linked/again.yaml]\nservices:\n  a: {image: a}\n",
+                "locked.yaml": "include: [closed/inc.yaml]\nservices:\n  a: {image: a}\n",
+                "closed/inc.yaml": "services:\n  db: {image: one}\n",
+            ], named: "shop")
+        try project.makeDirectory("linked")
+        try FileManager.default.createSymbolicLink(
+            atPath: "\(project.path)/linked/again.yaml", withDestinationPath: "\(project.path)/compose.yaml")
+        #expect(
+            loadFailure { try project.load() } == [
+                "compose.yaml:1:11: include: the files include each other: compose.yaml includes linked/again.yaml"
+            ])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(project.path)/closed")
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: "\(project.path)/closed") }
+        #expect(
+            loadFailure { try project.load(files: ["locked.yaml"]) } == [
+                "locked.yaml:1:11: include: \(project.path)/closed/inc.yaml could not be read: Permission denied"
+            ])
     }
 
     @Test

@@ -23,8 +23,10 @@ import Foundation
 // follows where the specification leaves a case open:
 // - a relative `path`, `project_directory` or `env_file` is relative to the including
 //   project's directory, not to the file that has the `include`;
-// - what the including files say of a service, network or volume merges over what an
-//   included file says of it, and an earlier include merges over a later one;
+// - what a file says of a service, network or volume merges over what a file it includes
+//   says of it, and an earlier include merges over a later one;
+// - a file is merged with what it includes before it merges over the files named before
+//   it with `-f`, so an include in a later file wins over an earlier file;
 // - the including project's variables win over the included project's env file;
 // - an included file's `name` is not the project's.
 
@@ -59,7 +61,7 @@ extension ComposeLoader {
         var location: SourceLocation
     }
 
-    /// The project `documents` come to, with what they include merged under them.
+    /// The project `documents` come to, each with what it includes merged under it.
     static func model(_ documents: [ComposeNode], variables: [String: String], in reading: Reading) throws -> RawProject {
         let diagnostics = reading.context.diagnostics
         let state = reading.state
@@ -68,7 +70,6 @@ extension ComposeLoader {
             if !state.unset.contains(name) { state.unset.append(name) }
         }
         var merged = RawProject()
-        var includes: [Include] = []
         for document in documents {
             let substituted = try document.mapScalars { text, node in
                 try Task.checkCancellation()
@@ -92,14 +93,14 @@ extension ComposeLoader {
             if reading.isIncluded {
                 project.keep(variables: variables, directory: reading.context.projectDirectory)
             }
+            // Each include goes under the file that names it and under the includes named
+            // before it, so the first one named wins; the file then merges over the files
+            // before it, with what it included.
+            for include in try includes(of: substituted, context: reading.context) {
+                try Task.checkCancellation()
+                project = try model(of: include, variables: variables, in: reading).merging(project)
+            }
             merged = merged.merging(project)
-            includes += try self.includes(of: substituted, context: reading.context)
-        }
-        // After the files themselves, as `docker compose` does: each include goes under
-        // everything read so far, so the first one named is the one that wins.
-        for include in includes {
-            try Task.checkCancellation()
-            merged = try model(of: include, variables: variables, in: reading).merging(merged)
         }
         return merged
     }
@@ -149,10 +150,12 @@ extension ComposeLoader {
         }
         let files = include.paths.map { resolve($0, against: base) }
         for file in files {
-            guard FileManager.default.fileExists(atPath: file.path) else {
+            guard try exists(file.path, at: include.location) else {
                 throw ComposeError(path: "include", "the included file \(file.path) does not exist", at: include.location)
             }
-            if reading.chain.contains(file.path) {
+            // By where the file is, so that a link to a file being read is that file.
+            let real = file.resolvingSymlinksInPath().path
+            if reading.chain.contains(where: { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == real }) {
                 let cycle = (reading.chain + [file.path]).map { displayName(URL(fileURLWithPath: $0), relativeTo: reading.working) }
                 throw ComposeError(path: "include", "the files include each other: \(cycle.joined(separator: " includes "))", at: include.location)
             }
@@ -162,7 +165,7 @@ extension ComposeLoader {
         var own: [String: String] = [:]
         let named = include.envFiles?.map { resolve($0, against: base).path }
         for path in named ?? [directory.appendingPathComponent(".env").path] {
-            guard FileManager.default.fileExists(atPath: path) else {
+            guard try exists(path, at: include.location) else {
                 guard named == nil else {
                     throw ComposeError(path: "include", "the env file \(path) does not exist", at: include.location)
                 }
@@ -185,6 +188,17 @@ extension ComposeLoader {
         inner.chain += files.map(\.path)
         inner.isIncluded = true
         return try model(documents, variables: own, in: inner)
+    }
+
+    /// Whether there is a file at `path`. A file that is there and may not be looked at is
+    /// an error, not an absent file: read as absent, an included project's `.env` would be
+    /// left out without a word, and the project would run with other values.
+    private static func exists(_ path: String, at location: SourceLocation) throws -> Bool {
+        var status = stat()
+        guard stat(path, &status) != 0 else { return true }
+        let code = errno
+        guard code == EACCES || code == EPERM else { return false }
+        throw ComposeError(path: "include", "\(path) could not be read: \(String(cString: strerror(code)))", at: location)
     }
 }
 

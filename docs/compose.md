@@ -122,8 +122,8 @@ Each included file is a project of its own: relative paths in it start from its 
 directory, or from `project_directory`, and its variables come from the `.env` there, or
 from `env_file`, with the including project's variables on top. An included file may
 include others. The paths in an `include` entry are relative to the project directory, and
-may use variables. What the including files say of a service, a network or a volume merges
-over what an included file says of it. A compose file fetched from a registry or a
+may use variables. What a file says of a service, a network or a volume merges
+over what a file it includes says of it. A compose file fetched from a registry or a
 repository (`oci://`, `https://`) is not read.
 
 `container compose config` prints the project the files come to, and
