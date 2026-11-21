@@ -24,6 +24,9 @@ public struct ComposeDefinition: Sendable, Equatable {
     public let directory: String
     /// The files the project was read from, in the order they were merged.
     public let configFiles: [String]
+    /// The files `include` brought in, in the order they were read. They are not among
+    /// `configFiles`, as `docker compose` leaves them out of the project's config files.
+    public let includedFiles: [String]
     public let file: ComposeFile
     /// The profiles asked for. `*` turns every profile on.
     public let profiles: [String]
@@ -36,12 +39,13 @@ public struct ComposeDefinition: Sendable, Equatable {
     public let withheld: [ComposePart: [ComposeDiagnostic]]
 
     public init(
-        name: String, directory: String, configFiles: [String], file: ComposeFile, profiles: [String], warnings: [ComposeDiagnostic],
-        withheld: [ComposePart: [ComposeDiagnostic]] = [:]
+        name: String, directory: String, configFiles: [String], includedFiles: [String] = [], file: ComposeFile, profiles: [String],
+        warnings: [ComposeDiagnostic], withheld: [ComposePart: [ComposeDiagnostic]] = [:]
     ) {
         self.name = name
         self.directory = directory
         self.configFiles = configFiles
+        self.includedFiles = includedFiles
         self.file = file
         self.profiles = profiles
         self.warnings = warnings
@@ -189,35 +193,9 @@ public enum ComposeLoader {
         let diagnostics = DiagnosticCollector()
         let context = DecodeContext(projectDirectory: directory, homeDirectory: options.homeDirectory, diagnostics: diagnostics)
 
-        var unset: [String] = []
-        var interpolator = Interpolator(lookup: { variables[$0] })
-        interpolator.onUnset = { name in
-            if !unset.contains(name) { unset.append(name) }
-        }
-        var merged = RawProject()
-        var expandedBytes = 0
-        for document in documents {
-            let substituted = try document.mapScalars { text, node in
-                try Task.checkCancellation()
-                do {
-                    let value = try interpolator.interpolate(text)
-                    expandedBytes += value.utf8.count
-                    guard expandedBytes <= ComposeInput.maximumExpandedBytes else {
-                        throw ComposeError("interpolated project exceeds the 8 MiB compose input budget", at: node.location)
-                    }
-                    return value
-                } catch let error as ComposeError {
-                    throw error
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    diagnostics.error("", "\(error)", at: node.location)
-                    return text
-                }
-            }
-            merged = merged.merging(context.project(substituted))
-        }
-        for variable in unset {
+        let reading = Reading(context: context, working: sources.working, chain: files.map(\.path))
+        let merged = try model(documents, variables: variables, in: reading)
+        for variable in reading.state.unset {
             diagnostics.warn("", "the variable \(variable) is not set; it reads as an empty string")
         }
 
@@ -248,6 +226,7 @@ public enum ComposeLoader {
             name: name,
             directory: directory.path,
             configFiles: files.map(\.path),
+            includedFiles: reading.state.included,
             file: file,
             profiles: profiles,
             warnings: DiagnosticCollector.inFileOrder(diagnostics.warnings),
@@ -257,12 +236,12 @@ public enum ComposeLoader {
     // MARK: Files
 
     /// `path` as an absolute location: itself when it is one, under `directory` otherwise.
-    private static func resolve(_ path: String, against directory: URL) -> URL {
+    static func resolve(_ path: String, against directory: URL) -> URL {
         guard !path.hasPrefix("/") else { return URL(fileURLWithPath: path).standardizedFileURL }
         return directory.appendingPathComponent(path).standardizedFileURL
     }
 
-    private static func readText(_ path: String) throws -> String {
+    static func readText(_ path: String) throws -> String {
         do {
             return try ComposeInput.read(path)
         } catch is CancellationError {
@@ -273,7 +252,7 @@ public enum ComposeLoader {
     }
 
     /// The path to show in messages: as short as the user would have typed it.
-    private static func displayName(_ file: URL, relativeTo working: URL) -> String {
+    static func displayName(_ file: URL, relativeTo working: URL) -> String {
         let directory = working.path.hasSuffix("/") ? working.path : working.path + "/"
         return file.path.hasPrefix(directory) ? String(file.path.dropFirst(directory.count)) : file.path
     }

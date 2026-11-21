@@ -177,10 +177,10 @@ struct Resolver {
                 continue
             }
             do {
-                let lookup = environment
+                let lookup = file.scope ?? environment
                 let entries = try DotEnv.parse(try read(file.path), file: file.path) { lookup[$0] }
                 for entry in entries {
-                    if let value = entry.value ?? environment[entry.key] { result[entry.key] = value }
+                    if let value = entry.value ?? lookup[entry.key] { result[entry.key] = value }
                 }
             } catch let error as ComposeError {
                 for diagnostic in error.diagnostics {

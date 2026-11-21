@@ -32,9 +32,7 @@ extension MappingReader {
 extension DecodeContext {
     private static let virtualMachine = "each container runs in its own virtual machine, where only the cpus and memory limits apply"
 
-    private static let topLevelKeys: [String: KeySupport] = [
-        "include": .rejected("name each file with -f instead")
-    ]
+    private static let topLevelKeys: [String: KeySupport] = [:]
 
     /// Top-level keys that only define what a service can then ask for. A service that asks
     /// is refused where it does, so the definitions alone stop nothing.
@@ -146,6 +144,8 @@ extension DecodeContext {
         project.name = reader.value("name", text)
         // `version` meant something to Compose v1 and is accepted and unused since.
         _ = reader.take("version")
+        // The loader reads `include` itself: what it names is other files, not this one.
+        _ = reader.take("include", keepingNull: true)
 
         // What is found in a service, a network or a volume is about that part, and counts
         // only when the part is one that runs.
