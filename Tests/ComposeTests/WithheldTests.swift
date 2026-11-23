@@ -246,8 +246,6 @@ struct WithheldTests {
         // A key of the file, not of a part; a substitution, which is done before anything
         // is read; and a profiles key that cannot be read, which leaves the service on.
         let wrong = """
-            include:
-              - other.yaml
             volumess: {}
             services:
               web:
@@ -263,11 +261,10 @@ struct WithheldTests {
         let project = try TemporaryProject(["compose.yaml": wrong], named: "shop")
         #expect(
             failure(project) == [
-                "compose.yaml:1:1: include: not supported on this engine: name each file with -f instead",
-                "compose.yaml:3:1: volumess: not a compose key",
-                "compose.yaml:8:12: required variable TAG is missing a value: set TAG",
-                "compose.yaml:12:15: services.broken.profiles: expected a list, found a mapping",
-                "compose.yaml:13:5: services.broken.privileged: not supported on this engine: a container already has its own kernel; add the capabilities it needs with cap_add",
+                "compose.yaml:1:1: volumess: not a compose key",
+                "compose.yaml:6:12: required variable TAG is missing a value: set TAG",
+                "compose.yaml:10:15: services.broken.profiles: expected a list, found a mapping",
+                "compose.yaml:11:5: services.broken.privileged: not supported on this engine: a container already has its own kernel; add the capabilities it needs with cap_add",
             ])
     }
 

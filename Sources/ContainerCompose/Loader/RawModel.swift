@@ -78,6 +78,9 @@ struct RawEnvFile: Hashable {
     var path: String
     var required: Bool
     var location: SourceLocation?
+    /// The variables of the included project the file was named in; nil in the project's own
+    /// files, whose env files read the project's variables.
+    var scope: [String: String]?
 }
 
 struct RawHealthcheck {

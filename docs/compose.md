@@ -116,6 +116,16 @@ Several files merge in the order given with `-f`. Without `-f`, `compose.yaml` (
 read, with `compose.override.yaml` beside it when there is one. YAML anchors, aliases and
 merge keys (`<<`) work.
 
+`include` brings in other compose files, as `docker compose` does it. An entry is a path,
+or a mapping with `path` (one file or a list to merge), `project_directory` and `env_file`.
+Each included file is a project of its own: relative paths in it start from its own
+directory, or from `project_directory`, and its variables come from the `.env` there, or
+from `env_file`, with the including project's variables on top. An included file may
+include others. The paths in an `include` entry are relative to the project directory, and
+may use variables. What a file says of a service, a network or a volume merges
+over what a file it includes says of it. A compose file fetched from a registry or a
+repository (`oci://`, `https://`) is not read.
+
 `container compose config` prints the project the files come to, and
 `container compose config --commands` prints the `container` commands that would make it
 by hand.
