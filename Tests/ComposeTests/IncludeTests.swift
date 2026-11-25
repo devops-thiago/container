@@ -284,4 +284,73 @@ struct IncludeTests {
             ], named: "shop")
         #expect(loadFailure { try project.load() } == ["x/inc.yaml:4:5: services.db.nonsense: not a compose key"])
     }
+
+    /// A chain of files, each including the next, `levels` includes deep.
+    private func chain(_ levels: Int, references: Int = 1) throws -> TemporaryProject {
+        var files: [String: String] = [:]
+        for level in 0...levels {
+            let name = level == 0 ? "compose.yaml" : "f\(level).yaml"
+            let include =
+                level < levels
+                ? "include: [" + Array(repeating: "f\(level + 1).yaml", count: references).joined(separator: ", ") + "]\n" : ""
+            files[name] = include + "services:\n  s\(level): {image: i}\n"
+        }
+        return try TemporaryProject(files, named: "deep")
+    }
+
+    @Test
+    func includesNestAsDeepAsTheLimitAndAreRefusedPastIt() async throws {
+        let allowed = try chain(ComposeInput.maximumIncludeDepth)
+        let definition = try allowed.load()
+        #expect(definition.file.services.count == ComposeInput.maximumIncludeDepth + 1)
+        #expect(definition.includedFiles.count == ComposeInput.maximumIncludeDepth)
+
+        let deeper = try chain(ComposeInput.maximumIncludeDepth + 1)
+        #expect(
+            loadFailure { try deeper.load() } == [
+                "f\(ComposeInput.maximumIncludeDepth).yaml:1:11: include: include is nested more than \(ComposeInput.maximumIncludeDepth) files deep"
+            ])
+    }
+
+    /// The app loads a project off the main thread, where the stack is small: 512 nested
+    /// includes overran it and took the process down.
+    @Test
+    func aVeryDeepChainIsRefusedOnAWorkerInsteadOfOverrunningItsStack() async throws {
+        let project = try chain(512)
+        let failure = await Task.detached { loadFailure { try project.load() } }.value
+        #expect(failure.count == 1)
+        #expect(failure.first?.hasSuffix("include is nested more than \(ComposeInput.maximumIncludeDepth) files deep") == true)
+    }
+
+    /// Two references to the next file at each level: 493 bytes that asked for 131,071 reads.
+    @Test(.timeLimit(.minutes(1)))
+    func aFileIncludedOverAndOverMeetsTheFileBudgetQuickly() async throws {
+        let project = try chain(17, references: 2)
+        let clock = ContinuousClock()
+        var failure: [String] = []
+        let elapsed = clock.measure { failure = loadFailure { try project.load() } }
+        #expect(failure.count == 1)
+        #expect(failure.first?.hasSuffix("the project includes more than \(ComposeInput.maximumIncludedFiles) files") == true)
+        #expect(elapsed < .seconds(5))
+    }
+
+    @Test
+    func aFileIncludedTwiceWithinTheBudgetIsReadBothTimes() throws {
+        let project = try chain(5, references: 2)
+        let definition = try project.load()
+        #expect(definition.file.services.count == 6)
+        #expect(definition.includedFiles.count == 5, "each file is listed once however often it is read")
+    }
+
+    @Test
+    func includedFilesTogetherStayWithinTheInputBudget() throws {
+        // Comments: read and parsed, and no part of what the interpolation budget counts.
+        let filler = "# " + String(repeating: "a", count: 1_000_000) + "\n"
+        var files = ["compose.yaml": "include: [" + (1...9).map { "big\($0).yaml" }.joined(separator: ", ") + "]\nservices:\n  a: {image: a}\n"]
+        for index in 1...9 { files["big\(index).yaml"] = filler + "services:\n  b\(index): {image: b}\n" }
+        let project = try TemporaryProject(files, named: "big")
+        let failure = loadFailure { try project.load() }
+        #expect(failure.count == 1)
+        #expect(failure.first?.hasSuffix("include: the included files exceed the 8 MiB compose input budget") == true, "\(failure)")
+    }
 }

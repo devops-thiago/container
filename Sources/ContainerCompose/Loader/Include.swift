@@ -38,6 +38,9 @@ extension ComposeLoader {
         var expandedBytes = 0
         /// The files brought in by `include`, in the order they were read.
         var included: [String] = []
+        /// How many files `include` has read, a file counted each time, and their bytes.
+        var includedReads = 0
+        var includedBytes = 0
     }
 
     /// Where one project's files are read: the including project, or an included one.
@@ -49,6 +52,8 @@ extension ComposeLoader {
         var chain: [String]
         /// Whether this is an included project, whose services keep its own variables.
         var isIncluded = false
+        /// How many includes lead here from the files compose was given.
+        var depth = 0
         let state = ReadingState()
     }
 
@@ -160,6 +165,17 @@ extension ComposeLoader {
                 throw ComposeError(path: "include", "the files include each other: \(cycle.joined(separator: " includes "))", at: include.location)
             }
         }
+        // After the cycle, which is the more useful thing to be told, and before anything is
+        // read: the limits are on the work, not on what a file that was read turns out to hold.
+        guard reading.depth < ComposeInput.maximumIncludeDepth else {
+            throw ComposeError(
+                path: "include", "include is nested more than \(ComposeInput.maximumIncludeDepth) files deep", at: include.location)
+        }
+        reading.state.includedReads += files.count
+        guard reading.state.includedReads <= ComposeInput.maximumIncludedFiles else {
+            throw ComposeError(
+                path: "include", "the project includes more than \(ComposeInput.maximumIncludedFiles) files", at: include.location)
+        }
         let directory = include.projectDirectory.map { resolve($0, against: base) } ?? files[0].deletingLastPathComponent()
 
         var own: [String: String] = [:]
@@ -178,7 +194,14 @@ extension ComposeLoader {
         }
         own.merge(variables) { _, including in including }
 
-        let documents = try files.map { try ComposeNode.parse(yaml: try readText($0.path), file: displayName($0, relativeTo: reading.working)) }
+        let documents = try files.map { file in
+            let text = try readText(file.path)
+            reading.state.includedBytes += text.utf8.count
+            guard reading.state.includedBytes <= ComposeInput.maximumIncludedBytes else {
+                throw ComposeError(path: "include", "the included files exceed the 8 MiB compose input budget", at: include.location)
+            }
+            return try ComposeNode.parse(yaml: text, file: displayName(file, relativeTo: reading.working))
+        }
         for file in files where !reading.state.included.contains(file.path) {
             reading.state.included.append(file.path)
         }
@@ -187,6 +210,7 @@ extension ComposeLoader {
             projectDirectory: directory, homeDirectory: reading.context.homeDirectory, diagnostics: reading.context.diagnostics)
         inner.chain += files.map(\.path)
         inner.isIncluded = true
+        inner.depth += 1
         return try model(documents, variables: own, in: inner)
     }
 
