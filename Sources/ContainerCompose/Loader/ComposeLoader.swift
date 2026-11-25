@@ -247,8 +247,20 @@ public enum ComposeLoader {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            throw ComposeError("\(path) could not be read: \(error.localizedDescription)")
+            var failure = ComposeError("\(path) could not be read: \(error.localizedDescription)")
+            if isDenial(error) { failure.deniedPath = path }
+            throw failure
         }
+    }
+
+    /// Whether a read failed because the system would not let this process open the file,
+    /// and not because of what the file is.
+    static func isDenial(_ error: Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain, error.code == NSFileReadNoPermissionError { return true }
+        if error.domain == NSPOSIXErrorDomain, error.code == Int(EACCES) || error.code == Int(EPERM) { return true }
+        guard let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError else { return false }
+        return isDenial(underlying)
     }
 
     /// The path to show in messages: as short as the user would have typed it.

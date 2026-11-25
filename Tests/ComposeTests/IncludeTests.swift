@@ -280,6 +280,16 @@ struct IncludeTests {
         } catch let error as ComposeError {
             #expect(error.deniedPath == "\(project.path)/closed/inc.yaml")
         }
+        // The same when the folder can be looked into and the file itself cannot be opened.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: "\(project.path)/closed")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(project.path)/closed/inc.yaml")
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: "\(project.path)/closed/inc.yaml") }
+        do {
+            _ = try project.load(files: ["locked.yaml"])
+            Issue.record("a file that may not be opened was loaded")
+        } catch let error as ComposeError {
+            #expect(error.deniedPath == "\(project.path)/closed/inc.yaml")
+        }
         // A file that is not there is not one to ask for.
         try project.write("include: [nowhere/inc.yaml]\nservices:\n  a: {image: a}\n", to: "absent.yaml")
         do {
