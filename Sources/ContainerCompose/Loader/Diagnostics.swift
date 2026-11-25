@@ -134,6 +134,10 @@ public struct ComposeError: Error, Sendable, CustomStringConvertible, LocalizedE
     public var namedProfiles: [String] = []
     /// The profiles that were on for that read, when it got far enough to know.
     public var activeProfiles: [String]?
+    /// The file the system would not let this process look at, when that is the whole of the
+    /// refusal: an included file or its env file outside what a sandboxed embedder may read.
+    /// The embedder can ask for that file's folder and load again.
+    public var deniedPath: String?
 
     public init(_ diagnostics: [ComposeDiagnostic]) {
         self.diagnostics = diagnostics

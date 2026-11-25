@@ -124,7 +124,9 @@ from `env_file`, with the including project's variables on top. An included file
 include others. The paths in an `include` entry are relative to the project directory, and
 may use variables. What a file says of a service, a network or a volume merges
 over what a file it includes says of it. A compose file fetched from a registry or a
-repository (`oci://`, `https://`) is not read.
+repository (`oci://`, `https://`) is not read. Includes nest at most 32 files deep, and one
+project reads at most 256 included files, a file counted each time it is included, of 8 MiB
+together; past any of these the project is refused.
 
 `container compose config` prints the project the files come to, and
 `container compose config --commands` prints the `container` commands that would make it

@@ -25,6 +25,14 @@ enum ComposeInput {
     private static let maximumNodes = 100_000
     private static let maximumDepth = 64
     static let maximumExpandedBytes = 8 * maximumBytes
+    /// How deep `include` may nest. Each level is a call deeper on the thread that loads the
+    /// project, and that thread's stack is the app's own when it opens a file.
+    static let maximumIncludeDepth = 32
+    /// How many files one load may read through `include`, counting a file again each time it
+    /// is included: a file included twice by each of a few levels is read thousands of times.
+    static let maximumIncludedFiles = 256
+    /// How many bytes those files may come to together.
+    static let maximumIncludedBytes = 8 * maximumBytes
 
     private struct Cost {
         var nodes = 1
