@@ -273,6 +273,21 @@ struct IncludeTests {
             loadFailure { try project.load(files: ["locked.yaml"]) } == [
                 "locked.yaml:1:11: include: \(project.path)/closed/inc.yaml could not be read: Permission denied"
             ])
+        // The refusal names the file, for an embedder that can ask for its folder.
+        do {
+            _ = try project.load(files: ["locked.yaml"])
+            Issue.record("a file that may not be looked at was loaded")
+        } catch let error as ComposeError {
+            #expect(error.deniedPath == "\(project.path)/closed/inc.yaml")
+        }
+        // A file that is not there is not one to ask for.
+        try project.write("include: [nowhere/inc.yaml]\nservices:\n  a: {image: a}\n", to: "absent.yaml")
+        do {
+            _ = try project.load(files: ["absent.yaml"])
+            Issue.record("a missing file was loaded")
+        } catch let error as ComposeError {
+            #expect(error.deniedPath == nil)
+        }
     }
 
     @Test

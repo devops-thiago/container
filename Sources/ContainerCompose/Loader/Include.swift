@@ -222,7 +222,9 @@ extension ComposeLoader {
         guard stat(path, &status) != 0 else { return true }
         let code = errno
         guard code == EACCES || code == EPERM else { return false }
-        throw ComposeError(path: "include", "\(path) could not be read: \(String(cString: strerror(code)))", at: location)
+        var denied = ComposeError(path: "include", "\(path) could not be read: \(String(cString: strerror(code)))", at: location)
+        denied.deniedPath = path
+        throw denied
     }
 }
 
