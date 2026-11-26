@@ -509,6 +509,8 @@ public actor DockerEventBus {
     public static func dockerEvent(_ event: ContainerEvent, actorID: String) -> DockerEvent? {
         var attributes = attributes(event)
         let action: String
+        // What is under way is the engine's own to say: dockerd has no event for it.
+        guard !event.action.isProgress else { return nil }
         switch event.action {
         case .healthStatus:
             guard let health = event.health else { return nil }

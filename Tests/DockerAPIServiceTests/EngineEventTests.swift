@@ -280,6 +280,35 @@ struct EngineEventTests {
         await bus.shutdown()
     }
 
+    @Test("what the engine says is under way is not an event of Docker's: a client sees the create, start, die and stop around it, and nothing else")
+    func progressIsNotDockers() async throws {
+        for action in [ContainerEvent.Action.starting, .startFailed, .stopping, .stopFailed] {
+            let event = ContainerEvent(
+                sequence: 1, timeNano: 1_700_000_000_000_000_000, id: "abc123def456", incarnation: "inc-1", action: action, name: "web",
+                image: "docker.io/library/nginx:latest", labels: Self.labels)
+            #expect(DockerEventBus.dockerEvent(event) == nil)
+            #expect(DockerEventBus.dockerEvent(event, actorID: "abc123def456") == nil, "container events prints with the engine's ID")
+        }
+        let feed = Feed()
+        let (bus, collector) = try await Self.followingBus(feed)
+        feed.send(.create)
+        feed.send(.starting)
+        feed.send(.start)
+        feed.send(.stopping)
+        feed.send(.kill)
+        feed.send(.stopFailed)
+        feed.send(.stopping)
+        feed.send(.kill)
+        feed.send(.die, exitCode: 143)
+        feed.send(.stop)
+        feed.send(.starting)
+        feed.send(.startFailed)
+        let events = await collector.take(6)
+        #expect(events.map(\.action) == ["create", "start", "kill", "kill", "die", "stop"])
+        #expect(await collector.settle().isEmpty)
+        await bus.shutdown()
+    }
+
     @Test("what this service does to a container is the engine's to say while it follows the engine, but restart and other types are still its own")
     func noDuplicates() async throws {
         let feed = Feed()

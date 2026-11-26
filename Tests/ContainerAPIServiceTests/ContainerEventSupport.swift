@@ -42,11 +42,16 @@ final class EventCollector: Sendable {
     private let taken = Mutex(0)
     private let task: Task<Void, Never>
 
-    init(_ stream: AsyncThrowingStream<ContainerEvent, any Error>) {
+    /// - Parameter progress: whether to keep what the engine says is under way (`starting`,
+    ///   `stopping` and how they ended) with the changes Docker has an event for. Most tests
+    ///   are about the latter, and count them.
+    init(_ stream: AsyncThrowingStream<ContainerEvent, any Error>, progress: Bool = false) {
         let received = self.received
         task = Task {
             do {
-                for try await event in stream { received.events.withLock { $0.append(event) } }
+                for try await event in stream where progress || !event.action.isProgress {
+                    received.events.withLock { $0.append(event) }
+                }
                 received.ending.withLock { $0 = (true, nil) }
             } catch {
                 received.ending.withLock { $0 = (true, String(describing: error)) }
@@ -55,8 +60,8 @@ final class EventCollector: Sendable {
     }
 
     /// Reads the read end of a hub subscription.
-    convenience init(_ subscription: ContainerEventHub.Subscription) {
-        self.init(ContainerEventLines.events(from: subscription.handle.fileDescriptor))
+    convenience init(_ subscription: ContainerEventHub.Subscription, progress: Bool = false) {
+        self.init(ContainerEventLines.events(from: subscription.handle.fileDescriptor), progress: progress)
     }
 
     deinit { task.cancel() }
@@ -128,6 +133,10 @@ final class FakeRuntime: Sendable {
         /// Starts of processes with these IDs are not answered until `releaseHeldStarts()`, as
         /// a guest that is out of memory does not answer an exec.
         var holdStarts: Set<String> = []
+        /// The start of the container's own process is refused.
+        var refusesStart = false
+        /// A stop is refused, and the process runs on.
+        var refusesStop = false
     }
 
     private struct State {
@@ -184,6 +193,7 @@ final class FakeRuntime: Sendable {
                     }
                     return message.reply()
                 }
+                if behavior.refusesStart { throw ContainerizationError(.internalError, message: "fake runtime refuses the start") }
                 if let code = behavior.exitOnStart { Self.exit(shared, code) }
                 return message.reply()
             },
@@ -219,6 +229,7 @@ final class FakeRuntime: Sendable {
                 return reply
             },
             RuntimeRoutes.stop.rawValue: XPCServer.route { message in
+                if behavior.refusesStop { throw ContainerizationError(.internalError, message: "fake runtime refuses the stop") }
                 if let code = behavior.exitOnStop { Self.exit(shared, code) }
                 return message.reply()
             },
