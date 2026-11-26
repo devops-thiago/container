@@ -765,16 +765,19 @@ public actor ContainersService {
         }
         try await self.restoreHostDirectoryAccess(
             for: id, configuration: config, at: path, supplied: hostDirectoryBookmarks, askEmbedder: askEmbedder, requester: requester)
-
-        var networkBootstrapInfos = [NetworkBootstrapInfo]()
-        for n in config.networks {
-            guard let plugin = try await self.networksService?.plugin(for: n.network) else {
-                throw ContainerizationError(.internalError, message: "failed to get plugin for network \(n.network)")
-            }
-            networkBootstrapInfos.append(NetworkBootstrapInfo(plugin: plugin))
-        }
+        // From here the start is under way, and whoever shows the container says so until
+        // `start`, or until `start_failed` below.
+        self.emit(.starting, state.snapshot)
 
         do {
+            var networkBootstrapInfos = [NetworkBootstrapInfo]()
+            for n in config.networks {
+                guard let plugin = try await self.networksService?.plugin(for: n.network) else {
+                    throw ContainerizationError(.internalError, message: "failed to get plugin for network \(n.network)")
+                }
+                networkBootstrapInfos.append(NetworkBootstrapInfo(plugin: plugin))
+            }
+
             let plugin = self.runtimePlugins.first { $0.name == config.runtimeHandler }!
             let runtimeClient: RuntimeClient
             if let launchRuntime = self.hooks.launchRuntime {
@@ -835,6 +838,7 @@ public actor ContainersService {
                 try? self.deregister(label)
             }
             self.pendingCopies.release(id)
+            self.emit(.startFailed, state.snapshot)
             throw error
         }
     }
@@ -946,7 +950,12 @@ public actor ContainersService {
         }
 
         let client = try state.getClient()
-        try await client.startProcess(id)
+        do {
+            try await client.startProcess(id)
+        } catch {
+            self.emit(.startFailed, state.snapshot)
+            throw error
+        }
 
         do {
             let log = self.log
@@ -987,6 +996,7 @@ public actor ContainersService {
         } catch {
             await self.exitMonitor.stopTracking(id: id)
             try? await client.stop(options: ContainerStopOptions.default)
+            self.emit(.startFailed, state.snapshot)
             throw error
         }
     }
@@ -1160,13 +1170,17 @@ public actor ContainersService {
             resolvedOptions.signal = stopSignal
         }
 
+        // From here the stop is under way, until `stop`, or `stop_failed` when the runtime
+        // would not carry it out.
+        self.emit(.stopping, state.snapshot)
         self.emit(.kill, state.snapshot, attributes: ["signal": resolvedOptions.signal ?? "SIGTERM"])
         do {
             try await client.stop(options: resolvedOptions, responseTimeout: responseTimeout)
-        } catch let err as ContainerizationError {
-            if err.code != .interrupted {
-                throw err
-            }
+        } catch let err as ContainerizationError where err.code == .interrupted {
+            // The connection ended with the container, which is what a stop is for.
+        } catch {
+            self.emit(.stopFailed, state.snapshot)
+            throw error
         }
         // The helper keeps the exit of the process the stop ended, which is the exit a client
         // sees on the container's `die` and from a wait after it, as Docker gives 143 or 137.

@@ -61,6 +61,27 @@ public struct ContainerEvent: Codable, Sendable, Equatable {
         public static let kill = Action(rawValue: "kill")
         /// A stop asked of it is done.
         public static let stop = Action(rawValue: "stop")
+
+        // What is under way, between the events above. Not Docker's: dockerd has no event
+        // for them, so `docker events` and `container events` leave them out, and a client
+        // that shows a container as it changes reads them here.
+
+        /// A start is under way: the container's machine is being brought up. `start`
+        /// follows when its process runs, `start_failed` when it does not come to that.
+        public static let starting = Action(rawValue: "starting")
+        /// A start that was under way ended without the process running.
+        public static let startFailed = Action(rawValue: "start_failed")
+        /// A stop is under way: its signal is about to be sent. `die` and `stop` follow, or
+        /// `stop_failed` when the stop could not be carried out.
+        public static let stopping = Action(rawValue: "stopping")
+        /// A stop that was under way ended without the container having been stopped by it.
+        public static let stopFailed = Action(rawValue: "stop_failed")
+
+        /// Whether this says what is under way, or how that ended, rather than a change
+        /// Docker reports.
+        public var isProgress: Bool {
+            [Self.starting, .startFailed, .stopping, .stopFailed].contains(self)
+        }
     }
 
     /// Counts the events of one API server process from 1, with no gaps. A client that

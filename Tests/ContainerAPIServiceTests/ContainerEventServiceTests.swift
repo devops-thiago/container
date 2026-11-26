@@ -274,7 +274,8 @@ struct ContainerEventServiceTests {
 
     @Test("the route: a subscriber that reconnects with its cursor gets what it missed, and one too far behind is told of a gap")
     func routeReplayAndGap() async throws {
-        let f = EventServiceFixture(limits: .init(replayed: 4))
+        // Five are kept: what a start and a forced delete say, the start's `starting` with them.
+        let f = EventServiceFixture(limits: .init(replayed: 5))
         defer { f.cleanup() }
         let service = try f.service()
         let log = Logger(label: "ContainerEventServiceTests")
@@ -305,9 +306,9 @@ struct ContainerEventServiceTests {
         try await service.delete(id: a.id, force: true)
         let resumed = try await client.events(since: cursor)
         #expect(!resumed.gap)
-        let replay = EventCollector(resumed.events)
-        let missed = await replay.take(4)
-        #expect(EventCollector.actions(missed) == ["start", "kill", "die", "destroy"])
+        let replay = EventCollector(resumed.events, progress: true)
+        let missed = await replay.take(5)
+        #expect(EventCollector.actions(missed) == ["starting", "start", "kill", "die", "destroy"])
         #expect(missed.first?.sequence == cursor.sequence + 1)
 
         // Further behind than is kept: a gap, and the cursor to resume from.
@@ -341,5 +342,101 @@ struct ContainerEventServiceTests {
         #expect(capabilities.contains(APIServerCapability.containerEvents.rawValue))
         // The control: an older server says nothing, which reads as no capabilities.
         #expect(APIServerCapability.decode(nil).isEmpty)
+    }
+
+    // MARK: What is under way
+
+    @Test("a start says starting before start, and a stop says stopping before its kill")
+    func progressOfAStartAndAStop() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        let configuration = f.configuration()
+        let incarnation = try await f.create(service, configuration)
+        try await f.start(service, configuration.id)
+        #expect(EventCollector.actions(await reader.take(3)) == ["create", "starting", "start"])
+        try await service.stop(id: configuration.id, options: .default)
+        let stopped = await reader.take(4)
+        #expect(EventCollector.actions(stopped) == ["stopping", "kill", "die", "stop"])
+        #expect(stopped.allSatisfy { $0.id == configuration.id && $0.incarnation == incarnation })
+        #expect(await reader.settle().isEmpty)
+    }
+
+    @Test("a start whose machine cannot be brought up says starting, then start_failed, each once")
+    func progressOfAStartThatCannotBoot() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        f.failNextLaunch.withLock { $0 = true }
+        await #expect(throws: (any Error).self) { try await f.start(service, configuration.id) }
+        #expect(EventCollector.actions(await reader.take(2)) == ["starting", "start_failed"])
+        #expect(await reader.settle().isEmpty)
+        try await f.start(service, configuration.id)
+        #expect(EventCollector.actions(await reader.take(2)) == ["starting", "start"])
+    }
+
+    @Test("a start whose process the runtime refuses says start_failed, and no start")
+    func progressOfAStartTheRuntimeRefuses() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        f.behave(FakeRuntime.Behavior(refusesStart: true))
+        let service = try f.service()
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        await #expect(throws: (any Error).self) { try await f.start(service, configuration.id) }
+        let events = await reader.take(2)
+        #expect(EventCollector.actions(events) == ["starting", "start_failed"])
+        #expect(!EventCollector.actions(await reader.settle()).contains("start"))
+    }
+
+    @Test("a stop the runtime refuses says stopping and kill, then stop_failed, and the container still runs")
+    func progressOfAStopTheRuntimeRefuses() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        f.behave(FakeRuntime.Behavior(refusesStop: true))
+        let service = try f.service()
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        try await f.start(service, configuration.id)
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        await #expect(throws: (any Error).self) { try await service.stop(id: configuration.id, options: .default) }
+        #expect(EventCollector.actions(await reader.take(3)) == ["stopping", "kill", "stop_failed"])
+        #expect(await reader.settle().isEmpty)
+        #expect(try await service.list().first?.status == .running)
+    }
+
+    @Test("a restart the engine makes for a restart policy says starting again before its start")
+    func progressOfARestart() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        let configuration = f.configuration(restartPolicy: .always)
+        try await f.create(service, configuration)
+        try await f.start(service, configuration.id)
+        f.lastRuntime?.exit(1)
+        #expect(EventCollector.actions(await reader.take(6)) == ["create", "starting", "start", "die", "starting", "start"])
+    }
+
+    @Test("what is under way is numbered with every other event, so a reader resumes after it")
+    func progressIsNumbered() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let reader = EventCollector(try f.hub.subscribe(since: nil), progress: true)
+        let configuration = f.configuration()
+        try await f.create(service, configuration)
+        try await f.start(service, configuration.id)
+        let events = await reader.take(3)
+        #expect(events.map(\.sequence) == [1, 2, 3])
+        let starting = try #require(events.first { $0.action == .starting })
+        let later = try f.hub.subscribe(since: ContainerEventCursor(processNonce: f.hub.processNonce, sequence: starting.sequence))
+        #expect(!later.gap)
+        #expect(EventCollector.actions(await EventCollector(later, progress: true).take(1)) == ["start"])
     }
 }
