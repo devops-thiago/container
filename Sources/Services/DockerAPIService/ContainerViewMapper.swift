@@ -64,7 +64,8 @@ public enum ContainerViewMapper {
     }
 
     static func hasRun(_ snapshot: ContainerSnapshot) -> Bool {
-        snapshot.startedDate != nil || snapshot.exitCode != nil || snapshot.exitedAt != nil
+        // The last is what an engine restart keeps of a run whose end it did not record.
+        snapshot.startedDate != nil || snapshot.exitCode != nil || snapshot.exitedAt != nil || snapshot.hasBeenStarted == true
     }
 
     /// Whether `docker ps` without `-a` lists it: dockerd counts a restarting container as

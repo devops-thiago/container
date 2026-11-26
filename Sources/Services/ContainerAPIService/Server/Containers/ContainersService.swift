@@ -308,7 +308,8 @@ public actor ContainersService {
                         restartCount: restartRecord.restartCount,
                         // What the run's end recorded; a container that never ran was not stopped.
                         stopRequested: exit.map { $0.stopRequested } ?? false,
-                        oomKilled: exit.map { $0.oomKilled } ?? false
+                        oomKilled: exit.map { $0.oomKilled } ?? false,
+                        hasBeenStarted: restartRecord.hasBeenStarted
                     ),
                     restartRecord: restartRecord
                 )
@@ -578,7 +579,8 @@ public actor ContainersService {
                         status: .stopped,
                         networks: [],
                         startedDate: nil,
-                        stopRequested: false
+                        stopRequested: false,
+                        hasBeenStarted: false
                     )
                     guard
                         await self.hostDirectoryAccess.resolve(
@@ -769,15 +771,21 @@ public actor ContainersService {
         // `start`, or until `start_failed` below.
         self.emit(.starting, state.snapshot)
 
+        var networkBootstrapInfos = [NetworkBootstrapInfo]()
         do {
-            var networkBootstrapInfos = [NetworkBootstrapInfo]()
             for n in config.networks {
                 guard let plugin = try await self.networksService?.plugin(for: n.network) else {
                     throw ContainerizationError(.internalError, message: "failed to get plugin for network \(n.network)")
                 }
                 networkBootstrapInfos.append(NetworkBootstrapInfo(plugin: plugin))
             }
+        } catch {
+            // Nothing was launched or taken for this start yet, so there is nothing to undo.
+            self.emit(.startFailed, state.snapshot)
+            throw error
+        }
 
+        do {
             let plugin = self.runtimePlugins.first { $0.name == config.runtimeHandler }!
             let runtimeClient: RuntimeClient
             if let launchRuntime = self.hooks.launchRuntime {
@@ -988,6 +996,7 @@ public actor ContainersService {
             }
             let firstStart = !state.restartRecord.hasBeenStarted
             state.restartRecord.hasBeenStarted = true
+            state.snapshot.hasBeenStarted = true
             await self.setContainerState(id, state, context: context)
             self.emit(.start, state.snapshot)
             if firstStart {
