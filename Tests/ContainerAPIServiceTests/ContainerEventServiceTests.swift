@@ -439,4 +439,27 @@ struct ContainerEventServiceTests {
         #expect(!later.gap)
         #expect(EventCollector.actions(await EventCollector(later, progress: true).take(1)) == ["start"])
     }
+
+    @Test("a container that was started says so in its snapshot, and still does to an engine that starts again without its exit")
+    func startedIsKeptAcrossAnEngineRestart() async throws {
+        let f = EventServiceFixture()
+        defer { f.cleanup() }
+        let service = try f.service()
+        let ran = f.configuration()
+        let made = f.configuration()
+        try await f.create(service, ran)
+        try await f.create(service, made)
+        #expect(try await service.list().allSatisfy { $0.hasBeenStarted == false })
+        try await f.start(service, ran.id)
+        #expect(try await service.list().first { $0.id == ran.id }?.hasBeenStarted == true)
+
+        // The engine goes with the container running: no exit is recorded for the run.
+        let again = try f.service()
+        let listed = try await again.list()
+        let afterRun = try #require(listed.first { $0.id == ran.id })
+        #expect(afterRun.status == .stopped)
+        #expect(afterRun.startedDate == nil && afterRun.exitCode == nil)
+        #expect(afterRun.hasBeenStarted == true)
+        #expect(listed.first { $0.id == made.id }?.hasBeenStarted == false)
+    }
 }

@@ -39,6 +39,12 @@ struct ContainerViewMapperTests {
         // Control: stopped with no sign of a run is only created.
         #expect(ContainerViewMapper.status(Fixtures.snapshot(configuration, status: .stopped, started: nil)) == .created)
         #expect(ContainerViewMapper.status(Fixtures.snapshot(configuration, status: .unknown, started: nil)) == .created)
+        // What an engine that started again keeps of a run whose end it did not record.
+        var kept = Fixtures.snapshot(configuration, status: .stopped, started: nil)
+        kept.hasBeenStarted = true
+        #expect(ContainerViewMapper.status(kept) == .exited)
+        kept.hasBeenStarted = false
+        #expect(ContainerViewMapper.status(kept) == .created)
         #expect(ContainerViewMapper.isRunning(Fixtures.snapshot(configuration, status: .restarting)))
         #expect(!ContainerViewMapper.isRunning(Fixtures.snapshot(configuration, status: .stopped)))
     }

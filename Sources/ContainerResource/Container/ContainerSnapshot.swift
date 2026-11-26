@@ -81,6 +81,12 @@ public struct ContainerSnapshot: Codable, Sendable {
     /// from a start until then. Nil from an engine that does not say, and in snapshots or exit
     /// records written before it did.
     public var oomKilled: Bool?
+    /// Whether the container's process has ever been started, in this run of the engine or
+    /// an earlier one. The start time and the exit of a run are not always kept across an
+    /// engine restart; this is, so a container that ran and one that was only made can be
+    /// told apart, as Docker tells "exited" from "created". Nil from an engine that does not
+    /// say.
+    public var hasBeenStarted: Bool?
 
     public init(
         configuration: ContainerConfiguration,
@@ -94,7 +100,8 @@ public struct ContainerSnapshot: Codable, Sendable {
         restartError: String? = nil,
         health: ContainerHealth? = nil,
         stopRequested: Bool? = nil,
-        oomKilled: Bool? = nil
+        oomKilled: Bool? = nil,
+        hasBeenStarted: Bool? = nil
     ) {
         self.configuration = configuration
         self.incarnation = incarnation
@@ -108,6 +115,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         self.health = health
         self.stopRequested = stopRequested
         self.oomKilled = oomKilled
+        self.hasBeenStarted = hasBeenStarted
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -123,6 +131,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         case health
         case stopRequested
         case oomKilled
+        case hasBeenStarted
     }
 
     public init(from decoder: any Decoder) throws {
@@ -141,6 +150,7 @@ public struct ContainerSnapshot: Codable, Sendable {
         health = try container.decodeIfPresent(ContainerHealth.self, forKey: .health)
         stopRequested = try container.decodeIfPresent(Bool.self, forKey: .stopRequested)
         oomKilled = try container.decodeIfPresent(Bool.self, forKey: .oomKilled)
+        hasBeenStarted = try container.decodeIfPresent(Bool.self, forKey: .hasBeenStarted)
     }
 }
 
