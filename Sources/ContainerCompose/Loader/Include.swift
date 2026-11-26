@@ -38,7 +38,8 @@ extension ComposeLoader {
         var expandedBytes = 0
         /// The files brought in by `include`, in the order they were read.
         var included: [String] = []
-        /// How many files `include` has read, a file counted each time, and their bytes.
+        /// How many files `include` has read, compose files and env files, a file counted
+        /// each time, and their bytes.
         var includedReads = 0
         var includedBytes = 0
     }
@@ -181,14 +182,27 @@ extension ComposeLoader {
         var own: [String: String] = [:]
         let named = include.envFiles?.map { resolve($0, against: base).path }
         for path in named ?? [directory.appendingPathComponent(".env").path] {
+            try Task.checkCancellation()
             guard try exists(path, at: include.location) else {
                 guard named == nil else {
                     throw ComposeError(path: "include", "the env file \(path) does not exist", at: include.location)
                 }
                 continue
             }
+            // An env file is a file an include reads, and one named again is read again: it
+            // counts as a compose file does, before it is parsed.
+            reading.state.includedReads += 1
+            guard reading.state.includedReads <= ComposeInput.maximumIncludedFiles else {
+                throw ComposeError(
+                    path: "include", "the project includes more than \(ComposeInput.maximumIncludedFiles) files", at: include.location)
+            }
+            let text = try readText(path)
+            reading.state.includedBytes += text.utf8.count
+            guard reading.state.includedBytes <= ComposeInput.maximumIncludedBytes else {
+                throw ComposeError(path: "include", "the included files exceed the 8 MiB compose input budget", at: include.location)
+            }
             let known = own
-            for entry in try DotEnv.parse(try readText(path), file: path, lookup: { variables[$0] ?? known[$0] }) {
+            for entry in try DotEnv.parse(text, file: path, lookup: { variables[$0] ?? known[$0] }) {
                 if let value = entry.value { own[entry.key] = value }
             }
         }
@@ -218,13 +232,14 @@ extension ComposeLoader {
     /// an error, not an absent file: read as absent, an included project's `.env` would be
     /// left out without a word, and the project would run with other values.
     private static func exists(_ path: String, at location: SourceLocation) throws -> Bool {
-        var status = stat()
-        guard stat(path, &status) != 0 else { return true }
-        let code = errno
-        guard code == EACCES || code == EPERM else { return false }
-        var denied = ComposeError(path: "include", "\(path) could not be read: \(String(cString: strerror(code)))", at: location)
-        denied.deniedPath = path
-        throw denied
+        switch presence(of: path) {
+        case .present: return true
+        case .absent: return false
+        case .denied(let reason):
+            var denied = ComposeError(path: "include", "\(path) could not be read: \(reason)", at: location)
+            denied.deniedPath = path
+            throw denied
+        }
     }
 }
 
