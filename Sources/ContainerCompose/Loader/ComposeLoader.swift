@@ -161,9 +161,16 @@ public enum ComposeLoader {
         let explicit = options.envFiles.map { resolve($0, against: working).path }
         let defaultFile = directory.appendingPathComponent(".env").path
         for path in explicit.isEmpty ? [defaultFile] : explicit {
-            guard FileManager.default.fileExists(atPath: path) else {
+            switch presence(of: path) {
+            case .present:
+                break
+            case .absent:
                 guard explicit.isEmpty else { throw ComposeError("the env file \(path) does not exist") }
                 continue
+            case .denied(let reason):
+                var denied = ComposeError("\(path) could not be read: \(reason)")
+                denied.deniedPath = path
+                throw denied
             }
             let text = try readText(path)
             let known = variables
@@ -251,6 +258,26 @@ public enum ComposeLoader {
             if isDenial(error) { failure.deniedPath = path }
             throw failure
         }
+    }
+
+    /// Whether there is a file at a path, as far as this process may know.
+    enum Presence: Equatable {
+        case present
+        case absent
+        /// The system would not say: the file, or a folder on the way to it, is closed to
+        /// this process. With the system's reason.
+        case denied(String)
+    }
+
+    /// A file that may not be looked at is not an absent one. Read as absent, an env file
+    /// would be left out without a word and the project would run with other values, and
+    /// an embedder that could ask for the file's folder would not know to.
+    static func presence(of path: String) -> Presence {
+        var status = stat()
+        guard stat(path, &status) != 0 else { return .present }
+        let code = errno
+        guard code == EACCES || code == EPERM else { return .absent }
+        return .denied(String(cString: strerror(code)))
     }
 
     /// Whether a read failed because the system would not let this process open the file,

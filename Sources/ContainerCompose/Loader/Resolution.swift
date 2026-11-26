@@ -26,7 +26,6 @@ struct Resolver {
     let environment: [String: String]
     /// Reads a file's text. A seam for tests; the default reads from disk.
     var read: (String) throws -> String = { try ComposeInput.read($0) }
-    var fileManager = FileManager.default
 
     private var diagnostics: DiagnosticCollector { context.diagnostics }
 
@@ -170,10 +169,18 @@ struct Resolver {
     private func environment(of raw: RawService, path: String) -> [String: String] {
         var result: [String: String] = [:]
         for file in raw.envFiles ?? [] {
-            guard fileManager.fileExists(atPath: file.path) else {
+            // Only a file that is not there is skipped when it is not required. One the
+            // system keeps closed is an error either way, and says which file it is.
+            switch ComposeLoader.presence(of: file.path) {
+            case .present:
+                break
+            case .absent:
                 if file.required {
                     diagnostics.error("\(path).env_file", "\(file.path) does not exist", at: file.location)
                 }
+                continue
+            case .denied(let reason):
+                diagnostics.error("\(path).env_file", "\(file.path) could not be read: \(reason)", at: file.location, denied: file.path)
                 continue
             }
             do {
@@ -187,7 +194,9 @@ struct Resolver {
                     diagnostics.error("\(path).env_file", diagnostic.message, at: diagnostic.location ?? file.location)
                 }
             } catch {
-                diagnostics.error("\(path).env_file", "\(file.path) could not be read: \(error.localizedDescription)", at: file.location)
+                diagnostics.error(
+                    "\(path).env_file", "\(file.path) could not be read: \(error.localizedDescription)", at: file.location,
+                    denied: ComposeLoader.isDenial(error) ? file.path : nil)
             }
         }
         for (key, value) in raw.environment ?? [:] {

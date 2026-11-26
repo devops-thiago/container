@@ -134,9 +134,9 @@ public struct ComposeError: Error, Sendable, CustomStringConvertible, LocalizedE
     public var namedProfiles: [String] = []
     /// The profiles that were on for that read, when it got far enough to know.
     public var activeProfiles: [String]?
-    /// The file the system would not let this process look at, when that is the whole of the
-    /// refusal: an included file or its env file outside what a sandboxed embedder may read.
-    /// The embedder can ask for that file's folder and load again.
+    /// The file the system would not let this process look at: an included file or an env
+    /// file outside what a sandboxed embedder may read. The embedder can ask for that file's
+    /// folder and load again. The first such file, when the refusal names more than one.
     public var deniedPath: String?
 
     public init(_ diagnostics: [ComposeDiagnostic]) {
@@ -162,13 +162,18 @@ final class DiagnosticCollector {
     private var part: ComposePart?
     /// The part each diagnostic is about, for the ones that are about one.
     private var parts: [ComposeDiagnostic: ComposePart] = [:]
+    /// The file each error is about, for the ones about a file the system kept closed.
+    private var deniedPaths: [ComposeDiagnostic: String] = [:]
 
     func warn(_ path: String, _ message: String, at location: SourceLocation? = nil) {
         add(ComposeDiagnostic(severity: .warning, path: path, message: message, location: location))
     }
 
-    func error(_ path: String, _ message: String, at location: SourceLocation? = nil) {
-        add(ComposeDiagnostic(severity: .error, path: path, message: message, location: location))
+    /// `denied` is the file the error is about, when the system would not let it be read.
+    func error(_ path: String, _ message: String, at location: SourceLocation? = nil, denied: String? = nil) {
+        let diagnostic = ComposeDiagnostic(severity: .error, path: path, message: message, location: location)
+        add(diagnostic)
+        if let denied, deniedPaths[diagnostic] == nil { deniedPaths[diagnostic] = denied }
     }
 
     /// Take a diagnostic as it is: one found earlier, about something that is used after all.
@@ -209,7 +214,12 @@ final class DiagnosticCollector {
 
     /// Throw what was found, if any of it stops the project from running.
     func throwIfFailed() throws {
-        guard errors.isEmpty else { throw ComposeError(Self.inFileOrder(errors)) }
+        guard !errors.isEmpty else { return }
+        let ordered = Self.inFileOrder(errors)
+        var failure = ComposeError(ordered)
+        // Of the parts that run only: what is wrong with a part held back is not thrown.
+        failure.deniedPath = ordered.lazy.compactMap { self.deniedPaths[$0] }.first
+        throw failure
     }
 
     /// The diagnostics the way someone reading the files meets them: file by file in the
