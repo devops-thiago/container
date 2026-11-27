@@ -40,13 +40,13 @@ public struct RestartRecord: Codable, Sendable, Equatable {
 
     /// The record for a container created before the engine kept one.
     ///
-    /// Such a container has a recorded exit if it has run: its process ending, by itself or
-    /// because it was stopped, is normally reported with a code. Whether a person stopped it is not known, and the answer
+    /// Whether such a container has run is read from what a run leaves in its bundle (see
+    /// `Bundle.restartRecord`). Whether a person stopped it is not known, and the answer
     /// taken is the one that brings an `unless-stopped` container back: before this record
     /// existed the app started those at engine start, so not doing it once would be the
     /// surprise. An `always` container starts either way.
-    public static func legacy(hasExitRecord: Bool) -> RestartRecord {
-        RestartRecord(stoppedByUser: false, hasBeenStarted: hasExitRecord, restartCount: 0)
+    public static func legacy(hasRun: Bool) -> RestartRecord {
+        RestartRecord(stoppedByUser: false, hasBeenStarted: hasRun, restartCount: 0)
     }
 
     private enum CodingKeys: String, CodingKey {

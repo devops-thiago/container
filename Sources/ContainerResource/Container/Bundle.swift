@@ -202,13 +202,25 @@ extension Bundle {
 
     /// What the restart policy needs to remember about the container across engine
     /// restarts. A bundle written before the engine kept one has no record, and a
-    /// container that has run, which is what its recorded exit shows, is taken to have
-    /// been started and not stopped by the user (see `RestartRecord.legacy`).
+    /// container that has run is taken to have been started and not stopped by the user
+    /// (see `RestartRecord.legacy`).
+    ///
+    /// Two things show that it has run. A recorded exit is one, but it is written only
+    /// when the engine sees the process end: a container still running when the engine went
+    /// down, at an app quit or a crash, has none. The boot log is the other: the virtual
+    /// machine writes it from its first moment, and nothing writes it for a container that
+    /// was only created.
     public var restartRecord: RestartRecord {
         if let record: RestartRecord = try? load(filename: Self.restartRecordFilename) {
             return record
         }
-        return .legacy(hasExitRecord: exitStatus != nil)
+        return .legacy(hasRun: exitStatus != nil || hasBootLog)
+    }
+
+    /// Whether the virtual machine of this container has ever written to its boot log.
+    private var hasBootLog: Bool {
+        let size = (try? bootlog.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        return size > 0
     }
 
     public func setRestartRecord(_ record: RestartRecord) throws {
