@@ -623,7 +623,7 @@ public actor ContainersService {
     func prepareNewRun(id: String) throws -> ContainerState {
         var state = try self._getContainerState(id: id)
         let bundle = ContainerResource.Bundle(path: containerRoot.appendingPathComponent(id))
-        // Old bundles infer hasBeenStarted from the exit file; preserve that migration
+        // Old bundles infer hasBeenStarted from the exit file or the boot log; preserve that migration
         // before removing the file on which it depended.
         try bundle.setRestartRecord(state.restartRecord)
         try bundle.clearExitStatus()

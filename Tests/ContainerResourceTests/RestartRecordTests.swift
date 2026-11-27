@@ -45,6 +45,32 @@ struct RestartRecordTests {
         #expect(bundle.restartRecord == RestartRecord(stoppedByUser: false, hasBeenStarted: true, restartCount: 0))
     }
 
+    @Test("a bundle from before the record that was running when the engine went down: started, by its boot log")
+    func legacyBundleWithoutAnExit() throws {
+        let bundle = try temporaryBundle()
+        defer { try? bundle.delete() }
+        try Data("[    0.000000] Booting Linux\n".utf8).write(to: bundle.bootlog)
+        #expect(bundle.exitStatus == nil)
+        #expect(bundle.restartRecord == RestartRecord(stoppedByUser: false, hasBeenStarted: true, restartCount: 0))
+    }
+
+    @Test("a bundle from before the record with an empty boot log has not been started")
+    func legacyBundleWithAnEmptyBootLog() throws {
+        let bundle = try temporaryBundle()
+        defer { try? bundle.delete() }
+        try Data().write(to: bundle.bootlog)
+        #expect(bundle.restartRecord == RestartRecord(stoppedByUser: false, hasBeenStarted: false, restartCount: 0))
+    }
+
+    @Test("a kept record is not second-guessed by the boot log")
+    func keptRecordWins() throws {
+        let bundle = try temporaryBundle()
+        defer { try? bundle.delete() }
+        try Data("booted\n".utf8).write(to: bundle.bootlog)
+        try bundle.setRestartRecord(RestartRecord())
+        #expect(bundle.restartRecord == RestartRecord(stoppedByUser: false, hasBeenStarted: false, restartCount: 0))
+    }
+
     @Test("a record missing fields reads them as their defaults")
     func partialRecord() throws {
         let decoded = try JSONDecoder().decode(RestartRecord.self, from: Data(#"{"hasBeenStarted":true}"#.utf8))
